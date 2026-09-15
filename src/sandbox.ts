@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, normalize, relative, resolve, sep } from "node:path";
+import type { AgentMode } from "./mode.js";
 
 export type FileOp = "create" | "modify" | "delete" | "exec";
 
@@ -72,8 +73,25 @@ export function writeKind(path: string): Exclude<FileOp, "exec" | "delete"> {
   return existsSync(path) ? "modify" : "create";
 }
 
+export function mutationDenied(
+  mode: AgentMode,
+  workspace: string,
+  path: string,
+  op: FileOp,
+): string | null {
+  const blocked = denyReason(path);
+  if (blocked) return blocked;
+  if (mode === "plan") {
+    return `当前是 Plan 模式，不能${opLabel(op)}。请只给出计划，或让用户输入 /mode ask 或 /mode full 后再执行。`;
+  }
+  if (mode !== "full" && !isInsideWorkspace(workspace, path)) {
+    return `Ask 模式不能在工作区外${opLabel(op)}。路径: ${path}。需要的话请 /mode full。`;
+  }
+  return null;
+}
+
 const READONLY_HEAD =
-  /^(ls|pwd|whoami|date|uname|which|type|file|stat|head|tail|wc|echo|printf|cat|rg|find|tree|du|df|env|id|hostname|realpath|dirname|basename|git\s+(status|log|diff|show|branch|rev-parse|ls-files|blame)(\s|$))/;
+  /^(ls|pwd|whoami|date|uname|which|type|file|stat|head|tail|wc|echo|printf|cat|rg|find|tree|du|df|env|id|hostname|realpath|dirname|basename)(\s|$)/;
 
 export function classifyBash(command: string): { readonly: boolean; op: FileOp } {
   const text = command.trim();
@@ -97,7 +115,8 @@ export function classifyBash(command: string): { readonly: boolean; op: FileOp }
   }
   if (
     /\b(kill|pkill|reboot|shutdown|dd|mkfs|sudo|su)\b/.test(text) ||
-    /\b(curl|wget)\b[\s\S]*\|\s*(ba)?sh\b/.test(text)
+    /\b(curl|wget)\b[\s\S]*\|\s*(ba)?sh\b/.test(text) ||
+    /\bgit\b/.test(text)
   ) {
     return { readonly: false, op: "exec" };
   }
@@ -118,7 +137,12 @@ export function opLabel(op: FileOp) {
   return "执行命令";
 }
 
-export function bashSpawn(command: string): {
+export type BashSandbox = {
+  workspace?: string;
+  confineWrites?: boolean;
+};
+
+export function bashSpawn(command: string, sandbox?: BashSandbox): {
   file: string;
   args: string[];
   fallback?: { file: string; args: string[] };
@@ -127,8 +151,8 @@ export function bashSpawn(command: string): {
   if (process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec")) return direct;
   return {
     file: "/usr/bin/sandbox-exec",
-    args: ["-p", seatbeltProfile(), "/bin/bash", "-c", command],
-    fallback: direct,
+    args: ["-p", seatbeltProfile(sandbox), "/bin/bash", "-c", command],
+    fallback: sandbox?.confineWrites ? undefined : direct,
   };
 }
 
@@ -136,7 +160,7 @@ export function shouldFallbackSandbox(stderr: string, code: number | null) {
   return code === 71 || /sandbox_apply|sandbox-exec:/i.test(stderr);
 }
 
-function seatbeltProfile() {
+function seatbeltProfile(sandbox?: BashSandbox) {
   const home = homedir();
   const writeDirs = [
     ...DENY_WRITE_DIRS,
@@ -152,7 +176,13 @@ function seatbeltProfile() {
     .map((dir) => `(subpath ${sb(dir)})`)
     .join(" ");
   const denySecretFiles = secretFiles.map((file) => `(literal ${sb(file)})`).join(" ");
-  return `(version 1)(allow default)(deny file-write* ${denyWrite})(deny file-read* ${denySecretDirs} ${denySecretFiles})(deny file-write* ${denySecretFiles})`;
+  const secrets = `(deny file-read* ${denySecretDirs} ${denySecretFiles})(deny file-write* ${denySecretFiles})`;
+  if (sandbox?.confineWrites && sandbox.workspace) {
+    const root = normalize(resolve(sandbox.workspace));
+    const tmp = `(subpath "/tmp") (subpath "/private/tmp") (subpath "/var/folders")`;
+    return `(version 1)(allow default)(deny file-write*)(allow file-write* (subpath ${sb(root)}) ${tmp})${secrets}`;
+  }
+  return `(version 1)(allow default)(deny file-write* ${denyWrite})${secrets}`;
 }
 
 function sb(path: string) {

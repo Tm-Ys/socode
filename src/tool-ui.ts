@@ -64,13 +64,14 @@ function tidyResult(text: string) {
     .replace(/\nstderr:\n?$/u, "");
 }
 
-function isToolError(text: string) {
+export function isToolError(text: string) {
   return (
     text.startsWith("工具执行失败") ||
     text.startsWith("未知工具") ||
     text.startsWith("权限拒绝") ||
     text.startsWith("用户拒绝") ||
     text.includes("Plan 模式") ||
+    text.includes("工作区外") ||
     /^exit=[1-9]/m.test(text)
   );
 }

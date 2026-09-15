@@ -5,10 +5,16 @@ import { chatCompletionsUrl, type Provider } from "./provider.js";
 
 export type { ToolCall };
 
+export type TokenUsage = {
+  promptTokens: number;
+  completionTokens: number;
+};
+
 export type ChatResult = {
   content: string;
   toolCalls: ToolCall[];
   finishReason: string;
+  usage?: TokenUsage;
 };
 
 type ChatCompletion = {
@@ -31,6 +37,11 @@ type ChatCompletion = {
     };
   }>;
   error?: { message?: string };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
 };
 
 export async function completeChat(params: {
@@ -64,6 +75,9 @@ export async function completeChat(params: {
       },
     }));
     body.tool_choice = "auto";
+  }
+  if (stream) {
+    body.stream_options = { include_usage: true };
   }
 
   let response: Response;
@@ -168,6 +182,7 @@ async function readJsonReply(
     content,
     toolCalls,
     finishReason: data.choices?.[0]?.finish_reason ?? (toolCalls.length ? "tool_calls" : "stop"),
+    usage: parseUsage(data.usage),
   };
 }
 
@@ -256,6 +271,9 @@ function applySseLine(
     throw new Error(chunk.error.message);
   }
 
+  const usage = parseUsage(chunk.usage);
+  if (usage) result.usage = usage;
+
   const choice = chunk.choices?.[0];
   if (!choice) return;
   if (choice.finish_reason) result.finishReason = choice.finish_reason;
@@ -274,4 +292,20 @@ function applySseLine(
     if (call.function?.arguments) current.arguments += call.function.arguments;
     pending.set(index, current);
   }
+}
+
+function parseUsage(raw?: {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+}): TokenUsage | undefined {
+  if (!raw) return undefined;
+  const promptTokens = Number(raw.prompt_tokens ?? 0);
+  const completionTokens = Number(raw.completion_tokens ?? 0);
+  if (!Number.isFinite(promptTokens) && !Number.isFinite(completionTokens)) return undefined;
+  if (promptTokens <= 0 && completionTokens <= 0) return undefined;
+  return {
+    promptTokens: Math.max(0, promptTokens),
+    completionTokens: Math.max(0, completionTokens),
+  };
 }

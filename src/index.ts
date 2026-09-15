@@ -2,8 +2,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { isTurnAborted } from "./abort.js";
-import { DEFAULT_MAX_AGENT_STEPS, runAgent } from "./agent.js";
+import { isTurnAborted, TurnAborted, TurnFailed } from "./abort.js";
+import { closeIncompleteTrace, DEFAULT_MAX_AGENT_STEPS, runAgent } from "./agent.js";
+import type { TokenUsage } from "./chat.js";
 import { canCompress, compressHistory } from "./compress.js";
 import {
   buildApiMessages,
@@ -171,13 +172,31 @@ function printErr(error: unknown) {
   console.error(`\nerr> ${message}\n`);
 }
 
-async function saveAbortedTurn(
+function failedTurnTrace(error: unknown): Message[] {
+  if (error instanceof TurnAborted || error instanceof TurnFailed) {
+    return closeIncompleteTrace(error.trace);
+  }
+  return [];
+}
+
+async function saveFailedTurn(
   pool: Parameters<typeof saveMessages>[0],
   session: Session,
   user: Message,
+  error: unknown,
 ) {
-  await saveMessages(pool, session.id, [user]);
-  session.messages.push(user);
+  const trace = failedTurnTrace(error);
+  const extra: Message[] = isTurnAborted(error)
+    ? []
+    : [
+        {
+          role: "assistant",
+          content: `本轮失败: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ];
+  const batch = [user, ...trace, ...extra];
+  await saveMessages(pool, session.id, batch);
+  session.messages.push(...batch);
 }
 
 function parseSlash(prompt: string) {
@@ -410,6 +429,7 @@ async function main() {
   await rememberMode(pool, session, mode);
 
   const policy = createPolicy(WORKSPACE, () => mode);
+  let lastUsage: TokenUsage | undefined;
 
   const ask = async (history: Message[], user: Message) => {
     const state = { replied: false };
@@ -460,7 +480,13 @@ async function main() {
     });
     const cols = process.stdout.columns ?? 40;
     const width = Math.max(16, Math.min(48, cols - 2));
-    console.log(`\n${formatContextReport(report, width, Boolean(process.stdout.isTTY))}\n`);
+    console.log(`\n${formatContextReport(report, width, Boolean(process.stdout.isTTY))}`);
+    if (lastUsage) {
+      const prompt = lastUsage.promptTokens.toLocaleString("en-US");
+      const completion = lastUsage.completionTokens.toLocaleString("en-US");
+      console.log(`API 回报  prompt ${prompt}  completion ${completion}`);
+    }
+    console.log("");
   };
 
   const runCompress = async (history: Message[]) => {
@@ -526,7 +552,8 @@ async function main() {
     if (oneShot !== undefined) {
       const user: Message = { role: "user", content: oneShot };
       try {
-        const { reply, trace } = await ask(session.messages, user);
+        const { reply, trace, usage } = await ask(session.messages, user);
+        lastUsage = usage;
         await saveMessages(pool, session.id, [user, ...trace]);
         session.messages.push(user, ...trace);
         if (!reply.endsWith("\n")) process.stdout.write("\n");
@@ -538,8 +565,8 @@ async function main() {
           assistantText: reply,
         });
       } catch (error) {
+        await saveFailedTurn(pool, session, user, error);
         if (isTurnAborted(error)) {
-          await saveAbortedTurn(pool, session, user);
           if (takeForcedQuit()) forceExit(130);
           process.stdout.write("\n已中止\n");
           return;
@@ -620,7 +647,8 @@ async function main() {
 
         const user: Message = { role: "user", content: prompt };
         try {
-          const { reply, trace } = await ask(session.messages, user);
+          const { reply, trace, usage } = await ask(session.messages, user);
+          lastUsage = usage;
           await saveMessages(pool, session.id, [user, ...trace]);
           session.messages.push(user, ...trace);
           process.stdout.write(reply.endsWith("\n") ? "\n" : "\n\n");
@@ -632,8 +660,8 @@ async function main() {
             assistantText: reply,
           });
         } catch (error) {
+          await saveFailedTurn(pool, session, user, error);
           if (isTurnAborted(error)) {
-            await saveAbortedTurn(pool, session, user);
             if (takeForcedQuit()) forceExit(130);
             process.stdout.write("\n已中止\n\n");
             continue;

@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/index.ts",
-    "chat": "tsx src/index.ts"
+    "chat": "tsx src/index.ts",
+    "test": "tsx --test src/*.test.ts"
   },
   "dependencies": {
     "pg": "^8.16.3"

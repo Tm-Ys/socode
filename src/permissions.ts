@@ -5,6 +5,7 @@ import {
   denyReason,
   displayPath,
   isInsideWorkspace,
+  mutationDenied,
   opLabel,
   resolvePath,
   writeKind,
@@ -13,6 +14,7 @@ import {
 
 export type Policy = {
   mode: AgentMode;
+  workspace: string;
   authorize: (name: string, args: Record<string, unknown>) => Promise<string | null>;
 };
 
@@ -23,6 +25,7 @@ export function createPolicy(workspace: string, mode: () => AgentMode): Policy {
     get mode() {
       return mode();
     },
+    workspace,
     async authorize(name, args) {
       const current = mode();
       if (name === "get_current_time" || name === "calculate") return null;
@@ -78,12 +81,8 @@ async function decide(
   grants: Set<string>,
   req: { op: FileOp; path: string; detail: string },
 ): Promise<string | null> {
-  const blocked = denyReason(req.path);
+  const blocked = mutationDenied(mode, workspace, req.path, req.op);
   if (blocked) return blocked;
-
-  if (mode === "plan") {
-    return `当前是 Plan 模式，不能${opLabel(req.op)}。请只给出计划，或让用户输入 /mode ask 或 /mode full 后再执行。`;
-  }
   if (mode === "full") return null;
 
   const inside = isInsideWorkspace(workspace, req.path);

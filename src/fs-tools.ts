@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, normalize } from "node:path";
 import { throwIfAborted, TurnAborted } from "./abort.js";
-import { bashSpawn, denyReason, shouldFallbackSandbox } from "./sandbox.js";
+import { bashSpawn, denyReason, shouldFallbackSandbox, type BashSandbox } from "./sandbox.js";
 
 const MAX_READ_BYTES = 200_000;
 const MAX_OUTPUT_CHARS = 32_000;
@@ -72,11 +72,12 @@ export async function runBash(
   cwd: string,
   timeoutMs = 30_000,
   signal?: AbortSignal,
+  sandbox?: BashSandbox,
 ) {
   const dir = await requireAbsoluteDir(cwd, "cwd");
   if (!command.trim()) throw new Error("缺少 command");
   throwIfAborted(signal);
-  const spec = bashSpawn(command);
+  const spec = bashSpawn(command, sandbox);
   const first = await runBashProcess(spec.file, spec.args, dir, timeoutMs, signal, command);
   if (
     spec.fallback &&

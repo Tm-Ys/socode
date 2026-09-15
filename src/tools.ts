@@ -169,6 +169,12 @@ export async function executeTool(
       if (denied) return denied.startsWith("权限拒绝") ? denied : `权限拒绝: ${denied}`;
     }
     throwIfAborted(signal);
+    if (name === "bash") {
+      return await runBash(str(args, "command"), str(args, "cwd"), 30_000, signal, {
+        workspace: policy?.workspace ?? process.cwd(),
+        confineWrites: policy?.mode !== "full",
+      });
+    }
     return await tool.execute(args, signal);
   } catch (error) {
     if (isTurnAborted(error) || signal?.aborted) throw new TurnAborted();

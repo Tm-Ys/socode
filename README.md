@@ -42,13 +42,13 @@ npm start -- --steps 120 --max 200
 
 ## 权限与沙箱
 
-默认 **Ask**（`MODE=ask` 或 `--mode ask`）。创建、修改、删除文件，以及有副作用的命令，会先询问：`y` 允许、`n` 拒绝、`a` 本会话同类一律允许。Esc 视为拒绝。
+默认 **Ask**（`MODE=ask` 或 `--mode ask`）。工作区内创建、修改、删除文件，以及有副作用的命令，会先询问：`y` 允许、`n` 拒绝、`a` 本会话同类一律允许。Esc 视为拒绝。工作区外的写入直接拒绝，需要 `/mode full`。
 
 - **Full Access**（`/mode full`）：直接改文件和执行命令，仍禁止系统目录和密钥路径（`/etc`、`/usr`、`~/.ssh`、`~/.aws` 等）。
-- **Ask**（`/mode ask`）：写、删、有副作用的 `bash` 先审批；`ls` / `git status` 这类只读命令不打断。
+- **Ask**（`/mode ask`）：写、删、有副作用的 `bash` 和所有 `git` 命令先审批，且只能在工作区内；`ls` 这类只读命令不打断。
 - **Plan**（`/mode plan`）：只能 `read` / `search` 和拟定计划，不能写文件、删文件、执行命令。
 
-macOS 上 `bash` 会套 `sandbox-exec`，拦住对系统目录和密钥文件的读写。非 TTY（例如 `--input`）在 Ask 模式下会拒绝写入，需要 `--mode full`。
+macOS 上 `bash` 会套 `sandbox-exec`。Ask 下只允许写入工作区和临时目录，沙箱起不来就拒绝执行。非 TTY（例如 `--input`）在 Ask 模式下会拒绝写入，需要 `--mode full`。
 
 交互命令：
 

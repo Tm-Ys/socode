@@ -1,7 +1,20 @@
+import type { Message } from "./db.js";
+
 export class TurnAborted extends Error {
-  constructor() {
+  trace: Message[] = [];
+  constructor(trace: Message[] = []) {
     super("已中止");
     this.name = "TurnAborted";
+    this.trace = trace;
+  }
+}
+
+export class TurnFailed extends Error {
+  trace: Message[] = [];
+  constructor(message: string, trace: Message[] = []) {
+    super(message);
+    this.name = "TurnFailed";
+    this.trace = trace;
   }
 }
 
