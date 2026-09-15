@@ -7,6 +7,8 @@ import {
   type LongApproveRequest,
   type LongApprover,
 } from "./long-approve.js";
+import type { McpHub } from "./mcp.js";
+import { isMcpTool } from "./mcp.js";
 import type { SubagentStore } from "./subagent-plan.js";
 import type { TaskStore } from "./task-state.js";
 import {
@@ -33,6 +35,7 @@ export type Policy = {
   role?: "explorer" | "worker";
   subagents?: SubagentStore;
   spawnSubagent?: (args: Record<string, unknown>, signal?: AbortSignal) => Promise<string>;
+  mcp?: McpHub;
   authorize: (name: string, args: Record<string, unknown>) => Promise<string | null>;
 };
 
@@ -42,6 +45,7 @@ export type PolicyHooks = {
   role?: "explorer" | "worker";
   subagents?: SubagentStore;
   spawnSubagent?: (args: Record<string, unknown>, signal?: AbortSignal) => Promise<string>;
+  mcp?: McpHub;
 };
 
 export function createPolicy(
@@ -62,6 +66,7 @@ export function createPolicy(
     role: hooks?.role,
     subagents: hooks?.subagents,
     spawnSubagent: hooks?.spawnSubagent,
+    mcp: hooks?.mcp,
     async authorize(name, args) {
       const current = mode();
       const denied = await authorizeInner(current, workspace, grants, name, args, tasks, hooks);
@@ -173,6 +178,33 @@ async function authorizeInner(
         hooks,
       },
       bashAlwaysAsk(command) ? undefined : `${kind.op}:${isInsideWorkspace(workspace, cwd) ? "in" : "out"}:${commandHead(command)}`,
+    );
+  }
+
+  if (isMcpTool(name) || hooks?.mcp?.has(name)) {
+    if (!hooks?.mcp?.has(name)) return `未知 MCP 工具: ${name}`;
+    const readOnly = hooks.mcp.isReadOnly(name);
+    if (current === "plan" && !readOnly) {
+      return "Plan 模式不能调用有副作用的 MCP 工具。只读 MCP 可用，或让用户 /mode ask、/mode long 或 /mode full。";
+    }
+    if (hooks.role === "explorer" && !readOnly) {
+      return "explorer 子代理是只读的，不能调用有副作用的 MCP 工具";
+    }
+    if (readOnly || current === "full") return null;
+    return await decide(
+      current,
+      workspace,
+      grants,
+      {
+        op: "exec",
+        path: workspace,
+        detail: clip(`${name} ${JSON.stringify(args)}`.replace(/\s+/g, " "), 72),
+        tool: name,
+        args,
+        tasks,
+        hooks,
+      },
+      `mcp:${name}`,
     );
   }
 

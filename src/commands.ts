@@ -20,6 +20,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/mode long", hint: "Long / 长程，长任务 + LLM 审批副作用" },
   { name: "/mode 长程", hint: "Long 模式的中文别名" },
   { name: "/task", hint: "查看或更新长程任务状态" },
+  { name: "/mcp", hint: "查看 MCP 服务器和工具" },
+  { name: "/skills", hint: "查看已加载的说明文件和 Skills" },
   { name: "/exit", hint: "退出" },
   { name: "/quit", hint: "退出" },
 ];

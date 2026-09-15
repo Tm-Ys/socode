@@ -1,29 +1,26 @@
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import type { AgentMode } from "./mode.js";
 import { modeLabel, modeRules } from "./mode.js";
+import { formatSkillPrompt, loadSkillBundle } from "./skills.js";
 import { formatTaskStateForPrompt, type TaskState } from "./task-state.js";
-
-const AGENTS_MAX_BYTES = 16_384;
 
 export function buildSystemPrompt(
   workspace: string,
   extra = "",
   mode: AgentMode = "ask",
   task?: TaskState,
+  mcpTools: string[] = [],
+  activatedSkills: string[] = [],
 ) {
-  const parts = [basePrompt(workspace, mode), modePrompt(mode, task)];
-  const agents = readAgentsMd(workspace);
-  if (agents) {
-    parts.push(`# AGENTS.md\n\n以下项目说明适用于 \`${workspace}\` 下的文件。与本系统提示或用户要求冲突时，以本系统提示和用户为准。\n\n${agents}`);
-  }
+  const parts = [basePrompt(workspace, mode, mcpTools), modePrompt(mode, task)];
+  const skillPrompt = formatSkillPrompt(loadSkillBundle(workspace), workspace, activatedSkills);
+  if (skillPrompt) parts.push(skillPrompt);
   if (extra.trim()) {
     parts.push(`# 额外用户说明\n\n${extra.trim()}`);
   }
   return parts.join("\n\n");
 }
 
-function basePrompt(workspace: string, mode: AgentMode) {
+function basePrompt(workspace: string, mode: AgentMode, mcpTools: string[] = []) {
   const tools =
     mode === "plan"
       ? "`read`、`search`、`calculate`、`get_current_time`"
@@ -50,6 +47,7 @@ ${mode === "plan" ? "" : `
 
 多块互不依赖的调研或改动时：先 \`subagent_plan\` 列出 1–6 个 agents（\`explorer\` 只读调研，\`worker\` 可改文件），每人 \`prompt\` 必须自洽（他们看不到本对话）。再调用 \`subagent\` 按规划执行；不传参数就跑完全部 pending。综合他们的摘要回复用户，不要把子代理内部轨迹贴出去。子代理不能再开子代理。
 `}
+${mcpTools.length ? `# MCP\n\n外部 MCP 工具：${mcpTools.map((name) => `\`${name}\``).join("、")}。按各工具自己的描述调用。只读 MCP 在 Plan 里也可用；有副作用的 MCP 遵循当前权限模式。\n` : ""}
 
 # 工作方式
 
@@ -124,27 +122,4 @@ ${state}
 - 禁止 doom loop：同一工具、同一参数不要连打。被权限拒绝后改计划，不要换命令绕过。
 - 上下文接近上限时运行时会自动压缩较早对话；压缩后继续当前 goal，不要重做 done 里的事。
 - 预算用尽会写入【checkpoint】。下一轮从检查点接着做。`;
-}
-
-function readAgentsMd(workspace: string) {
-  const path = resolve(workspace, "AGENTS.md");
-  if (!existsSync(path)) return "";
-  try {
-    const text = readFileSync(path, "utf8").trim();
-    if (!text) return "";
-    if (Buffer.byteLength(text, "utf8") > AGENTS_MAX_BYTES) {
-      return `${truncateUtf8(text, AGENTS_MAX_BYTES)}\n\n[AGENTS.md 已截断]`;
-    }
-    return text;
-  } catch {
-    return "";
-  }
-}
-
-function truncateUtf8(text: string, maxBytes: number) {
-  const buf = Buffer.from(text, "utf8");
-  if (buf.length <= maxBytes) return text;
-  let end = maxBytes;
-  while (end > 0 && (buf[end] & 0xc0) === 0x80) end -= 1;
-  return buf.subarray(0, end).toString("utf8");
 }

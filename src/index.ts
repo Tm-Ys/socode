@@ -39,6 +39,9 @@ import { formatConversationList, generateTitle, isDefaultTitle } from "./title.j
 import { assistantPrefix, harnessModeMessage, lastHarnessMode, loadMode, modeHint, modeLabel, paintMode, parseMode, userPrefix, type AgentMode } from "./mode.js";
 import { createPolicy } from "./permissions.js";
 import { createLongApprover } from "./long-approve.js";
+import { openMcpHub } from "./mcp.js";
+import { formatSkillsCli, loadSkillBundle } from "./skills.js";
+import { activateBaseSkills, logSkillActivate } from "./skill-activate.js";
 import { promptYou, restoreTerminal, confirmQuit, takeForcedQuit, watchTurnAbort, setPermissionGate } from "./prompt.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { createSubagentRunner, createSubagentStore, DEFAULT_SUBAGENT_STEPS } from "./subagent.js";
@@ -129,7 +132,7 @@ OpenAI 兼容 Provider：name / url / api / model / context window / max output 
 权限模式：--mode full | ask | plan | long（也可用 /mode 切换，长程可用 长程）。Esc 中止当前轮，/quit 退出。`;
 }
 
-function printBanner(session: Session, extra: { provider: Provider; stream: boolean; agent: boolean; steps: number; mode: AgentMode }) {
+function printBanner(session: Session, extra: { provider: Provider; stream: boolean; agent: boolean; steps: number; mode: AgentMode; mcp?: string }) {
   console.log(`工作目录: ${WORKSPACE}`);
   console.log(`会话: ${session.title || "新会话"}`);
   console.log(`编号: ${session.id}`);
@@ -139,7 +142,8 @@ function printBanner(session: Session, extra: { provider: Provider; stream: bool
   );
   console.log(`流式: ${extra.stream ? "开" : "关"}  Agent: ${extra.agent ? "开" : "关"}  工具步数: ${extra.steps}`);
   console.log(`模式: ${paintMode(extra.mode, modeLabel(extra.mode))}  ${modeHint(extra.mode)}`);
-  console.log("/new 新会话  /session 恢复  /provider 适配  /context 上下文  /compress 压缩  /mode 权限  /task 长程  /quit 退出");
+  if (extra.mcp) console.log(extra.mcp);
+  console.log("/new 新会话  /session 恢复  /provider 适配  /context 上下文  /compress 压缩  /mode 权限  /task 长程  /mcp  MCP  /skills 技能  /quit 退出");
   console.log("输入 / 后会按前缀提示命令，Tab 补全。生成中 Esc 中止当前轮，Ctrl+C 按两次退出。\n");
 }
 
@@ -489,8 +493,9 @@ async function main() {
 
   const tasks = createTaskStore(lastTaskState(session.messages));
   const subagents = createSubagentStore();
+  const mcp = await openMcpHub(WORKSPACE);
   const longApprove = createLongApprover(() => provider);
-  const policy = createPolicy(WORKSPACE, () => mode, tasks, { longApprove, subagents });
+  const policy = createPolicy(WORKSPACE, () => mode, tasks, { longApprove, subagents, mcp });
   const childUi = new Map<number, { replied: boolean }>();
   policy.spawnSubagent = createSubagentRunner({
     getProvider: () => provider,
@@ -510,11 +515,19 @@ async function main() {
   });
   let lastUsage: TokenUsage | undefined;
 
-  const currentSystem = () =>
+  const currentSystem = (activated: string[] = []) =>
     agentEnabled
-      ? buildSystemPrompt(WORKSPACE, userSystem, mode, mode === "long" ? tasks.get() : undefined)
+      ? buildSystemPrompt(
+          WORKSPACE,
+          userSystem,
+          mode,
+          mode === "long" ? tasks.get() : undefined,
+          mcp.specs({ mode }).map((tool) => tool.name),
+          activated,
+        )
       : userSystem || undefined;
-  const currentToolsTokens = () => (agentEnabled ? toolsTokensFromSpecs(toolSpecs(mode)) : 0);
+  const currentToolsTokens = () =>
+    agentEnabled ? toolsTokensFromSpecs(toolSpecs(mode, { extra: mcp.specs({ mode }) })) : 0;
   const contextBudget = () =>
     Math.max(512, Math.floor((provider.contextWindow - provider.maxOutput - 256) * 0.9));
 
@@ -527,6 +540,18 @@ async function main() {
     const abort = watchTurnAbort();
     setPermissionGate(abort);
     try {
+      let activated: string[] = [];
+      if (agentEnabled) {
+        const decision = await activateBaseSkills({
+          prompt: user.content,
+          mode,
+          skills: loadSkillBundle(WORKSPACE).skills,
+          provider,
+          signal: abort.signal,
+        });
+        activated = decision.activate;
+        logSkillActivate(decision);
+      }
       return await runAgent({
         provider,
         stream,
@@ -539,7 +564,7 @@ async function main() {
         messages: buildApiMessages({
           history,
           user,
-          systemPrompt: currentSystem(),
+          systemPrompt: currentSystem(activated),
           maxMessages,
           contextWindow: provider.contextWindow,
           maxOutput: provider.maxOutput,
@@ -554,7 +579,14 @@ async function main() {
     }
   };
 
-  const extra = () => ({ provider, stream, agent: agentEnabled, steps: maxSteps, mode });
+  const extra = () => ({
+    provider,
+    stream,
+    agent: agentEnabled,
+    steps: maxSteps,
+    mode,
+    mcp: `MCP: ${mcp.toolNames().length} 个工具`,
+  });
 
   const printContextUsage = (history: Message[]) => {
     const report = measureContext({
@@ -639,6 +671,7 @@ async function main() {
     } catch {
       // ignore
     }
+    await mcp.close().catch(() => undefined);
     await Promise.race([
       pool.end().catch(() => undefined),
       new Promise<void>((resolve) => setTimeout(resolve, 1500)),
@@ -721,6 +754,17 @@ async function main() {
         if (prompt === "/task" || prompt.startsWith("/task ")) {
           handleTask(tasks, prompt.slice("/task".length).trim());
           await rememberTaskState(pool, session, tasks);
+          continue;
+        }
+        if (prompt === "/mcp") {
+          console.log(`\n${mcp.statusText()}`);
+          const names = mcp.toolNames();
+          if (names.length) console.log(`工具: ${names.join(", ")}`);
+          console.log("");
+          continue;
+        }
+        if (prompt === "/skills") {
+          console.log(`\n${formatSkillsCli(loadSkillBundle(WORKSPACE), WORKSPACE)}\n`);
           continue;
         }
         if (prompt === "/compress") {

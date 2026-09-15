@@ -59,6 +59,7 @@ export function childPolicy(parent: Policy, kind: SubagentKind): Policy {
   return createPolicy(parent.workspace, () => parent.mode, undefined, {
     nested: true,
     role: kind,
+    mcp: parent.mcp,
   });
 }
 

@@ -106,6 +106,7 @@ export async function runAgent(params: {
   const tools = params.useTools === false ? [] : toolSpecs(params.policy?.mode, {
     nested: params.policy?.nested,
     role: params.policy?.role,
+    extra: params.policy?.mcp?.specs({ mode: params.policy?.mode, role: params.policy?.role }),
   });
   const usage: TokenUsage = { promptTokens: 0, completionTokens: 0 };
   const longHorizon = params.policy?.mode === "long";

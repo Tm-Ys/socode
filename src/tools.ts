@@ -8,6 +8,7 @@ import {
   writeAbsoluteFile,
 } from "./fs-tools.js";
 import type { AgentMode } from "./mode.js";
+import { isMcpTool } from "./mcp.js";
 import type { Policy } from "./permissions.js";
 import { formatSubagentPlan, parseSubagentPlan } from "./subagent-plan.js";
 import { formatTaskStateCli, patchFromToolArgs } from "./task-state.js";
@@ -212,9 +213,9 @@ const READ_TOOLS = new Set(["read", "search", "calculate", "get_current_time"]);
 
 export function toolSpecs(
   mode?: AgentMode,
-  opts?: { nested?: boolean; role?: "explorer" | "worker" },
+  opts?: { nested?: boolean; role?: "explorer" | "worker"; extra?: ToolSpec[] },
 ): ToolSpec[] {
-  return tools
+  const builtin = tools
     .filter((tool) => {
       if (opts?.nested && (tool.name === "subagent_plan" || tool.name === "subagent")) return false;
       if (tool.name === "task_state") return mode === "long" && !opts?.nested;
@@ -223,6 +224,7 @@ export function toolSpecs(
       return true;
     })
     .map(({ name, description, parameters }) => ({ name, description, parameters }));
+  return [...builtin, ...(opts?.extra ?? [])];
 }
 
 export async function executeTool(
@@ -232,8 +234,8 @@ export async function executeTool(
   policy?: Policy,
 ): Promise<string> {
   throwIfAborted(signal);
-  const tool = tools.find((item) => item.name === name);
-  if (!tool) return `未知工具: ${name}`;
+  const builtin = tools.find((item) => item.name === name);
+  if (!builtin && !isMcpTool(name) && !policy?.mcp?.has(name)) return `未知工具: ${name}`;
   let args: Record<string, unknown> = {};
   try {
     args = rawArgs.trim() ? (JSON.parse(rawArgs) as Record<string, unknown>) : {};
@@ -241,7 +243,11 @@ export async function executeTool(
     return `工具参数不是合法 JSON: ${rawArgs}`;
   }
   try {
-    if (policy?.mode === "plan" && !READ_TOOLS.has(name)) {
+    if (
+      policy?.mode === "plan" &&
+      !READ_TOOLS.has(name) &&
+      !(isMcpTool(name) && policy.mcp?.isReadOnly(name))
+    ) {
       return `权限拒绝: 当前是 Plan 模式，不能使用 ${name}。请只给出计划，或让用户输入 /mode ask、/mode long 或 /mode full。`;
     }
     if (name === "task_state" && policy?.mode !== "long") {
@@ -276,7 +282,12 @@ export async function executeTool(
         confineWrites: policy?.mode !== "full",
       });
     }
-    return await tool.execute(args, signal);
+    if (isMcpTool(name) || policy?.mcp?.has(name)) {
+      if (!policy?.mcp?.has(name)) return `工具执行失败: 未知 MCP 工具: ${name}`;
+      return await policy.mcp.call(name, args, signal);
+    }
+    if (!builtin) return `未知工具: ${name}`;
+    return await builtin.execute(args, signal);
   } catch (error) {
     if (isTurnAborted(error) || signal?.aborted) throw new TurnAborted();
     const message = error instanceof Error ? error.message : String(error);

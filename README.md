@@ -1,8 +1,37 @@
 # socode
 
-最基础的 TypeScript TUI：OpenAI 兼容 LLM Provider、流式输出、Agent Loop、PostgreSQL 会话存储。
+本机终端里的编程 Agent：OpenAI 兼容模型、流式输出、工具循环、PostgreSQL 会话。默认 **Ask**——能改仓库，但写入先问你，密钥和系统路径始终碰不到。
+
+运行时只依赖 `pg`。其余是一组小 TypeScript 模块，不是套壳框架。
+
+## 亮点
+
+**权限是产品，不是开关。** 四种模式策略不同，不是同一套工具换个名字：
+
+| 模式 | 适合 | 写入 / 副作用 |
+| --- | --- | --- |
+| **Ask**（默认） | 日常改代码 | 工作区内先 `y` / `n` / `a`；短只读命令不打断 |
+| **Plan** | 先看再动手 | 只能 `read` / `search`，没有写、删、bash |
+| **Full** | 你已经信任这次会话 | 直接改文件、跑命令；系统目录和密钥仍禁 |
+| **Long / 长程** | 跨很多步的任务 | 只读预授权；副作用由**独立 LLM 审批**，**不会变成 Full** |
+
+Long 的审批器拿一份干净上下文、只输出 JSON；解析失败、超时、缺字段一律拒绝。密钥、工作区外、`sudo` 在问审批器之前就被本地硬拒绝。设计说明见 [`docs/LONG-MODE.md`](docs/LONG-MODE.md)。
+
+**OS 沙箱和应用层策略叠在一起。** Ask / Long 下 `bash` 在 macOS 走 `sandbox-exec`（只允许写工作区），Linux 走 `bwrap`。沙箱起不来就拒绝执行，Full 才会警告后裸跑。另有：`.env` / `providers.json` / `~/.ssh` 等 denylist、symlink `realpath`、bash 分类（`git status` 的 `a` 不会扩成 `sudo`）、子进程环境剥掉密钥。每次授权追加到工作区 `.socode-audit.jsonl`。
+
+**长任务能接着做。** Long 把目标记在 TaskState 里（会话中的 `【task state】` 消息，不另建表）。上下文挤到约 82% 会自动压缩，压缩时把最新模式和 TaskState **钉在保留区**，摘要吃不掉目标。步数 / token 用尽或 Esc 中止会留下 `【checkpoint】`，同一会话下一轮接着干。Ask / Full 步数用尽仍报错，只有 Long 优雅停。
+
+**子代理是干净上下文，不是套娃。** Ask / Full / Long 可先 `subagent_plan` 规划 1–6 个 `explorer`（只读）或 `worker`（可写），再 `subagent` 按规划跑。子代理看不到父对话，只把摘要交回；不能再开子代理。Plan 模式没有这两个工具。explorer 即使父会话是 Full 也不能写文件。
+
+**MCP 是外部工具进程。** 读 Claude/Cursor 风格的 `.mcp.json`（stdio JSON-RPC），把服务器工具挂进同一套循环，名字是 `mcp__服务器__工具`。只读 MCP 在 Plan 里也能用；有副作用的走 Ask / Long / Full。HTTP MCP 暂不支持。`/mcp` 看连接状态。
+
+**项目说明和 Skills 自动进系统提示。** 从用户目录到 git 根再到工作区加载 `AGENTS.md` / `CLAUDE.md`（同层 AGENTS 在前、CLAUDE 更具体）。内置基础 skill（`brainstorm` / `grill-me` / `ponytail` / `superpowers`）默认不灌全文：每轮用一次短 JSON 询问当前用户话该激活哪几个，最多 2 个。`/skills` 查看实际加载结果。
+
+**上下文看得见、会话回得去。** `/context` 用色块标 system / tools / 对话 / 预留输出 / 空闲。PostgreSQL 自动建库、迁移、存完整 tool trace；新会话会生成短标题。生成中 Esc 中止当前轮：用户问题留下，半截回复不入库。连续三次同调用或同失败会停，避免空转。
 
 ## 安装
+
+需要 Node 22+ 和 PostgreSQL。
 
 ```bash
 npm install
@@ -26,7 +55,9 @@ MAX_AGENT_STEPS="80"
 MODE="ask"
 ```
 
-`THINKING_EFFORT` 可选：`none` / `minimal` / `low` / `medium` / `high` / `xhigh`。多个 Provider 会保存在 gitignore 的 `providers.json`。已保存的 Provider 整份生效，不再和环境变量字段混拼。没有 `providers.json` 时才用环境变量。
+`THINKING_EFFORT` 可选：`none` / `minimal` / `low` / `medium` / `high` / `xhigh`。多个 Provider 存在 gitignore 的 `providers.json`。已保存的 Provider 整份生效，不再和环境变量字段混拼；没有 `providers.json` 时才用环境变量。
+
+可选：`MAX_AGENT_TOKENS`（Long 的 token 预算）、`LONG_APPROVE_MODEL` / `JUDGE_MODEL`（Long 审批模型）、`SUBAGENT_STEPS`（子代理步数，默认 24）。审批器也会选用 `providers.json` 里名为 `judge` / `fast` / `cheap` / `mini` 的项。
 
 ## 用法
 
@@ -39,33 +70,82 @@ npm start -- --steps 120 --max 200
 npm start -- --mode long
 ```
 
-命令行还可覆盖本次进程的 `--url` / `--api` / `--model` / `--name` / `--context` / `--output` / `--effort` / `--mode` / `--budget`。
+命令行还可覆盖本次进程的 `--url` / `--api` / `--model` / `--name` / `--context` / `--output` / `--effort` / `--mode` / `--budget`。`--no-stream` / `--no-agent` 关掉流式或工具。
+
+非 TTY（例如 `--input`）在 Ask 下会拒绝写入，脚本里改文件请 `--mode full` 或 `--mode long`。
+
+```bash
+npm test
+```
 
 ## 权限与沙箱
 
-默认 **Ask**（`MODE=ask` 或 `--mode ask`）。工作区内创建、修改、删除文件，以及有副作用的命令，会先询问：`y` 允许、`n` 或回车拒绝、`a` 本会话同类一律允许。Esc 视为拒绝。工作区外的写入直接拒绝，需要 `/mode full`。`.env`、`providers.json` 和系统密钥路径始终不可读写。
+默认 **Ask**（`MODE=ask` 或 `--mode ask`）。工作区内创建、修改、删除，以及有副作用的命令，会先询问：`y` 允许、`n` 或回车拒绝、`a` 本会话同类一律允许。Esc 视为拒绝。工作区外写入直接拒绝，需要 `/mode full`。
 
-- **Full Access**（`/mode full`）：直接改文件和执行命令，仍禁止系统目录和密钥路径（`/etc`、`/usr`、`~/.ssh`、`~/.aws`、工作区 `.env` 等）。
-- **Ask**（`/mode ask`）：写、删、有副作用的 `bash` 和所有 `git` 命令先审批，且只能在工作区内；`ls` / `pwd` 这类短只读命令不打断。bash 的 cwd 和重定向都不能离开工作区。`a` 按命令名授权，不会把 `git status` 扩成 `sudo`。
-- **Plan**（`/mode plan`）：只能 `read` / `search` 和拟定计划，不能写文件、删文件、执行命令。
-- **Long / 长程**（`/mode long` 或 `/mode 长程`）：给多步骤长任务用。工作区 `read` / `search` 预授权；写、删、git、网络等副作用走**独立 LLM 审批**（干净上下文、只输出 JSON，失败则拒绝），**不会变成 Full**。密钥、工作区外、sudo 仍本地硬拒绝。进入后维护 TaskState（`/task`），上下文接近上限时自动 `/compress`。设计说明见 `docs/LONG-MODE.md`。
+- **Ask**：写、删、有副作用的 `bash` 和所有 `git` 先审批，且只能在工作区内；`ls` / `pwd` 这类短只读命令不打断。bash 的 cwd 和重定向都不能离开工作区。
+- **Full**（`/mode full`）：直接改文件和执行命令，仍禁止 `/etc`、`/usr`、`~/.ssh`、`~/.aws`、工作区 `.env` 等。
+- **Plan**（`/mode plan`）：只能看和写计划。
+- **Long**（`/mode long` 或 `/mode 长程`）：Ask 的权限边界 + 长程编排 + LLM 审批副作用。进入后维护 TaskState（`/task`）。
 
-Ask / Full / Long 可用 **子代理**：先 `subagent_plan` 规划 1–6 个 `explorer`（只读）或 `worker`（可写），再 `subagent` 按规划执行。子代理自带干净上下文，只把摘要还给父代理；不能再开子代理。Plan 模式没有这两个工具。
+## 交互命令
 
-macOS 上 `bash` 会套 `sandbox-exec`，Linux Ask 需要 `bwrap`。Ask 下只允许写入工作区，沙箱起不来就拒绝执行。Full 在沙箱失败时会警告后裸跑。非 TTY（例如 `--input`）在 Ask 模式下会拒绝写入，需要 `--mode full`。每次授权会追加到工作区 `.socode-audit.jsonl`。
+输入 `/` 后会按前缀提示，Tab 补全。
 
-交互命令：
-
-- `/provider` 查看当前适配
-- `/provider edit` 输入 name、url、api、model、context window、max output、thinking effort
-- `/provider list` 列出已保存的 Provider
-- `/provider <name>` 切换
+- `/provider` 查看当前适配；`/provider edit` 编辑；`/provider list` 列出；`/provider <name>` 切换；`/provider new` 新增
 - `/new` 开新会话
 - `/session` 或 `/chat` 恢复历史对话
-- `/context` 查看上下文占用（色块：system / tools / context / output / free）
-- `/compress` 用当前模型压缩较早对话，保留最近两轮
-- `/mode` 查看权限模式；`/mode full` Full Access，`/mode ask` 审批后改文件，`/mode plan` 只能看和写计划，`/mode long`（`/mode 长程`）长程任务
-- `/task` 查看或更新 Long 模式的 TaskState
+- `/context` 查看上下文占用
+- `/compress` 用当前模型压缩较早对话，保留最近两轮（并钉住 harness mode / TaskState）
+- `/mode` 查看或切换：`full` / `ask` / `plan` / `long`（`长程`）
+- `/task` 查看长程状态；`/task goal …`、`/task milestone …`、`/task note …`、`/task clear`
+- `/mcp` 查看 MCP 服务器和工具
+- `/skills` 查看已注入的 `AGENTS.md` / `CLAUDE.md` 和发现的 Skills
 - `/exit` 或 `/quit` 退出
-- `Ctrl+C` 按第一次红字提示，再按一次退出
-- 生成中按 `Esc` 中止当前轮：保存用户问题，不保存未完成的回复
+- `Ctrl+C` 第一次红字提示，再按一次退出
+- 生成中 `Esc` 中止当前轮
+
+## 工具
+
+| 工具 | 作用 |
+| --- | --- |
+| `read` / `write` / `delete` | 绝对路径读写删（delete 只删文件） |
+| `search` | 目录内正则搜索，可 glob |
+| `bash` | 绝对 cwd 下执行，30s 超时，Ask/Long 套 OS 沙箱 |
+| `calculate` / `get_current_time` | 纯本地，不走权限询问 |
+| `task_state` | 仅 Long：更新 goal / milestones / done / keyFiles / verifyCommands |
+| `subagent_plan` / `subagent` | Ask / Full / Long：规划并执行子代理 |
+| `mcp__…` | 来自 `.mcp.json` 的外部 MCP 工具 |
+
+路径、`cwd`、`search` 的 `directory` 必须是绝对路径。
+
+MCP 配置（项目根 `.mcp.json`、`.socode/mcp.json` 或 `~/.socode/mcp.json`，后者先加载、项目覆盖同名）：
+
+```json
+{
+  "mcpServers": {
+    "echo": {
+      "command": "node",
+      "args": ["src/mcp-echo-server.mjs"]
+    }
+  }
+}
+```
+
+`command` / `args` / `env` 支持 `${TOKEN}` 和 `${PKG:-default}`。示例见 `.mcp.json.example`。
+
+## 项目说明与 Skills
+
+启动时把说明文件拼进系统提示，**从宽到窄、后者更具体**：
+
+1. 用户级：`~/.claude/CLAUDE.md`、`~/.socode/AGENTS.md`、`~/.socode/CLAUDE.md`
+2. 从 git 根（没有 `.git` 则向上最多 12 层）走到工作区；每一层顺序为 `AGENTS.md` → `CLAUDE.md` / `Claude.md` → `.claude/CLAUDE.md` → `AGENTS.override.md` → `CLAUDE.local.md` / `AGENTS.local.md`
+
+`CLAUDE.md` 里的 `@AGENTS.md` 会展开；已经作为独立说明加载过的文件不会重复。单文件上限 16KB。
+
+Skills 来自各目录下的 `<name>/SKILL.md`（YAML frontmatter 的 `name` / `description` / `disable-model-invocation`）。扫描顺序后者覆盖同名：
+
+- 内置 `skills/`（brainstorm、grill-me、ponytail、superpowers）
+- `~/.claude/skills`、`~/.cursor/skills`、`~/.socode/skills`
+- 工作区 `.agents/skills`、`.claude/skills`、`.cursor/skills`、`.socode/skills`
+
+默认把可自动调用的 skill 正文一并注入（总预算约 24KB）；`disable-model-invocation: true` 的只进目录。四个基础 skill 默认不灌全文：用户发软件工程请求时，另起一次短 LLM 调用（只送原话和四张卡片），返回激活名单和一句理由，最多 2 个。闲聊不调用。点名则强制加入。`/skills` 查看目录。
