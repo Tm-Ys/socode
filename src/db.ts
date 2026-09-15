@@ -246,3 +246,27 @@ export async function saveMessages(pool: pg.Pool, conversationId: string, messag
     client.release();
   }
 }
+
+export async function replaceMessages(pool: pg.Pool, conversationId: string, messages: Message[]) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT id FROM conversations WHERE id = $1 FOR UPDATE", [conversationId]);
+    await client.query("DELETE FROM messages WHERE conversation_id = $1", [conversationId]);
+    let seq = 0;
+    for (const message of messages) {
+      seq += 1;
+      await client.query(
+        "INSERT INTO messages (conversation_id, role, content, seq, payload, created_at) VALUES ($1, $2, $3, $4, $5, clock_timestamp())",
+        [conversationId, message.role, message.content, seq, messagePayload(message)],
+      );
+    }
+    await client.query("UPDATE conversations SET updated_at = now() WHERE id = $1", [conversationId]);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}

@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, normalize } from "node:path";
 import { throwIfAborted, TurnAborted } from "./abort.js";
+import { bashSpawn, denyReason, shouldFallbackSandbox } from "./sandbox.js";
 
 const MAX_READ_BYTES = 200_000;
 const MAX_OUTPUT_CHARS = 32_000;
@@ -12,7 +13,10 @@ export function requireAbsolutePath(input: string, label: string) {
   const path = input.trim();
   if (!path) throw new Error(`缺少 ${label}`);
   if (!isAbsolute(path)) throw new Error(`${label} 必须是绝对路径，收到: ${path}`);
-  return normalize(path);
+  const resolved = normalize(path);
+  const blocked = denyReason(resolved);
+  if (blocked) throw new Error(blocked);
+  return resolved;
 }
 
 export async function requireAbsoluteDir(input: string, label: string) {
@@ -50,6 +54,19 @@ export async function writeAbsoluteFile(path: string, content: string) {
   return `已写入 ${file} (${Buffer.byteLength(content, "utf8")} bytes)`;
 }
 
+export async function deleteAbsoluteFile(path: string) {
+  const file = requireAbsolutePath(path, "path");
+  let info;
+  try {
+    info = await stat(file);
+  } catch {
+    throw new Error(`文件不存在: ${file}`);
+  }
+  if (!info.isFile()) throw new Error(`delete 只能删文件，不是目录: ${file}`);
+  await unlink(file);
+  return `已删除 ${file}`;
+}
+
 export async function runBash(
   command: string,
   cwd: string,
@@ -59,8 +76,47 @@ export async function runBash(
   const dir = await requireAbsoluteDir(cwd, "cwd");
   if (!command.trim()) throw new Error("缺少 command");
   throwIfAborted(signal);
-  return await new Promise<string>((resolve, reject) => {
-    const child = spawn("/bin/bash", ["-c", command], {
+  const spec = bashSpawn(command);
+  const first = await runBashProcess(spec.file, spec.args, dir, timeoutMs, signal, command);
+  if (
+    spec.fallback &&
+    shouldFallbackSandbox(first.stderr, first.code) &&
+    !first.stdout.trim()
+  ) {
+    const retry = await runBashProcess(
+      spec.fallback.file,
+      spec.fallback.args,
+      dir,
+      timeoutMs,
+      signal,
+      command,
+    );
+    return formatBashResult(retry);
+  }
+  return formatBashResult(first);
+}
+
+function formatBashResult(result: { code: number | null; stdout: string; stderr: string }) {
+  const out = [
+    `exit=${result.code ?? "null"}`,
+    result.stdout && `stdout:\n${result.stdout}`,
+    result.stderr && `stderr:\n${result.stderr}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return clip(out || "(无输出)");
+}
+
+function runBashProcess(
+  file: string,
+  args: string[],
+  dir: string,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+  command: string,
+) {
+  return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(file, args, {
       cwd: dir,
       env: process.env,
       detached: true,
@@ -84,10 +140,7 @@ export async function runBash(
           reject(new TurnAborted());
           return;
         }
-        const out = [`exit=${code ?? "null"}`, stdout && `stdout:\n${stdout}`, stderr && `stderr:\n${stderr}`]
-          .filter(Boolean)
-          .join("\n");
-        resolve(clip(out || "(无输出)"));
+        resolve({ code, stdout, stderr });
       });
     };
     const onAbort = () => {

@@ -14,6 +14,7 @@ export function summarizeTool(name: string, rawArgs: string) {
   switch (name) {
     case "read":
     case "write":
+    case "delete":
       return shortPath(str(args.path));
     case "bash":
       return clip(str(args.command).replace(/\s+/g, " "), 72);
@@ -67,6 +68,9 @@ function isToolError(text: string) {
   return (
     text.startsWith("工具执行失败") ||
     text.startsWith("未知工具") ||
+    text.startsWith("权限拒绝") ||
+    text.startsWith("用户拒绝") ||
+    text.includes("Plan 模式") ||
     /^exit=[1-9]/m.test(text)
   );
 }

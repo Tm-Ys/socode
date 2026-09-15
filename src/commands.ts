@@ -11,6 +11,12 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/provider edit", hint: "编辑 Provider" },
   { name: "/provider list", hint: "列出已保存的 Provider" },
   { name: "/provider new", hint: "新增 Provider" },
+  { name: "/context", hint: "查看上下文占用" },
+  { name: "/compress", hint: "压缩对话上下文" },
+  { name: "/mode", hint: "查看权限模式" },
+  { name: "/mode full", hint: "Full Access，直接改文件" },
+  { name: "/mode ask", hint: "Ask，改文件先审批" },
+  { name: "/mode plan", hint: "Plan，只能看和写计划" },
   { name: "/exit", hint: "退出" },
   { name: "/quit", hint: "退出" },
 ];

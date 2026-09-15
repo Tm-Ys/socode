@@ -1,0 +1,107 @@
+import { completeChat } from "./chat.js";
+import {
+  COMPRESSED_PREFIX,
+  messageTokens,
+  normalizeHistory,
+} from "./context.js";
+import type { Message } from "./db.js";
+import type { Provider } from "./provider.js";
+
+const KEEP_USER_TURNS = 2;
+const MIN_STALE_TOKENS = 1200;
+const TRANSCRIPT_MAX_CHARS = 80_000;
+
+export function splitForCompress(history: Message[]) {
+  const normalized = normalizeHistory(history);
+  const userAt = normalized
+    .map((message, index) => (message.role === "user" ? index : -1))
+    .filter((index) => index >= 0);
+  if (userAt.length <= KEEP_USER_TURNS) {
+    return { stale: [] as Message[], keep: normalized };
+  }
+  const cut = userAt[userAt.length - KEEP_USER_TURNS];
+  return { stale: normalized.slice(0, cut), keep: normalized.slice(cut) };
+}
+
+export function canCompress(history: Message[]) {
+  const { stale } = splitForCompress(history);
+  const tokens = stale.reduce((sum, message) => sum + messageTokens(message), 0);
+  return stale.length > 0 && tokens >= MIN_STALE_TOKENS;
+}
+
+export async function compressHistory(params: {
+  provider: Provider;
+  history: Message[];
+  signal?: AbortSignal;
+  onDelta?: (text: string) => void;
+}): Promise<{ messages: Message[]; saved: number; summaryTokens: number }> {
+  const { stale, keep } = splitForCompress(params.history);
+  const staleTokens = stale.reduce((sum, message) => sum + messageTokens(message), 0);
+  if (stale.length === 0 || staleTokens < MIN_STALE_TOKENS) {
+    throw new Error("对话还不够长，无需压缩");
+  }
+
+  const result = await completeChat({
+    provider: {
+      ...params.provider,
+      maxOutput: Math.min(4096, Math.max(1024, params.provider.maxOutput)),
+    },
+    stream: true,
+    signal: params.signal,
+    onDelta: params.onDelta,
+    messages: [
+      {
+        role: "system",
+        content:
+          "你是会话压缩器。把对话压成一份中文摘要，供后续继续工作使用。保留：目标、已做决策、改过的文件与路径、关键结论、未完成事项、用户偏好。丢掉：客套、重复工具输出、大段代码（只留路径和要点）。不要 markdown 标题堆砌，直接输出摘要正文。",
+      },
+      {
+        role: "user",
+        content: `请压缩以下对话：\n\n${toTranscript(stale)}`,
+      },
+    ],
+  });
+
+  const summary = result.content.trim();
+  if (!summary) throw new Error("模型没有给出摘要");
+  const summaryMessage: Message = {
+    role: "user",
+    content: `${COMPRESSED_PREFIX}\n${summary}`,
+  };
+  const messages = [summaryMessage, ...keep];
+  const after = messages.reduce((sum, message) => sum + messageTokens(message), 0);
+  const before = staleTokens + keep.reduce((sum, message) => sum + messageTokens(message), 0);
+  return { messages, saved: Math.max(0, before - after), summaryTokens: messageTokens(summaryMessage) };
+}
+
+function toTranscript(messages: Message[]) {
+  const parts: string[] = [];
+  for (const message of messages) {
+    if (message.role === "user") {
+      parts.push(`用户: ${clip(message.content, 8000)}`);
+      continue;
+    }
+    if (message.role === "system") {
+      parts.push(`系统: ${clip(message.content, 2000)}`);
+      continue;
+    }
+    if (message.role === "tool") {
+      parts.push(`工具结果: ${clip(message.content, 1500)}`);
+      continue;
+    }
+    const calls = message.toolCalls?.length
+      ? `\n调用: ${message.toolCalls.map((call) => call.name).join(", ")}`
+      : "";
+    parts.push(`助手: ${clip(message.content, 4000)}${calls}`);
+  }
+  const text = parts.join("\n\n");
+  if (text.length <= TRANSCRIPT_MAX_CHARS) return text;
+  const keep = Math.floor(TRANSCRIPT_MAX_CHARS / 2) - 20;
+  return `${text.slice(0, keep)}\n\n…(中间已省略 ${text.length - keep * 2} 字)…\n\n${text.slice(-keep)}`;
+}
+
+function clip(text: string, max: number) {
+  const trimmed = text.trim();
+  if (trimmed.length <= max) return trimmed;
+  return `${trimmed.slice(0, max)}\n…`;
+}

@@ -1,5 +1,6 @@
 import { throwIfAborted } from "./abort.js";
 import { completeChat, type ChatResult } from "./chat.js";
+import type { Policy } from "./permissions.js";
 import { executeTool, toolSpecs } from "./tools.js";
 import type { Message } from "./db.js";
 import type { Provider } from "./provider.js";
@@ -18,12 +19,14 @@ export async function runAgent(params: {
   maxSteps?: number;
   useTools?: boolean;
   signal?: AbortSignal;
+  policy?: Policy;
+  onGate?: (pause: boolean) => void;
   onEvent?: (event: AgentEvent) => void;
 }): Promise<{ reply: string; trace: Message[] }> {
   const maxSteps = Math.max(1, params.maxSteps ?? DEFAULT_MAX_AGENT_STEPS);
   const messages = [...params.messages];
   const trace: Message[] = [];
-  const tools = params.useTools === false ? [] : toolSpecs();
+  const tools = params.useTools === false ? [] : toolSpecs(params.policy?.mode);
 
   for (let step = 0; step < maxSteps; step += 1) {
     throwIfAborted(params.signal);
@@ -57,7 +60,13 @@ export async function runAgent(params: {
     for (const call of result.toolCalls) {
       throwIfAborted(params.signal);
       params.onEvent?.({ type: "tool_call", name: call.name, arguments: call.arguments });
-      const output = await executeTool(call.name, call.arguments, params.signal);
+      params.onGate?.(true);
+      let output: string;
+      try {
+        output = await executeTool(call.name, call.arguments, params.signal, params.policy);
+      } finally {
+        params.onGate?.(false);
+      }
       throwIfAborted(params.signal);
       params.onEvent?.({ type: "tool_result", name: call.name, result: output });
       const toolMessage: Message = {

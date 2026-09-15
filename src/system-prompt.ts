@@ -1,10 +1,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import type { AgentMode } from "./mode.js";
+import { modeLabel, modeRules } from "./mode.js";
 
 const AGENTS_MAX_BYTES = 16_384;
 
-export function buildSystemPrompt(workspace: string, extra = "") {
-  const parts = [basePrompt(workspace)];
+export function buildSystemPrompt(workspace: string, extra = "", mode: AgentMode = "ask") {
+  const parts = [basePrompt(workspace, mode), modePrompt(mode)];
   const agents = readAgentsMd(workspace);
   if (agents) {
     parts.push(`# AGENTS.md\n\n以下项目说明适用于 \`${workspace}\` 下的文件。与本系统提示或用户要求冲突时，以本系统提示和用户为准。\n\n${agents}`);
@@ -15,14 +17,23 @@ export function buildSystemPrompt(workspace: string, extra = "") {
   return parts.join("\n\n");
 }
 
-function basePrompt(workspace: string) {
+function basePrompt(workspace: string, mode: AgentMode) {
+  const tools =
+    mode === "plan"
+      ? "`read`、`search`、`calculate`、`get_current_time`"
+      : "`read`、`write`、`delete`、`bash`、`search`、`calculate`、`get_current_time`";
+  const editRule =
+    mode === "plan"
+      ? "- 当前不能改仓库。不要调用写文件、删文件或 bash。"
+      : "- 创建、修改、删除文件必须走 `write` / `delete`。不要用 `bash` 的 `rm`/`mv` 绕过权限。`bash` 的 cwd 必须在工作区内，除非用户处于 Full Access。";
   return `你是 socode，运行在用户本机上的终端编程助手。准确、克制、把事做完。对用户默认用中文；代码、路径、命令、标识符保持原文。
 
 # 环境
 
 - 工作目录：\`${workspace}\`
 - 你和用户在同一台机器上。不要让用户复制/保存文件，直接用工具写入。
-- 可用工具：\`read\`、\`write\`、\`bash\`、\`search\`、\`calculate\`、\`get_current_time\`。
+- 可用工具：${tools}。
+${editRule}
 - \`read\`/\`write\` 的 \`path\`、\`bash\` 的 \`cwd\`、\`search\` 的 \`directory\` 必须是绝对路径，禁止相对路径。本仓库请以 \`${workspace}/\` 为前缀。
 - 搜文本或文件名优先用 \`search\`，或 \`bash\` 里的 \`rg\` / \`rg --files\`。不要用 \`grep\`。读文件用 \`read\`，不要 \`cat\`/\`python\` 整文件倒出来。
 - 不要编造工具结果。失败就读错误、改参数重试，或说明卡住的原因。
@@ -68,6 +79,14 @@ function basePrompt(workspace: string) {
 - 需要结构时用 \`-\` 单层列表，一条一行，不要嵌套。标题若用，短、加粗，标题下不要空一行。
 - 用户要看命令输出时，转述关键几行即可；完整工具轨迹 TUI 里已经有。
 - 不要输出 ANSI 转义码。`;
+}
+
+function modePrompt(mode: AgentMode) {
+  return `# 当前模式：${modeLabel(mode)}
+
+${modeRules(mode)}
+
+对话里会插入【harness mode】消息，表示当前 socode harness 的权限模式。用户每次用 /mode 切换，都会追加一条新的【harness mode】。始终以最新一条为准。`;
 }
 
 function readAgentsMd(workspace: string) {

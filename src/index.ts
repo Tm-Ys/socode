@@ -4,13 +4,22 @@ import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { isTurnAborted } from "./abort.js";
 import { DEFAULT_MAX_AGENT_STEPS, runAgent } from "./agent.js";
-import { buildApiMessages, formatPreviewLine, previewMessages } from "./context.js";
+import { canCompress, compressHistory } from "./compress.js";
+import {
+  buildApiMessages,
+  formatContextReport,
+  formatPreviewLine,
+  measureContext,
+  previewMessages,
+  toolsTokensFromSpecs,
+} from "./context.js";
 import {
   connectDb,
   createConversation,
   listConversations,
   loadSession,
   openConversation,
+  replaceMessages,
   saveMessages,
   updateConversationTitle,
   type Message,
@@ -26,9 +35,12 @@ import {
   type Provider,
 } from "./provider.js";
 import { formatConversationList, generateTitle, isDefaultTitle } from "./title.js";
-import { promptYou, restoreTerminal, confirmQuit, takeForcedQuit, USER_PROMPT, ASSISTANT_PREFIX, watchTurnAbort } from "./prompt.js";
+import { assistantPrefix, harnessModeMessage, lastHarnessMode, loadMode, modeHint, modeLabel, paintMode, parseMode, userPrefix, type AgentMode } from "./mode.js";
+import { createPolicy } from "./permissions.js";
+import { promptYou, restoreTerminal, confirmQuit, takeForcedQuit, watchTurnAbort } from "./prompt.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { formatToolCallLine, formatToolResultLines } from "./tool-ui.js";
+import { toolSpecs } from "./tools.js";
 
 const BOOLEAN_FLAGS = new Set(["resume", "new", "no-stream", "no-agent"]);
 const WORKSPACE = process.cwd();
@@ -96,13 +108,13 @@ function usage() {
   npm start [-- --input <文本>]
   npm start -- --new
   npm start -- --id <conversation-uuid>
-  npm start -- --url/--api/--model/--name/--context/--output/--effort/--steps/--max
+  npm start -- --url/--api/--model/--name/--context/--output/--effort/--steps/--max/--mode
 
 OpenAI 兼容 Provider：name / url / api / model / context window / max output / thinking effort
-交互里 /provider 查看或修改。Esc 中止当前轮，/quit 退出。`;
+权限模式：--mode full | ask | plan（也可用 /mode 切换）。Esc 中止当前轮，/quit 退出。`;
 }
 
-function printBanner(session: Session, extra: { provider: Provider; stream: boolean; agent: boolean; steps: number }) {
+function printBanner(session: Session, extra: { provider: Provider; stream: boolean; agent: boolean; steps: number; mode: AgentMode }) {
   console.log(`工作目录: ${WORKSPACE}`);
   console.log(`会话: ${session.title || "新会话"}`);
   console.log(`编号: ${session.id}`);
@@ -111,17 +123,18 @@ function printBanner(session: Session, extra: { provider: Provider; stream: bool
     `上下文: ${extra.provider.contextWindow}  最大输出: ${extra.provider.maxOutput}  思考: ${extra.provider.thinkingEffort}`,
   );
   console.log(`流式: ${extra.stream ? "开" : "关"}  Agent: ${extra.agent ? "开" : "关"}  工具步数: ${extra.steps}`);
-  console.log("/new 新会话  /session 或 /chat 恢复对话  /provider 适配  /quit 退出");
+  console.log(`模式: ${paintMode(extra.mode, modeLabel(extra.mode))}  ${modeHint(extra.mode)}`);
+  console.log("/new 新会话  /session 恢复  /provider 适配  /context 上下文  /compress 压缩  /mode 权限  /quit 退出");
   console.log("输入 / 后会按前缀提示命令，Tab 补全。生成中 Esc 中止当前轮，Ctrl+C 按两次退出。\n");
 }
 
-function printContext(history: Message[]) {
+function printContext(history: Message[], mode: AgentMode) {
   if (history.length === 0) return;
   const { recent, skipped } = previewMessages(history);
   console.log("--- 上下文 ---");
   if (skipped > 0) console.log(`... 更早 ${skipped} 条`);
   for (const message of recent) {
-    console.log(formatPreviewLine(message));
+    console.log(formatPreviewLine(message, mode));
   }
   console.log("--------------\n");
 }
@@ -129,10 +142,11 @@ function printContext(history: Message[]) {
 function printAgentEvent(
   event: { type: string; text?: string; name?: string; arguments?: string; result?: string },
   state: { replied: boolean },
+  mode: AgentMode,
 ) {
   if (event.type === "delta" && event.text) {
     if (!state.replied) {
-      process.stdout.write(ASSISTANT_PREFIX);
+      process.stdout.write(assistantPrefix(mode));
       state.replied = true;
     }
     process.stdout.write(event.text);
@@ -291,6 +305,42 @@ async function pickSession(
   return await pickSession(rl, pool, session, answer);
 }
 
+function handleMode(mode: AgentMode, arg: string): { mode: AgentMode; changed: boolean } {
+  const rest = arg.trim();
+  if (!rest || rest === "show") {
+    console.log(`\n模式: ${paintMode(mode, modeLabel(mode))}`);
+    console.log(modeHint(mode));
+    console.log(`\n/mode full   ${paintMode("full", "Full Access")}，直接改文件和跑命令`);
+    console.log(`/mode ask    ${paintMode("ask", "Ask")}，创建/修改/删除先按 y/n/a 审批`);
+    console.log(`/mode plan   ${paintMode("plan", "Plan")}，只能看和写计划，不能动手\n`);
+    return { mode, changed: false };
+  }
+  const next = parseMode(rest);
+  if (!next) {
+    console.log("\n未知模式。用 /mode full、/mode ask 或 /mode plan。\n");
+    return { mode, changed: false };
+  }
+  if (next === mode) {
+    console.log(`\n已经是 ${paintMode(mode, modeLabel(mode))}`);
+    console.log(`${modeHint(mode)}\n`);
+    return { mode, changed: false };
+  }
+  console.log(`\n已切换到 ${paintMode(next, modeLabel(next))}`);
+  console.log(`${modeHint(next)}\n`);
+  return { mode: next, changed: true };
+}
+
+async function rememberMode(
+  pool: Parameters<typeof saveMessages>[0],
+  session: Session,
+  mode: AgentMode,
+) {
+  if (lastHarnessMode(session.messages) === mode) return;
+  const notice = harnessModeMessage(mode);
+  await saveMessages(pool, session.id, [notice]);
+  session.messages.push(notice);
+}
+
 async function maybeNameSession(params: {
   pool: Parameters<typeof updateConversationTitle>[0];
   session: Session;
@@ -341,6 +391,7 @@ async function main() {
   const fresh = flagOn(flags.new);
   const stream = !flagOn(flags["no-stream"]);
   const conversationFlag = flags.id;
+  let mode = loadMode(flags.mode);
 
   if (!provider.url || !provider.api || !provider.model) {
     if (oneShot !== undefined || !process.stdin.isTTY) {
@@ -356,6 +407,9 @@ async function main() {
     id: conversationFlag,
     fresh,
   });
+  await rememberMode(pool, session, mode);
+
+  const policy = createPolicy(WORKSPACE, () => mode);
 
   const ask = async (history: Message[], user: Message) => {
     const state = { replied: false };
@@ -367,24 +421,79 @@ async function main() {
         maxSteps,
         useTools: agentEnabled,
         signal: abort.signal,
+        policy,
+        onGate: (pause) => (pause ? abort.pause() : abort.resume()),
         messages: buildApiMessages({
           history,
           user,
           systemPrompt: agentEnabled
-            ? buildSystemPrompt(WORKSPACE, userSystem)
+            ? buildSystemPrompt(WORKSPACE, userSystem, mode)
             : userSystem || undefined,
           maxMessages,
           contextWindow: provider.contextWindow,
           maxOutput: provider.maxOutput,
+          toolsTokens: agentEnabled ? toolsTokensFromSpecs(toolSpecs(mode)) : 0,
+          mode,
         }),
-        onEvent: (event) => printAgentEvent(event, state),
+        onEvent: (event) => printAgentEvent(event, state, mode),
       });
     } finally {
       abort.dispose();
     }
   };
 
-  const extra = () => ({ provider, stream, agent: agentEnabled, steps: maxSteps });
+  const extra = () => ({ provider, stream, agent: agentEnabled, steps: maxSteps, mode });
+
+  const currentSystem = () =>
+    agentEnabled ? buildSystemPrompt(WORKSPACE, userSystem, mode) : userSystem || undefined;
+  const currentToolsTokens = () => (agentEnabled ? toolsTokensFromSpecs(toolSpecs(mode)) : 0);
+
+  const printContextUsage = (history: Message[]) => {
+    const report = measureContext({
+      history,
+      systemPrompt: currentSystem(),
+      toolsTokens: currentToolsTokens(),
+      maxMessages,
+      contextWindow: provider.contextWindow,
+      maxOutput: provider.maxOutput,
+      mode,
+    });
+    const cols = process.stdout.columns ?? 40;
+    const width = Math.max(16, Math.min(48, cols - 2));
+    console.log(`\n${formatContextReport(report, width, Boolean(process.stdout.isTTY))}\n`);
+  };
+
+  const runCompress = async (history: Message[]) => {
+    if (!canCompress(history)) {
+      console.log("\n对话还不够长，无需压缩。\n");
+      return history;
+    }
+    console.log("\n正在压缩上下文…");
+    const abort = watchTurnAbort();
+    const state = { replied: false };
+    try {
+      const result = await compressHistory({
+        provider,
+        history,
+        signal: abort.signal,
+        onDelta: (text) => {
+          if (!state.replied) {
+            process.stdout.write(assistantPrefix(mode));
+            state.replied = true;
+          }
+          process.stdout.write(text);
+        },
+      });
+      await replaceMessages(pool, session.id, result.messages);
+      process.stdout.write(
+        `\n\n已压缩，大约省下 ${result.saved.toLocaleString("en-US")} tokens\n`,
+      );
+      printContextUsage(result.messages);
+      return result.messages;
+    } finally {
+      abort.dispose();
+    }
+  };
 
   let rl: readline.Interface | undefined;
   const closeHandles = async () => {
@@ -447,19 +556,44 @@ async function main() {
       console.log("");
     }
     printBanner(session, extra());
-    printContext(session.messages);
+    printContext(session.messages, mode);
 
     while (true) {
       sessionRl.pause();
-      const prompt = (await promptYou(USER_PROMPT)).trim();
+      const prompt = (await promptYou(userPrefix(mode))).trim();
       if (!prompt) continue;
       if (prompt === "/exit" || prompt === "/quit") {
         if (takeForcedQuit()) forceExit(130);
         break;
       }
       try {
+        if (prompt === "/context") {
+          printContextUsage(session.messages);
+          continue;
+        }
+        if (prompt === "/compress") {
+          try {
+            session.messages = await runCompress(session.messages);
+            await rememberMode(pool, session, mode);
+          } catch (error) {
+            if (isTurnAborted(error)) {
+              if (takeForcedQuit()) forceExit(130);
+              process.stdout.write("\n已中止\n\n");
+              continue;
+            }
+            throw error;
+          }
+          continue;
+        }
+        if (prompt === "/mode" || prompt.startsWith("/mode ")) {
+          const result = handleMode(mode, prompt.slice("/mode".length).trim());
+          mode = result.mode;
+          if (result.changed) await rememberMode(pool, session, mode);
+          continue;
+        }
         if (prompt === "/new") {
           session = await createConversation(pool, provider.model);
+          await rememberMode(pool, session, mode);
           console.log("");
           printBanner(session, extra());
           continue;
@@ -476,9 +610,10 @@ async function main() {
           const picked = await pickSession(sessionRl, pool, session, restore.arg);
           if (picked) {
             session = picked;
+            await rememberMode(pool, session, mode);
             console.log("");
             printBanner(session, extra());
-            printContext(session.messages);
+            printContext(session.messages, mode);
           }
           continue;
         }

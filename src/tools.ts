@@ -1,11 +1,14 @@
 import { isTurnAborted, throwIfAborted, TurnAborted } from "./abort.js";
 import {
+  deleteAbsoluteFile,
   readAbsoluteFile,
   requireAbsolutePath,
   runBash,
   searchAbsoluteDir,
   writeAbsoluteFile,
 } from "./fs-tools.js";
+import type { AgentMode } from "./mode.js";
+import type { Policy } from "./permissions.js";
 
 export type ToolSpec = {
   name: string;
@@ -87,6 +90,22 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "delete",
+    description: "删除绝对路径文件。只能删文件，不能删目录。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "要删除的绝对文件路径" },
+      },
+      required: ["path"],
+    },
+    execute: async (args) => {
+      const path = str(args, "path");
+      requireAbsolutePath(path, "path");
+      return await deleteAbsoluteFile(path);
+    },
+  },
+  {
     name: "bash",
     description: "在绝对目录下执行 bash 命令。cwd 必须是已存在的绝对目录。",
     parameters: {
@@ -118,11 +137,20 @@ const tools: Tool[] = [
   },
 ];
 
-export function toolSpecs(): ToolSpec[] {
-  return tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
+const READ_TOOLS = new Set(["read", "search", "calculate", "get_current_time"]);
+
+export function toolSpecs(mode?: AgentMode): ToolSpec[] {
+  return tools
+    .filter((tool) => mode !== "plan" || READ_TOOLS.has(tool.name))
+    .map(({ name, description, parameters }) => ({ name, description, parameters }));
 }
 
-export async function executeTool(name: string, rawArgs: string, signal?: AbortSignal): Promise<string> {
+export async function executeTool(
+  name: string,
+  rawArgs: string,
+  signal?: AbortSignal,
+  policy?: Policy,
+): Promise<string> {
   throwIfAborted(signal);
   const tool = tools.find((item) => item.name === name);
   if (!tool) return `未知工具: ${name}`;
@@ -133,6 +161,14 @@ export async function executeTool(name: string, rawArgs: string, signal?: AbortS
     return `工具参数不是合法 JSON: ${rawArgs}`;
   }
   try {
+    if (policy?.mode === "plan" && !READ_TOOLS.has(name)) {
+      return `权限拒绝: 当前是 Plan 模式，不能使用 ${name}。请只给出计划，或让用户输入 /mode ask 或 /mode full。`;
+    }
+    if (policy) {
+      const denied = await policy.authorize(name, args);
+      if (denied) return denied.startsWith("权限拒绝") ? denied : `权限拒绝: ${denied}`;
+    }
+    throwIfAborted(signal);
     return await tool.execute(args, signal);
   } catch (error) {
     if (isTurnAborted(error) || signal?.aborted) throw new TurnAborted();

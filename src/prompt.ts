@@ -15,7 +15,6 @@ const CLEAR_DOWN = "\x1b[J";
 const QUIT_CONFIRM_MS = 2000;
 
 export const USER_PROMPT = "> ";
-export const ASSISTANT_PREFIX = "socoding…… ";
 
 let quitArmedAt = 0;
 let quitConfirmed = false;
@@ -177,7 +176,7 @@ function redraw(
 
 function visibleWidth(text: string) {
   let width = 0;
-  for (const char of text) {
+  for (const char of text.replace(/\x1b\[[0-9;]*m/g, "")) {
     width += (char.codePointAt(0) ?? 0) > 127 ? 2 : 1;
   }
   return width;
@@ -186,8 +185,10 @@ function visibleWidth(text: string) {
 export function watchTurnAbort() {
   const controller = new AbortController();
   const tty = Boolean(stdin.isTTY);
+  let paused = false;
 
   const onData = (chunk: Buffer | string) => {
+    if (paused) return;
     const key = typeof chunk === "string" ? chunk : chunk.toString("utf8");
     if (key === "\x03") {
       confirmQuit();
@@ -206,11 +207,64 @@ export function watchTurnAbort() {
 
   return {
     signal: controller.signal,
+    pause: () => {
+      paused = true;
+    },
+    resume: () => {
+      paused = false;
+    },
     dispose: () => {
       stdin.off("data", onData);
       restoreTerminal();
     },
   };
+}
+
+export type PermissionAnswer = "allow" | "deny" | "always";
+
+export async function askPermission(title: string, detail: string): Promise<PermissionAnswer> {
+  if (!stdin.isTTY || !stdout.isTTY) return "deny";
+  const yellow = "\x1b[33m";
+  const dim = "\x1b[2m";
+  stdout.write(
+    `\n${yellow}? ${title}${RESET}\n  ${dim}${detail}${RESET}\n  ${dim}y 允许  n 拒绝  a 本会话同类一律允许${RESET}\n`,
+  );
+
+  return await new Promise((resolve) => {
+    const wasRaw = stdin.isRaw;
+    stdin.setRawMode(true);
+    stdin.resume();
+
+    const done = (answer: PermissionAnswer) => {
+      stdin.off("data", onData);
+      if (stdin.isTTY) stdin.setRawMode(Boolean(wasRaw));
+      const label = answer === "allow" ? "允许" : answer === "always" ? "本会话一律允许" : "拒绝";
+      stdout.write(`  → ${label}\n`);
+      resolve(answer);
+    };
+
+    const onData = (chunk: Buffer | string) => {
+      const key = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      if (key === "y" || key === "Y" || key === "\r" || key === "\n") {
+        done("allow");
+        return;
+      }
+      if (key === "a" || key === "A") {
+        done("always");
+        return;
+      }
+      if (key === "n" || key === "N" || isEscapeKey(key)) {
+        done("deny");
+        return;
+      }
+      if (key === "\x03") {
+        confirmQuit();
+        done("deny");
+      }
+    };
+
+    stdin.on("data", onData);
+  });
 }
 
 async function readPlainLine(label: string) {
