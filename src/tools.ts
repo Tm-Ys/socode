@@ -9,6 +9,7 @@ import {
 } from "./fs-tools.js";
 import type { AgentMode } from "./mode.js";
 import type { Policy } from "./permissions.js";
+import { formatTaskStateCli, patchFromToolArgs } from "./task-state.js";
 
 export type ToolSpec = {
   name: string;
@@ -135,13 +136,42 @@ const tools: Tool[] = [
       return await searchAbsoluteDir(str(args, "directory"), str(args, "pattern"), glob, signal);
     },
   },
+  {
+    name: "task_state",
+    description:
+      "更新长程任务状态 TaskState。可设置 goal/notes，替换 milestones/done/failures/key_files/verify_commands，或用 add_* 追加一项。只在 Long 模式使用。",
+    parameters: {
+      type: "object",
+      properties: {
+        goal: { type: "string", description: "当前总目标" },
+        notes: { type: "string", description: "给后续轮次看的备注" },
+        milestones: { type: "array", items: { type: "string" }, description: "未完成里程碑（替换）" },
+        done: { type: "array", items: { type: "string" }, description: "已完成项（替换）" },
+        failures: { type: "array", items: { type: "string" }, description: "失败与卡点（替换）" },
+        key_files: { type: "array", items: { type: "string" }, description: "关键文件路径（替换）" },
+        verify_commands: { type: "array", items: { type: "string" }, description: "验证命令（替换）" },
+        add_milestone: { type: "string" },
+        add_done: { type: "string" },
+        add_failure: { type: "string" },
+        add_key_file: { type: "string" },
+        add_verify_command: { type: "string" },
+      },
+    },
+    execute: () => {
+      throw new Error("task_state 需要会话上下文");
+    },
+  },
 ];
 
 const READ_TOOLS = new Set(["read", "search", "calculate", "get_current_time"]);
 
 export function toolSpecs(mode?: AgentMode): ToolSpec[] {
   return tools
-    .filter((tool) => mode !== "plan" || READ_TOOLS.has(tool.name))
+    .filter((tool) => {
+      if (tool.name === "task_state") return mode === "long";
+      if (mode === "plan") return READ_TOOLS.has(tool.name);
+      return true;
+    })
     .map(({ name, description, parameters }) => ({ name, description, parameters }));
 }
 
@@ -162,13 +192,21 @@ export async function executeTool(
   }
   try {
     if (policy?.mode === "plan" && !READ_TOOLS.has(name)) {
-      return `权限拒绝: 当前是 Plan 模式，不能使用 ${name}。请只给出计划，或让用户输入 /mode ask 或 /mode full。`;
+      return `权限拒绝: 当前是 Plan 模式，不能使用 ${name}。请只给出计划，或让用户输入 /mode ask、/mode long 或 /mode full。`;
+    }
+    if (name === "task_state" && policy?.mode !== "long") {
+      return "权限拒绝: task_state 只在 Long 模式下可用。请先 /mode long。";
     }
     if (policy) {
       const denied = await policy.authorize(name, args);
       if (denied) return denied.startsWith("权限拒绝") ? denied : `权限拒绝: ${denied}`;
     }
     throwIfAborted(signal);
+    if (name === "task_state") {
+      if (!policy?.tasks) return "工具执行失败: 当前会话没有任务状态";
+      const next = policy.tasks.patch(patchFromToolArgs(args));
+      return formatTaskStateCli(next);
+    }
     if (name === "bash") {
       return await runBash(str(args, "command"), str(args, "cwd"), 30_000, signal, {
         workspace: policy?.workspace ?? process.cwd(),

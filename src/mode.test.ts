@@ -4,13 +4,30 @@ import {
   harnessModeMessage,
   insertCurrentMode,
   lastHarnessMode,
+  loadMode,
+  modeLabel,
   parseHarnessMode,
+  parseMode,
+  userPrefix,
 } from "./mode.js";
 
 describe("harness mode messages", () => {
   it("parses the mode id", () => {
     const message = harnessModeMessage("plan");
     assert.equal(parseHarnessMode(message), "plan");
+  });
+
+  it("parses long and 长程", () => {
+    assert.equal(parseMode("long"), "long");
+    assert.equal(parseMode("长程"), "long");
+    assert.equal(parseMode("long-horizon"), "long");
+    assert.equal(parseHarnessMode(harnessModeMessage("long")), "long");
+    assert.equal(modeLabel("long"), "Long");
+  });
+
+  it("uses a distinct prompt for long instead of falling back to ask", () => {
+    assert.match(userPrefix("long", false), /long mode/);
+    assert.doesNotMatch(userPrefix("long", false), /ask mode/);
   });
 
   it("inserts a notice before the latest user message when mode changes", () => {
@@ -26,5 +43,10 @@ describe("harness mode messages", () => {
     const ask = harnessModeMessage("ask");
     const once = insertCurrentMode([ask, { role: "user", content: "hi" }], "ask");
     assert.equal(once.filter((message) => parseHarnessMode(message)).length, 1);
+  });
+
+  it("rejects unknown modes", () => {
+    assert.equal(parseMode("stealth"), null);
+    assert.throws(() => loadMode("stealth"), /full \/ ask \/ plan \/ long/);
   });
 });

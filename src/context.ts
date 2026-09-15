@@ -12,6 +12,7 @@ import {
   userPrefix,
   type AgentMode,
 } from "./mode.js";
+import { formatTaskStateSummary, isTaskStateMessage, parseTaskStateMessage } from "./task-state.js";
 import type { Message } from "./db.js";
 import type { ToolSpec } from "./tools.js";
 
@@ -21,7 +22,7 @@ export function normalizeHistory(history: Message[]): Message[] {
   const out: Message[] = [];
   for (const message of history) {
     if (message.role === "system") {
-      if (isHarnessModeMessage(message)) out.push({ ...message });
+      if (isHarnessModeMessage(message) || isTaskStateMessage(message)) out.push({ ...message });
       continue;
     }
     if (message.role === "tool") {
@@ -289,6 +290,11 @@ export function formatPreviewLine(message: Message, mode: AgentMode = "ask") {
   if (isHarnessModeMessage(message)) {
     const noticed = parseHarnessMode(message) ?? mode;
     return `${paintMode(noticed, `harness  ${modeLabel(noticed)}`)}  ${modeHint(noticed)}`;
+  }
+  if (isTaskStateMessage(message)) {
+    const state = parseTaskStateMessage(message);
+    const summary = state ? formatTaskStateSummary(state) : "（无法解析）";
+    return `task  ${summary}`;
   }
   const prefix = assistantPrefix(mode);
   if (message.role === "user") return `${userPrefix(mode)}${message.content}`;

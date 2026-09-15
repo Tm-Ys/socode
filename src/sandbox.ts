@@ -2,6 +2,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import type { AgentMode } from "./mode.js";
+import { workspaceModeLabel } from "./mode.js";
 
 export type FileOp = "create" | "modify" | "delete" | "exec";
 
@@ -144,10 +145,10 @@ export function mutationDenied(
   const blocked = denyReason(path);
   if (blocked) return blocked;
   if (mode === "plan") {
-    return `当前是 Plan 模式，不能${opLabel(op)}。请只给出计划，或让用户输入 /mode ask 或 /mode full 后再执行。`;
+    return `当前是 Plan 模式，不能${opLabel(op)}。请只给出计划，或让用户输入 /mode ask、/mode long 或 /mode full 后再执行。`;
   }
   if (mode !== "full" && !isInsideWorkspace(workspace, path)) {
-    return `Ask 模式不能在工作区外${opLabel(op)}。路径: ${path}。需要的话请 /mode full。`;
+    return `${workspaceModeLabel(mode)} 模式不能在工作区外${opLabel(op)}。路径: ${path}。需要的话请 /mode full。`;
   }
   return null;
 }
@@ -204,11 +205,11 @@ export function bashHardDenied(mode: AgentMode, command: string): string | null 
   if (mode === "full") return null;
   const head = commandHead(command);
   if (HARD_DENY_BINS.has(head)) {
-    return `Ask 模式禁止 ${head}。需要的话请 /mode full。`;
+    return `${workspaceModeLabel(mode)} 模式禁止 ${head}。需要的话请 /mode full。`;
   }
   for (const bin of HARD_DENY_BINS) {
     if (new RegExp(`(?:^|[\\s;/])${bin}(?:\\s|$)`).test(command)) {
-      return `Ask 模式禁止 ${bin}。需要的话请 /mode full。`;
+      return `${workspaceModeLabel(mode)} 模式禁止 ${bin}。需要的话请 /mode full。`;
     }
   }
   return null;

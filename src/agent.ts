@@ -1,6 +1,8 @@
 import { isTurnAborted, throwIfAborted, TurnAborted, TurnFailed } from "./abort.js";
 import { completeChat, type TokenUsage } from "./chat.js";
+import { messageTokens } from "./context.js";
 import type { Policy } from "./permissions.js";
+import { checkpointReply } from "./task-state.js";
 import { isToolError } from "./tool-ui.js";
 import { executeTool, toolSpecs } from "./tools.js";
 import type { Message } from "./db.js";
@@ -8,6 +10,8 @@ import type { Provider } from "./provider.js";
 
 export const DEFAULT_MAX_AGENT_STEPS = 80;
 const REPEAT_LIMIT = 3;
+
+export type BudgetStop = "steps" | "tokens" | "context";
 
 export type AgentEvent =
   | { type: "delta"; text: string }
@@ -18,7 +22,35 @@ export type AgentOutcome = {
   reply: string;
   trace: Message[];
   usage?: TokenUsage;
+  stopped?: BudgetStop;
 };
+
+export function usageTotal(usage?: TokenUsage) {
+  if (!usage) return 0;
+  return usage.promptTokens + usage.completionTokens;
+}
+
+export function budgetStopReason(params: {
+  step: number;
+  maxSteps: number;
+  usage: TokenUsage;
+  maxTokens?: number;
+  contextTokens?: number;
+  maxContextTokens?: number;
+}): BudgetStop | null {
+  if (params.maxTokens && params.maxTokens > 0 && usageTotal(params.usage) >= params.maxTokens) {
+    return "tokens";
+  }
+  if (
+    params.maxContextTokens &&
+    params.maxContextTokens > 0 &&
+    (params.contextTokens ?? 0) >= params.maxContextTokens
+  ) {
+    return "context";
+  }
+  if (params.step >= params.maxSteps) return "steps";
+  return null;
+}
 
 export function closeIncompleteTrace(trace: Message[]): Message[] {
   const out = trace.map((message) =>
@@ -61,6 +93,8 @@ export async function runAgent(params: {
   messages: Message[];
   stream?: boolean;
   maxSteps?: number;
+  maxTokens?: number;
+  maxContextTokens?: number;
   useTools?: boolean;
   signal?: AbortSignal;
   policy?: Policy;
@@ -71,6 +105,7 @@ export async function runAgent(params: {
   const trace: Message[] = [];
   const tools = params.useTools === false ? [] : toolSpecs(params.policy?.mode);
   const usage: TokenUsage = { promptTokens: 0, completionTokens: 0 };
+  const longHorizon = params.policy?.mode === "long";
   let lastSig = "";
   let sameCount = 0;
   let failName = "";
@@ -174,12 +209,61 @@ export async function runAgent(params: {
         closed.push(stop);
         return { reply, trace: closed, usage: nonemptyUsage(usage) };
       }
+
+      if (longHorizon) {
+        const reason = budgetStopReason({
+          step: step + 1,
+          maxSteps: maxSteps + 1,
+          usage,
+          maxTokens: params.maxTokens,
+          contextTokens: messages.reduce((sum, message) => sum + messageTokens(message), 0),
+          maxContextTokens: params.maxContextTokens,
+        });
+        if (reason === "tokens" || reason === "context") {
+          return stopForBudget(reason, trace, usage, params.policy);
+        }
+      }
     }
 
+    const over = budgetStopReason({
+      step: maxSteps,
+      maxSteps,
+      usage,
+      maxTokens: params.maxTokens,
+      contextTokens: messages.reduce((sum, message) => sum + messageTokens(message), 0),
+      maxContextTokens: params.maxContextTokens,
+    });
+    if (longHorizon) {
+      return stopForBudget(over ?? "steps", trace, usage, params.policy);
+    }
     return fail(new Error(`超过最大工具步数 ${maxSteps}`));
   } catch (error) {
     return fail(error);
   }
+}
+
+function stopForBudget(
+  reason: BudgetStop,
+  trace: Message[],
+  usage: TokenUsage,
+  policy?: Policy,
+): AgentOutcome {
+  const closed = closeIncompleteTrace(trace);
+  const detail =
+    reason === "tokens"
+      ? "累计 token 已达上限。"
+      : reason === "context"
+        ? "上下文接近窗口上限。"
+        : "工具步数已达上限。";
+  const state = policy?.tasks?.get();
+  const reply = state
+    ? checkpointReply(state, "budget", detail)
+    : `${detail} 任务未完成。同一会话继续即可接着做。`;
+  if (state) {
+    policy?.tasks?.patch({ notes: [state.notes, `checkpoint: ${reason}`].filter(Boolean).join("\n").slice(-2000) });
+  }
+  closed.push({ role: "assistant", content: reply });
+  return { reply, trace: closed, usage: nonemptyUsage(usage), stopped: reason };
 }
 
 function addUsage(total: TokenUsage, next?: TokenUsage) {

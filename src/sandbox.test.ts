@@ -62,6 +62,12 @@ describe("mutationDenied", () => {
     assert.equal(mutationDenied("full", ws, "/tmp/outside.txt", "create"), null);
     assert.match(mutationDenied("full", ws, "/etc/x", "create") ?? "", /受保护/);
   });
+
+  it("treats Long like Ask for workspace writes, not Full", () => {
+    assert.match(mutationDenied("long", ws, "/tmp/outside.txt", "create") ?? "", /工作区外/);
+    assert.equal(mutationDenied("long", ws, `${ws}/src/a.ts`, "modify"), null);
+    assert.match(mutationDenied("long", ws, "/etc/x", "create") ?? "", /受保护/);
+  });
 });
 
 describe("classifyBash", () => {
@@ -93,6 +99,7 @@ describe("bashHardDenied", () => {
     assert.match(bashHardDenied("ask", "sudo ls") ?? "", /sudo/);
     assert.match(bashHardDenied("ask", "env sudo ls") ?? "", /sudo/);
     assert.equal(bashHardDenied("full", "sudo ls"), null);
+    assert.match(bashHardDenied("long", "sudo ls") ?? "", /sudo/);
   });
 });
 

@@ -2,11 +2,17 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AgentMode } from "./mode.js";
 import { modeLabel, modeRules } from "./mode.js";
+import { formatTaskStateForPrompt, type TaskState } from "./task-state.js";
 
 const AGENTS_MAX_BYTES = 16_384;
 
-export function buildSystemPrompt(workspace: string, extra = "", mode: AgentMode = "ask") {
-  const parts = [basePrompt(workspace, mode), modePrompt(mode)];
+export function buildSystemPrompt(
+  workspace: string,
+  extra = "",
+  mode: AgentMode = "ask",
+  task?: TaskState,
+) {
+  const parts = [basePrompt(workspace, mode), modePrompt(mode, task)];
   const agents = readAgentsMd(workspace);
   if (agents) {
     parts.push(`# AGENTS.md\n\n以下项目说明适用于 \`${workspace}\` 下的文件。与本系统提示或用户要求冲突时，以本系统提示和用户为准。\n\n${agents}`);
@@ -21,7 +27,9 @@ function basePrompt(workspace: string, mode: AgentMode) {
   const tools =
     mode === "plan"
       ? "`read`、`search`、`calculate`、`get_current_time`"
-      : "`read`、`write`、`delete`、`bash`、`search`、`calculate`、`get_current_time`";
+      : mode === "long"
+        ? "`read`、`write`、`delete`、`bash`、`search`、`calculate`、`get_current_time`、`task_state`"
+        : "`read`、`write`、`delete`、`bash`、`search`、`calculate`、`get_current_time`";
   const editRule =
     mode === "plan"
       ? "- 当前不能改仓库。不要调用写文件、删文件或 bash。"
@@ -81,12 +89,36 @@ ${editRule}
 - 不要输出 ANSI 转义码。`;
 }
 
-function modePrompt(mode: AgentMode) {
-  return `# 当前模式：${modeLabel(mode)}
+function modePrompt(mode: AgentMode, task?: TaskState) {
+  const parts = [
+    `# 当前模式：${modeLabel(mode)}`,
+    "",
+    modeRules(mode),
+    "",
+    "对话里会插入【harness mode】消息，表示当前 socode harness 的权限模式。用户每次用 /mode 切换，都会追加一条新的【harness mode】。始终以最新一条为准。",
+  ];
+  if (mode === "long") {
+    parts.push("", longLoopPrompt(task));
+  }
+  return parts.join("\n");
+}
 
-${modeRules(mode)}
+function longLoopPrompt(task?: TaskState) {
+  const state = task
+    ? `当前 TaskState：\n${formatTaskStateForPrompt(task)}`
+    : "当前 TaskState 为空。把用户第一句有效请求当作 goal，立刻用 `task_state` 写下来。";
+  return `# 长程循环
 
-对话里会插入【harness mode】消息，表示当前 socode harness 的权限模式。用户每次用 /mode 切换，都会追加一条新的【harness mode】。始终以最新一条为准。`;
+${state}
+
+按 计划 → 执行 → 验证 推进，不要一次改一大片：
+
+- 先 \`search\` 定位，再 \`read\` 少量文件，再小范围 \`write\`。
+- 每个里程碑结束后跑 \`verifyCommands\`（或你刚记下的最小检查），失败写入 failures，成功写入 done。
+- 用 \`task_state\` 保持 goal / milestones / done / keyFiles / notes 最新。不要把整份 JSON 贴进对用户的回复。
+- 禁止 doom loop：同一工具、同一参数不要连打。被权限拒绝后改计划，不要换命令绕过。
+- 上下文接近上限时运行时会自动压缩较早对话；压缩后继续当前 goal，不要重做 done 里的事。
+- 预算用尽会写入【checkpoint】。下一轮从检查点接着做。`;
 }
 
 function readAgentsMd(workspace: string) {

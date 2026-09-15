@@ -5,7 +5,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { isTurnAborted, TurnAborted, TurnFailed } from "./abort.js";
 import { closeIncompleteTrace, DEFAULT_MAX_AGENT_STEPS, runAgent } from "./agent.js";
 import type { TokenUsage } from "./chat.js";
-import { canCompress, compressHistory } from "./compress.js";
+import { canCompress, compressHistory, shouldAutoCompress } from "./compress.js";
 import {
   buildApiMessages,
   formatContextReport,
@@ -40,6 +40,18 @@ import { assistantPrefix, harnessModeMessage, lastHarnessMode, loadMode, modeHin
 import { createPolicy } from "./permissions.js";
 import { promptYou, restoreTerminal, confirmQuit, takeForcedQuit, watchTurnAbort, setPermissionGate } from "./prompt.js";
 import { buildSystemPrompt } from "./system-prompt.js";
+import {
+  createTaskStore,
+  checkpointReply,
+  emptyTaskState,
+  formatTaskStateCli,
+  isEmptyTaskState,
+  lastTaskState,
+  seedGoalFromUser,
+  taskStateEqual,
+  taskStateMessage,
+  type TaskStore,
+} from "./task-state.js";
 import { formatToolCallLine, formatToolResultLines } from "./tool-ui.js";
 import { toolSpecs } from "./tools.js";
 
@@ -109,10 +121,10 @@ function usage() {
   npm start [-- --input <文本>]
   npm start -- --new
   npm start -- --id <conversation-uuid>
-  npm start -- --url/--api/--model/--name/--context/--output/--effort/--steps/--max/--mode
+  npm start -- --url/--api/--model/--name/--context/--output/--effort/--steps/--max/--mode/--budget
 
 OpenAI 兼容 Provider：name / url / api / model / context window / max output / thinking effort
-权限模式：--mode full | ask | plan（也可用 /mode 切换）。Esc 中止当前轮，/quit 退出。`;
+权限模式：--mode full | ask | plan | long（也可用 /mode 切换，长程可用 长程）。Esc 中止当前轮，/quit 退出。`;
 }
 
 function printBanner(session: Session, extra: { provider: Provider; stream: boolean; agent: boolean; steps: number; mode: AgentMode }) {
@@ -125,7 +137,7 @@ function printBanner(session: Session, extra: { provider: Provider; stream: bool
   );
   console.log(`流式: ${extra.stream ? "开" : "关"}  Agent: ${extra.agent ? "开" : "关"}  工具步数: ${extra.steps}`);
   console.log(`模式: ${paintMode(extra.mode, modeLabel(extra.mode))}  ${modeHint(extra.mode)}`);
-  console.log("/new 新会话  /session 恢复  /provider 适配  /context 上下文  /compress 压缩  /mode 权限  /quit 退出");
+  console.log("/new 新会话  /session 恢复  /provider 适配  /context 上下文  /compress 压缩  /mode 权限  /task 长程  /quit 退出");
   console.log("输入 / 后会按前缀提示命令，Tab 补全。生成中 Esc 中止当前轮，Ctrl+C 按两次退出。\n");
 }
 
@@ -331,12 +343,13 @@ function handleMode(mode: AgentMode, arg: string): { mode: AgentMode; changed: b
     console.log(modeHint(mode));
     console.log(`\n/mode full   ${paintMode("full", "Full Access")}，直接改文件和跑命令`);
     console.log(`/mode ask    ${paintMode("ask", "Ask")}，创建/修改/删除先按 y/n/a 审批`);
-    console.log(`/mode plan   ${paintMode("plan", "Plan")}，只能看和写计划，不能动手\n`);
+    console.log(`/mode plan   ${paintMode("plan", "Plan")}，只能看和写计划，不能动手`);
+    console.log(`/mode long   ${paintMode("long", "Long")} / 长程，记住目标、自动压缩；只读预授权，写入仍要确认\n`);
     return { mode, changed: false };
   }
   const next = parseMode(rest);
   if (!next) {
-    console.log("\n未知模式。用 /mode full、/mode ask 或 /mode plan。\n");
+    console.log("\n未知模式。用 /mode full、/mode ask、/mode plan 或 /mode long（长程）。\n");
     return { mode, changed: false };
   }
   if (next === mode) {
@@ -347,6 +360,45 @@ function handleMode(mode: AgentMode, arg: string): { mode: AgentMode; changed: b
   console.log(`\n已切换到 ${paintMode(next, modeLabel(next))}`);
   console.log(`${modeHint(next)}\n`);
   return { mode: next, changed: true };
+}
+
+async function rememberTaskState(
+  pool: Parameters<typeof saveMessages>[0],
+  session: Session,
+  store: TaskStore,
+) {
+  const current = store.get();
+  const last = lastTaskState(session.messages);
+  if (last && taskStateEqual(last, current)) return;
+  if (!last && isEmptyTaskState(current)) return;
+  const notice = taskStateMessage(current);
+  await saveMessages(pool, session.id, [notice]);
+  session.messages.push(notice);
+}
+
+function handleTask(store: TaskStore, arg: string) {
+  const rest = arg.trim();
+  if (!rest || rest === "show") {
+    console.log(`\n${formatTaskStateCli(store.get())}\n`);
+    return true;
+  }
+  if (rest === "clear") {
+    store.replace(emptyTaskState());
+    console.log("\n已清空任务状态。\n");
+    return true;
+  }
+  const match = rest.match(/^(goal|目标|note|notes|备注|milestone|里程碑)\s*[：: ]\s*([\s\S]+)/i);
+  if (match) {
+    const kind = match[1].toLowerCase();
+    const text = match[2].trim();
+    if (kind === "goal" || kind === "目标") store.patch({ goal: text });
+    else if (kind === "milestone" || kind === "里程碑") store.patch({ addMilestone: text });
+    else store.patch({ notes: text });
+    console.log(`\n${formatTaskStateCli(store.get())}\n`);
+    return true;
+  }
+  console.log("\n用法: /task    /task goal <目标>    /task milestone <项>    /task note <备注>    /task clear\n");
+  return false;
 }
 
 async function rememberMode(
@@ -406,6 +458,9 @@ async function main() {
   const maxSteps =
     parsePositiveInt("--steps", flags.steps) ??
     envPositiveInt(process.env.MAX_AGENT_STEPS, DEFAULT_MAX_AGENT_STEPS);
+  const maxTokens =
+    parsePositiveInt("--budget", flags.budget) ??
+    parsePositiveInt("MAX_AGENT_TOKENS", process.env.MAX_AGENT_TOKENS);
   const oneShot = flags.input;
   const fresh = flagOn(flags.new);
   const stream = !flagOn(flags["no-stream"]);
@@ -428,8 +483,21 @@ async function main() {
   });
   await rememberMode(pool, session, mode);
 
-  const policy = createPolicy(WORKSPACE, () => mode);
+  const tasks = createTaskStore(lastTaskState(session.messages));
+  const policy = createPolicy(WORKSPACE, () => mode, tasks);
   let lastUsage: TokenUsage | undefined;
+
+  const currentSystem = () =>
+    agentEnabled
+      ? buildSystemPrompt(WORKSPACE, userSystem, mode, mode === "long" ? tasks.get() : undefined)
+      : userSystem || undefined;
+  const currentToolsTokens = () => (agentEnabled ? toolsTokensFromSpecs(toolSpecs(mode)) : 0);
+  const contextBudget = () =>
+    Math.max(512, Math.floor((provider.contextWindow - provider.maxOutput - 256) * 0.9));
+
+  const reloadTasks = () => {
+    tasks.replace(lastTaskState(session.messages) ?? emptyTaskState());
+  };
 
   const ask = async (history: Message[], user: Message) => {
     const state = { replied: false };
@@ -440,19 +508,19 @@ async function main() {
         provider,
         stream,
         maxSteps,
+        maxTokens: mode === "long" ? maxTokens : undefined,
+        maxContextTokens: mode === "long" ? contextBudget() : undefined,
         useTools: agentEnabled,
         signal: abort.signal,
         policy,
         messages: buildApiMessages({
           history,
           user,
-          systemPrompt: agentEnabled
-            ? buildSystemPrompt(WORKSPACE, userSystem, mode)
-            : userSystem || undefined,
+          systemPrompt: currentSystem(),
           maxMessages,
           contextWindow: provider.contextWindow,
           maxOutput: provider.maxOutput,
-          toolsTokens: agentEnabled ? toolsTokensFromSpecs(toolSpecs(mode)) : 0,
+          toolsTokens: currentToolsTokens(),
           mode,
         }),
         onEvent: (event) => printAgentEvent(event, state, mode),
@@ -464,10 +532,6 @@ async function main() {
   };
 
   const extra = () => ({ provider, stream, agent: agentEnabled, steps: maxSteps, mode });
-
-  const currentSystem = () =>
-    agentEnabled ? buildSystemPrompt(WORKSPACE, userSystem, mode) : userSystem || undefined;
-  const currentToolsTokens = () => (agentEnabled ? toolsTokensFromSpecs(toolSpecs(mode)) : 0);
 
   const printContextUsage = (history: Message[]) => {
     const report = measureContext({
@@ -522,6 +586,28 @@ async function main() {
     }
   };
 
+  const maybeAutoCompress = async (history: Message[]) => {
+    if (mode !== "long") return history;
+    const report = measureContext({
+      history,
+      systemPrompt: currentSystem(),
+      toolsTokens: currentToolsTokens(),
+      maxMessages,
+      contextWindow: provider.contextWindow,
+      maxOutput: provider.maxOutput,
+      mode,
+    });
+    if (!shouldAutoCompress({ history, report })) return history;
+    console.log("\n长程模式：上下文接近上限，自动压缩…");
+    return await runCompress(history);
+  };
+
+  const showLongTask = () => {
+    if (mode !== "long") return;
+    console.log(formatTaskStateCli(tasks.get()));
+    console.log("");
+  };
+
   let rl: readline.Interface | undefined;
   const closeHandles = async () => {
     restoreTerminal();
@@ -553,10 +639,16 @@ async function main() {
     if (oneShot !== undefined) {
       const user: Message = { role: "user", content: oneShot };
       try {
+        if (mode === "long") {
+          session.messages = await maybeAutoCompress(session.messages);
+          tasks.replace(seedGoalFromUser(tasks.get(), oneShot));
+          await rememberTaskState(pool, session, tasks);
+        }
         const { reply, trace, usage } = await ask(session.messages, user);
         lastUsage = usage;
         await saveMessages(pool, session.id, [user, ...trace]);
         session.messages.push(user, ...trace);
+        await rememberTaskState(pool, session, tasks);
         if (!reply.endsWith("\n")) process.stdout.write("\n");
         await maybeNameSession({
           pool,
@@ -567,6 +659,9 @@ async function main() {
         });
       } catch (error) {
         await saveFailedTurn(pool, session, user, error);
+        if (mode === "long") {
+          await rememberTaskState(pool, session, tasks);
+        }
         if (isTurnAborted(error)) {
           if (takeForcedQuit()) forceExit(130);
           process.stdout.write("\n已中止\n");
@@ -585,6 +680,7 @@ async function main() {
     }
     printBanner(session, extra());
     printContext(session.messages, mode);
+    showLongTask();
 
     while (true) {
       sessionRl.pause();
@@ -599,10 +695,16 @@ async function main() {
           printContextUsage(session.messages);
           continue;
         }
+        if (prompt === "/task" || prompt.startsWith("/task ")) {
+          handleTask(tasks, prompt.slice("/task".length).trim());
+          await rememberTaskState(pool, session, tasks);
+          continue;
+        }
         if (prompt === "/compress") {
           try {
             session.messages = await runCompress(session.messages);
             await rememberMode(pool, session, mode);
+            await rememberTaskState(pool, session, tasks);
           } catch (error) {
             if (isTurnAborted(error)) {
               if (takeForcedQuit()) forceExit(130);
@@ -616,14 +718,19 @@ async function main() {
         if (prompt === "/mode" || prompt.startsWith("/mode ")) {
           const result = handleMode(mode, prompt.slice("/mode".length).trim());
           mode = result.mode;
-          if (result.changed) await rememberMode(pool, session, mode);
+          if (result.changed) {
+            await rememberMode(pool, session, mode);
+            if (mode === "long") showLongTask();
+          }
           continue;
         }
         if (prompt === "/new") {
           session = await createConversation(pool, provider.model);
+          reloadTasks();
           await rememberMode(pool, session, mode);
           console.log("");
           printBanner(session, extra());
+          showLongTask();
           continue;
         }
         if (prompt === "/provider" || prompt.startsWith("/provider ")) {
@@ -638,20 +745,28 @@ async function main() {
           const picked = await pickSession(sessionRl, pool, session, restore.arg);
           if (picked) {
             session = picked;
+            reloadTasks();
             await rememberMode(pool, session, mode);
             console.log("");
             printBanner(session, extra());
             printContext(session.messages, mode);
+            showLongTask();
           }
           continue;
         }
 
         const user: Message = { role: "user", content: prompt };
         try {
+          if (mode === "long") {
+            session.messages = await maybeAutoCompress(session.messages);
+            tasks.replace(seedGoalFromUser(tasks.get(), prompt));
+            await rememberTaskState(pool, session, tasks);
+          }
           const { reply, trace, usage } = await ask(session.messages, user);
           lastUsage = usage;
           await saveMessages(pool, session.id, [user, ...trace]);
           session.messages.push(user, ...trace);
+          await rememberTaskState(pool, session, tasks);
           process.stdout.write(reply.endsWith("\n") ? "\n" : "\n\n");
           await maybeNameSession({
             pool,
@@ -662,7 +777,9 @@ async function main() {
           });
         } catch (error) {
           await saveFailedTurn(pool, session, user, error);
+          if (mode === "long") await rememberTaskState(pool, session, tasks);
           if (isTurnAborted(error)) {
+            if (mode === "long") process.stdout.write(`\n${checkpointReply(tasks.get(), "abort")}\n`);
             if (takeForcedQuit()) forceExit(130);
             process.stdout.write("\n已中止\n\n");
             continue;

@@ -1,11 +1,9 @@
 import { completeChat } from "./chat.js";
-import {
-  COMPRESSED_PREFIX,
-  messageTokens,
-  normalizeHistory,
-} from "./context.js";
+import { COMPRESSED_PREFIX, messageTokens, normalizeHistory, type ContextReport } from "./context.js";
 import type { Message } from "./db.js";
+import { harnessModeMessage, lastHarnessMode } from "./mode.js";
 import type { Provider } from "./provider.js";
+import { lastTaskState, taskStateMessage } from "./task-state.js";
 
 const KEEP_USER_TURNS = 2;
 const MIN_STALE_TOKENS = 1200;
@@ -20,7 +18,36 @@ export function splitForCompress(history: Message[]) {
     return { stale: [] as Message[], keep: normalized };
   }
   const cut = userAt[userAt.length - KEEP_USER_TURNS];
-  return { stale: normalized.slice(0, cut), keep: normalized.slice(cut) };
+  let stale = normalized.slice(0, cut);
+  let keep = normalized.slice(cut);
+  stale = stale.filter((message) => !isPinnedControl(message));
+  keep = keep.filter((message) => !isPinnedControl(message));
+  const head: Message[] = [];
+  const mode = lastHarnessMode(normalized);
+  if (mode) head.push(harnessModeMessage(mode));
+  const task = lastTaskState(normalized);
+  if (task) head.push(taskStateMessage(task));
+  return { stale, keep: [...head, ...keep] };
+}
+
+function isPinnedControl(message: Message) {
+  return message.role === "system";
+}
+
+export const LONG_COMPRESS_RATIO = 0.82;
+
+export function shouldAutoCompress(params: {
+  history: Message[];
+  report?: ContextReport;
+  ratio?: number;
+}) {
+  if (!canCompress(params.history)) return false;
+  const report = params.report;
+  if (!report) return false;
+  const ratio = params.ratio ?? LONG_COMPRESS_RATIO;
+  if (report.droppedCount > 0) return true;
+  const pressure = report.used / Math.max(1, report.window);
+  return pressure >= ratio || report.free < Math.min(4000, Math.max(512, report.maxOutput / 2));
 }
 
 export function canCompress(history: Message[]) {
