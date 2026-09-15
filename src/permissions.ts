@@ -7,6 +7,7 @@ import {
   type LongApproveRequest,
   type LongApprover,
 } from "./long-approve.js";
+import type { SubagentStore } from "./subagent-plan.js";
 import type { TaskStore } from "./task-state.js";
 import {
   bashAlwaysAsk,
@@ -28,11 +29,19 @@ export type Policy = {
   mode: AgentMode;
   workspace: string;
   tasks?: TaskStore;
+  nested?: boolean;
+  role?: "explorer" | "worker";
+  subagents?: SubagentStore;
+  spawnSubagent?: (args: Record<string, unknown>, signal?: AbortSignal) => Promise<string>;
   authorize: (name: string, args: Record<string, unknown>) => Promise<string | null>;
 };
 
 export type PolicyHooks = {
   longApprove?: LongApprover;
+  nested?: boolean;
+  role?: "explorer" | "worker";
+  subagents?: SubagentStore;
+  spawnSubagent?: (args: Record<string, unknown>, signal?: AbortSignal) => Promise<string>;
 };
 
 export function createPolicy(
@@ -49,6 +58,10 @@ export function createPolicy(
     },
     workspace,
     tasks,
+    nested: Boolean(hooks?.nested),
+    role: hooks?.role,
+    subagents: hooks?.subagents,
+    spawnSubagent: hooks?.spawnSubagent,
     async authorize(name, args) {
       const current = mode();
       const denied = await authorizeInner(current, workspace, grants, name, args, tasks, hooks);
@@ -77,6 +90,18 @@ async function authorizeInner(
   hooks?: PolicyHooks,
 ): Promise<string | null> {
   if (name === "get_current_time" || name === "calculate" || name === "task_state") return null;
+
+  if (name === "subagent_plan" || name === "subagent") {
+    if (current === "plan") {
+      return "Plan 模式不能派生子代理。请只给出计划，或让用户输入 /mode ask、/mode long 或 /mode full。";
+    }
+    if (hooks?.nested) return "子代理不能再派生子代理（max_depth=1）";
+    return null;
+  }
+
+  if (hooks?.role === "explorer" && (name === "write" || name === "delete")) {
+    return "explorer 子代理是只读的，不能写或删文件";
+  }
 
   if (name === "read" || name === "search") {
     const path = realExistingPath(str(args, name === "read" ? "path" : "directory"));
@@ -130,6 +155,9 @@ async function authorizeInner(
     const escaped = bashEscapesWorkspace(current, workspace, cwd, command);
     if (escaped) return escaped;
     const kind = classifyBash(command);
+    if (hooks?.role === "explorer" && !kind.readonly) {
+      return "explorer 子代理是只读的，不能执行有副作用的命令";
+    }
     if (kind.readonly) return null;
     return await decide(
       current,

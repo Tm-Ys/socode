@@ -41,6 +41,7 @@ import { createPolicy } from "./permissions.js";
 import { createLongApprover } from "./long-approve.js";
 import { promptYou, restoreTerminal, confirmQuit, takeForcedQuit, watchTurnAbort, setPermissionGate } from "./prompt.js";
 import { buildSystemPrompt } from "./system-prompt.js";
+import { createSubagentRunner, createSubagentStore, DEFAULT_SUBAGENT_STEPS } from "./subagent.js";
 import {
   createTaskStore,
   checkpointReply,
@@ -157,10 +158,12 @@ function printAgentEvent(
   event: { type: string; text?: string; name?: string; arguments?: string; result?: string },
   state: { replied: boolean },
   mode: AgentMode,
+  tag?: string,
 ) {
+  const nest = tag ? `  [${tag}] ` : "";
   if (event.type === "delta" && event.text) {
     if (!state.replied) {
-      process.stdout.write(assistantPrefix(mode));
+      process.stdout.write(nest || assistantPrefix(mode));
       state.replied = true;
     }
     process.stdout.write(event.text);
@@ -169,12 +172,12 @@ function printAgentEvent(
   if (event.type === "tool_call" && event.name) {
     const prefix = state.replied ? "\n" : "";
     state.replied = false;
-    process.stdout.write(`${prefix}${formatToolCallLine(event.name, event.arguments ?? "")}`);
+    process.stdout.write(`${prefix}${nest}${formatToolCallLine(event.name, event.arguments ?? "")}`);
     return;
   }
   if (event.type === "tool_result") {
     for (const line of formatToolResultLines(event.result ?? "")) {
-      process.stdout.write(`\n${line}`);
+      process.stdout.write(`\n${nest}${line}`);
     }
     process.stdout.write("\n");
   }
@@ -485,8 +488,26 @@ async function main() {
   await rememberMode(pool, session, mode);
 
   const tasks = createTaskStore(lastTaskState(session.messages));
+  const subagents = createSubagentStore();
   const longApprove = createLongApprover(() => provider);
-  const policy = createPolicy(WORKSPACE, () => mode, tasks, { longApprove });
+  const policy = createPolicy(WORKSPACE, () => mode, tasks, { longApprove, subagents });
+  const childUi = new Map<number, { replied: boolean }>();
+  policy.spawnSubagent = createSubagentRunner({
+    getProvider: () => provider,
+    getPolicy: () => policy,
+    workspace: WORKSPACE,
+    maxSteps: envPositiveInt(process.env.SUBAGENT_STEPS, DEFAULT_SUBAGENT_STEPS),
+    stream,
+    onEvent: (meta, event) => {
+      let ui = childUi.get(meta.job.id);
+      if (!ui) {
+        ui = { replied: false };
+        childUi.set(meta.job.id, ui);
+      }
+      const tag = `${meta.index}/${meta.total} ${meta.job.kind}:${meta.job.label}`;
+      printAgentEvent(event, ui, mode, tag);
+    },
+  });
   let lastUsage: TokenUsage | undefined;
 
   const currentSystem = () =>

@@ -27,6 +27,12 @@ export function summarizeTool(name: string, rawArgs: string) {
       return str(args.expression);
     case "get_current_time":
       return str(args.timezone) || "local";
+    case "subagent_plan": {
+      const agents = Array.isArray(args.agents) ? args.agents.length : 0;
+      return `${agents} agents${str(args.goal) ? `  ${clip(str(args.goal), 40)}` : ""}`;
+    }
+    case "subagent":
+      return args.index !== undefined ? `index=${args.index}` : "all pending";
     default: {
       const compact = Object.entries(args)
         .map(([key, value]) => `${key}=${clip(String(value), 24)}`)
@@ -72,6 +78,7 @@ export function isToolError(text: string) {
     text.startsWith("用户拒绝") ||
     text.includes("Plan 模式") ||
     text.includes("工作区外") ||
+    text.includes("子代理不能再派生") ||
     /^exit=[1-9]/m.test(text)
   );
 }

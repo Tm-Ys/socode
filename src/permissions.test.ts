@@ -159,4 +159,24 @@ describe("createPolicy", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("allows parent subagent tools but not nested children", async () => {
+    const parent = createPolicy(ws, () => "ask");
+    assert.equal(await parent.authorize("subagent_plan", { agents: [{ prompt: "x" }] }), null);
+    const child = createPolicy(ws, () => "ask", undefined, { nested: true, role: "worker" });
+    assert.match((await child.authorize("subagent", {})) ?? "", /不能再派生/);
+  });
+
+  it("keeps explorer subagents read-only", async () => {
+    const policy = createPolicy(ws, () => "ask", undefined, { nested: true, role: "explorer" });
+    assert.match(
+      (await policy.authorize("write", { path: `${ws}/src/mode.ts`, content: "x" })) ?? "",
+      /只读/,
+    );
+    assert.equal(await policy.authorize("read", { path: `${ws}/src/mode.ts` }), null);
+    assert.match(
+      (await policy.authorize("bash", { cwd: ws, command: "rm file" })) ?? "",
+      /只读/,
+    );
+  });
 });

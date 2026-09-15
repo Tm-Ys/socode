@@ -103,7 +103,10 @@ export async function runAgent(params: {
   const maxSteps = Math.max(1, params.maxSteps ?? DEFAULT_MAX_AGENT_STEPS);
   const messages = [...params.messages];
   const trace: Message[] = [];
-  const tools = params.useTools === false ? [] : toolSpecs(params.policy?.mode);
+  const tools = params.useTools === false ? [] : toolSpecs(params.policy?.mode, {
+    nested: params.policy?.nested,
+    role: params.policy?.role,
+  });
   const usage: TokenUsage = { promptTokens: 0, completionTokens: 0 };
   const longHorizon = params.policy?.mode === "long";
   let lastSig = "";

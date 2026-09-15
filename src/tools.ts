@@ -9,6 +9,7 @@ import {
 } from "./fs-tools.js";
 import type { AgentMode } from "./mode.js";
 import type { Policy } from "./permissions.js";
+import { formatSubagentPlan, parseSubagentPlan } from "./subagent-plan.js";
 import { formatTaskStateCli, patchFromToolArgs } from "./task-state.js";
 
 export type ToolSpec = {
@@ -161,14 +162,63 @@ const tools: Tool[] = [
       throw new Error("task_state 需要会话上下文");
     },
   },
+  {
+    name: "subagent_plan",
+    description:
+      "规划要派出的子代理。先调用本工具，再调用 subagent 执行。agents 为 1–6 项，每项 kind=explorer（只读调研）或 worker（可改文件），prompt 必须自洽（子代理看不到父对话）。",
+    parameters: {
+      type: "object",
+      properties: {
+        goal: { type: "string", description: "为什么拆成多个子代理" },
+        agents: {
+          type: "array",
+          minItems: 1,
+          maxItems: 6,
+          items: {
+            type: "object",
+            properties: {
+              kind: { type: "string", description: "explorer 或 worker" },
+              label: { type: "string", description: "短名，便于对照结果" },
+              prompt: { type: "string", description: "给该子代理的完整任务说明" },
+            },
+            required: ["prompt"],
+          },
+        },
+      },
+      required: ["agents"],
+    },
+    execute: () => {
+      throw new Error("subagent_plan 需要会话上下文");
+    },
+  },
+  {
+    name: "subagent",
+    description:
+      "按最近一次 subagent_plan 执行子代理。不传参数则按顺序跑完全部 pending；传 index 只跑其中一个。每个子代理独立上下文，只把摘要返回给你。",
+    parameters: {
+      type: "object",
+      properties: {
+        index: { type: "integer", description: "1-based，只执行规划里的这一项" },
+        retry: { type: "boolean", description: "true 时重跑已完成项" },
+      },
+    },
+    execute: () => {
+      throw new Error("subagent 需要会话上下文");
+    },
+  },
 ];
 
 const READ_TOOLS = new Set(["read", "search", "calculate", "get_current_time"]);
 
-export function toolSpecs(mode?: AgentMode): ToolSpec[] {
+export function toolSpecs(
+  mode?: AgentMode,
+  opts?: { nested?: boolean; role?: "explorer" | "worker" },
+): ToolSpec[] {
   return tools
     .filter((tool) => {
-      if (tool.name === "task_state") return mode === "long";
+      if (opts?.nested && (tool.name === "subagent_plan" || tool.name === "subagent")) return false;
+      if (tool.name === "task_state") return mode === "long" && !opts?.nested;
+      if (opts?.role === "explorer") return READ_TOOLS.has(tool.name);
       if (mode === "plan") return READ_TOOLS.has(tool.name);
       return true;
     })
@@ -197,6 +247,9 @@ export async function executeTool(
     if (name === "task_state" && policy?.mode !== "long") {
       return "权限拒绝: task_state 只在 Long 模式下可用。请先 /mode long。";
     }
+    if ((name === "subagent_plan" || name === "subagent") && policy?.nested) {
+      return "权限拒绝: 子代理不能再派生子代理（max_depth=1）";
+    }
     if (policy) {
       const denied = await policy.authorize(name, args);
       if (denied) return denied.startsWith("权限拒绝") ? denied : `权限拒绝: ${denied}`;
@@ -206,6 +259,15 @@ export async function executeTool(
       if (!policy?.tasks) return "工具执行失败: 当前会话没有任务状态";
       const next = policy.tasks.patch(patchFromToolArgs(args));
       return formatTaskStateCli(next);
+    }
+    if (name === "subagent_plan") {
+      if (!policy?.subagents) return "工具执行失败: 当前会话没有子代理规划器";
+      const plan = policy.subagents.setPlan(parseSubagentPlan(args));
+      return formatSubagentPlan(plan);
+    }
+    if (name === "subagent") {
+      if (!policy?.spawnSubagent) return "工具执行失败: 子代理运行器未配置";
+      return await policy.spawnSubagent(args, signal);
     }
     if (name === "bash") {
       return await runBash(str(args, "command"), str(args, "cwd"), 30_000, signal, {

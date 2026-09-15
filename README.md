@@ -50,6 +50,8 @@ npm start -- --mode long
 - **Plan**（`/mode plan`）：只能 `read` / `search` 和拟定计划，不能写文件、删文件、执行命令。
 - **Long / 长程**（`/mode long` 或 `/mode 长程`）：给多步骤长任务用。工作区 `read` / `search` 预授权；写、删、git、网络等副作用走**独立 LLM 审批**（干净上下文、只输出 JSON，失败则拒绝），**不会变成 Full**。密钥、工作区外、sudo 仍本地硬拒绝。进入后维护 TaskState（`/task`），上下文接近上限时自动 `/compress`。设计说明见 `docs/LONG-MODE.md`。
 
+Ask / Full / Long 可用 **子代理**：先 `subagent_plan` 规划 1–6 个 `explorer`（只读）或 `worker`（可写），再 `subagent` 按规划执行。子代理自带干净上下文，只把摘要还给父代理；不能再开子代理。Plan 模式没有这两个工具。
+
 macOS 上 `bash` 会套 `sandbox-exec`，Linux Ask 需要 `bwrap`。Ask 下只允许写入工作区，沙箱起不来就拒绝执行。Full 在沙箱失败时会警告后裸跑。非 TTY（例如 `--input`）在 Ask 模式下会拒绝写入，需要 `--mode full`。每次授权会追加到工作区 `.socode-audit.jsonl`。
 
 交互命令：

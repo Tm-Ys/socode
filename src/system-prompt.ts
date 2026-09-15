@@ -28,8 +28,8 @@ function basePrompt(workspace: string, mode: AgentMode) {
     mode === "plan"
       ? "`read`、`search`、`calculate`、`get_current_time`"
       : mode === "long"
-        ? "`read`、`write`、`delete`、`bash`、`search`、`calculate`、`get_current_time`、`task_state`"
-        : "`read`、`write`、`delete`、`bash`、`search`、`calculate`、`get_current_time`";
+        ? "`read`、`write`、`delete`、`bash`、`search`、`calculate`、`get_current_time`、`task_state`、`subagent_plan`、`subagent`"
+        : "`read`、`write`、`delete`、`bash`、`search`、`calculate`、`get_current_time`、`subagent_plan`、`subagent`";
   const editRule =
     mode === "plan"
       ? "- 当前不能改仓库。不要调用写文件、删文件或 bash。"
@@ -45,6 +45,11 @@ ${editRule}
 - \`read\`/\`write\` 的 \`path\`、\`bash\` 的 \`cwd\`、\`search\` 的 \`directory\` 必须是绝对路径，禁止相对路径。本仓库请以 \`${workspace}/\` 为前缀。
 - 搜文本或文件名优先用 \`search\`，或 \`bash\` 里的 \`rg\` / \`rg --files\`。不要用 \`grep\`。读文件用 \`read\`，不要 \`cat\`/\`python\` 整文件倒出来。
 - 不要编造工具结果。失败就读错误、改参数重试，或说明卡住的原因。
+${mode === "plan" ? "" : `
+# 子代理
+
+多块互不依赖的调研或改动时：先 \`subagent_plan\` 列出 1–6 个 agents（\`explorer\` 只读调研，\`worker\` 可改文件），每人 \`prompt\` 必须自洽（他们看不到本对话）。再调用 \`subagent\` 按规划执行；不传参数就跑完全部 pending。综合他们的摘要回复用户，不要把子代理内部轨迹贴出去。子代理不能再开子代理。
+`}
 
 # 工作方式
 
