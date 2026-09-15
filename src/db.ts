@@ -1,10 +1,18 @@
 import pg from "pg";
 
-export type Role = "system" | "user" | "assistant";
+export type Role = "system" | "user" | "assistant" | "tool";
+
+export type ToolCall = {
+  id: string;
+  name: string;
+  arguments: string;
+};
 
 export type Message = {
   role: Role;
   content: string;
+  toolCallId?: string;
+  toolCalls?: ToolCall[];
 };
 
 const { Pool } = pg;
@@ -47,23 +55,31 @@ async function migrate(pool: pg.Pool) {
     CREATE TABLE IF NOT EXISTS conversations (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       model TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '新会话',
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
     ALTER TABLE conversations
       ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+    ALTER TABLE conversations
+      ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT '新会话';
 
     CREATE TABLE IF NOT EXISTS messages (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-      role TEXT NOT NULL CHECK (role IN ('system', 'user', 'assistant')),
-      content TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL DEFAULT '',
       seq INTEGER NOT NULL,
+      payload JSONB NOT NULL DEFAULT '{}'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
     );
 
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS seq INTEGER;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb;
+    ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_role_check;
+    ALTER TABLE messages ADD CONSTRAINT messages_role_check
+      CHECK (role IN ('system', 'user', 'assistant', 'tool'));
 
     UPDATE messages
     SET seq = ordered.seq
@@ -91,12 +107,55 @@ async function migrate(pool: pg.Pool) {
   `);
 }
 
-export async function createConversation(pool: pg.Pool, model: string) {
-  const result = await pool.query<{ id: string }>(
-    "INSERT INTO conversations (model) VALUES ($1) RETURNING id",
-    [model],
+export type Session = {
+  id: string;
+  title: string;
+  messages: Message[];
+};
+
+export type ConversationRow = {
+  id: string;
+  title: string;
+  model: string;
+  updated_at: Date;
+  first_user: string | null;
+};
+
+export async function createConversation(pool: pg.Pool, model: string, title = "新会话") {
+  const result = await pool.query<{ id: string; title: string }>(
+    "INSERT INTO conversations (model, title) VALUES ($1, $2) RETURNING id, title",
+    [model, title],
   );
-  return result.rows[0].id;
+  return { id: result.rows[0].id, title: result.rows[0].title, messages: [] as Message[] };
+}
+
+export async function updateConversationTitle(pool: pg.Pool, conversationId: string, title: string) {
+  await pool.query("UPDATE conversations SET title = $2, updated_at = now() WHERE id = $1", [
+    conversationId,
+    title,
+  ]);
+}
+
+export async function listConversations(pool: pg.Pool, limit = 30) {
+  const result = await pool.query<ConversationRow>(
+    `SELECT
+       c.id,
+       c.title,
+       c.model,
+       c.updated_at,
+       (
+         SELECT m.content
+         FROM messages m
+         WHERE m.conversation_id = c.id AND m.role = 'user'
+         ORDER BY m.seq ASC
+         LIMIT 1
+       ) AS first_user
+     FROM conversations c
+     ORDER BY c.updated_at DESC, c.created_at DESC
+     LIMIT $1`,
+    [limit],
+  );
+  return result.rows;
 }
 
 export async function latestConversationId(pool: pg.Pool) {
@@ -111,42 +170,57 @@ export async function conversationExists(pool: pg.Pool, conversationId: string) 
   return (result.rowCount ?? 0) > 0;
 }
 
+export async function loadSession(pool: pg.Pool, conversationId: string): Promise<Session> {
+  const result = await pool.query<{ id: string; title: string }>(
+    "SELECT id, title FROM conversations WHERE id = $1",
+    [conversationId],
+  );
+  const row = result.rows[0];
+  if (!row) throw new Error(`找不到会话 ${conversationId}`);
+  return { id: row.id, title: row.title, messages: await loadMessages(pool, row.id) };
+}
+
 export async function openConversation(
   pool: pg.Pool,
   opts: { model: string; id?: string; fresh?: boolean },
-) {
-  if (opts.id) {
-    if (!(await conversationExists(pool, opts.id))) {
-      throw new Error(`找不到会话 ${opts.id}`);
-    }
-    return { id: opts.id, messages: await loadMessages(pool, opts.id) };
-  }
+): Promise<Session> {
+  if (opts.id) return await loadSession(pool, opts.id);
 
   if (!opts.fresh) {
     const latest = await latestConversationId(pool);
-    if (latest) {
-      return { id: latest, messages: await loadMessages(pool, latest) };
-    }
+    if (latest) return await loadSession(pool, latest);
   }
 
-  const id = await createConversation(pool, opts.model);
-  return { id, messages: [] as Message[] };
+  return await createConversation(pool, opts.model);
 }
 
 export async function loadMessages(pool: pg.Pool, conversationId: string) {
-  const result = await pool.query<Message>(
-    "SELECT role, content FROM messages WHERE conversation_id = $1 ORDER BY seq ASC, created_at ASC",
+  const result = await pool.query<{ role: Role; content: string; payload: unknown }>(
+    "SELECT role, content, payload FROM messages WHERE conversation_id = $1 ORDER BY seq ASC, created_at ASC",
     [conversationId],
   );
-  return result.rows;
+  return result.rows.map(rowToMessage);
 }
 
-export async function saveTurn(
-  pool: pg.Pool,
-  conversationId: string,
-  user: Message,
-  assistant: Message,
-) {
+function rowToMessage(row: { role: Role; content: string; payload: unknown }): Message {
+  const payload = (row.payload ?? {}) as { tool_call_id?: string; tool_calls?: ToolCall[] };
+  return {
+    role: row.role,
+    content: row.content,
+    toolCallId: payload.tool_call_id,
+    toolCalls: payload.tool_calls,
+  };
+}
+
+function messagePayload(message: Message) {
+  const payload: Record<string, unknown> = {};
+  if (message.toolCallId) payload.tool_call_id = message.toolCallId;
+  if (message.toolCalls?.length) payload.tool_calls = message.toolCalls;
+  return payload;
+}
+
+export async function saveMessages(pool: pg.Pool, conversationId: string, messages: Message[]) {
+  if (messages.length === 0) return;
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -155,18 +229,15 @@ export async function saveTurn(
       "SELECT COALESCE(MAX(seq), 0) AS seq FROM messages WHERE conversation_id = $1",
       [conversationId],
     );
-    const seq = Number(next.rows[0]?.seq ?? 0);
-    await client.query(
-      "INSERT INTO messages (conversation_id, role, content, seq, created_at) VALUES ($1, $2, $3, $4, clock_timestamp())",
-      [conversationId, user.role, user.content, seq + 1],
-    );
-    await client.query(
-      "INSERT INTO messages (conversation_id, role, content, seq, created_at) VALUES ($1, $2, $3, $4, clock_timestamp())",
-      [conversationId, assistant.role, assistant.content, seq + 2],
-    );
-    await client.query("UPDATE conversations SET updated_at = now() WHERE id = $1", [
-      conversationId,
-    ]);
+    let seq = Number(next.rows[0]?.seq ?? 0);
+    for (const message of messages) {
+      seq += 1;
+      await client.query(
+        "INSERT INTO messages (conversation_id, role, content, seq, payload, created_at) VALUES ($1, $2, $3, $4, $5, clock_timestamp())",
+        [conversationId, message.role, message.content, seq, messagePayload(message)],
+      );
+    }
+    await client.query("UPDATE conversations SET updated_at = now() WHERE id = $1", [conversationId]);
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");

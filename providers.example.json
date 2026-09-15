@@ -1,0 +1,14 @@
+{
+  "active": "deepseek",
+  "providers": [
+    {
+      "name": "deepseek",
+      "url": "https://api.deepseek.com/v1",
+      "api": "sk-...",
+      "model": "deepseek-flash",
+      "contextWindow": 128000,
+      "maxOutput": 8192,
+      "thinkingEffort": "none"
+    }
+  ]
+}

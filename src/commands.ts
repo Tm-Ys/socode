@@ -1,0 +1,59 @@
+export type SlashCommand = {
+  name: string;
+  hint: string;
+};
+
+export const SLASH_COMMANDS: SlashCommand[] = [
+  { name: "/new", hint: "开新会话" },
+  { name: "/session", hint: "列出并恢复对话" },
+  { name: "/chat", hint: "列出并恢复对话" },
+  { name: "/provider", hint: "查看当前 Provider" },
+  { name: "/provider edit", hint: "编辑 Provider" },
+  { name: "/provider list", hint: "列出已保存的 Provider" },
+  { name: "/provider new", hint: "新增 Provider" },
+  { name: "/exit", hint: "退出" },
+  { name: "/quit", hint: "退出" },
+];
+
+export function matchCommands(input: string) {
+  if (!input.startsWith("/")) return [];
+  return SLASH_COMMANDS.filter((command) => command.name.startsWith(input));
+}
+
+export function longestCommonPrefix(values: string[]) {
+  if (values.length === 0) return "";
+  let prefix = values[0];
+  for (const value of values.slice(1)) {
+    let i = 0;
+    while (i < prefix.length && i < value.length && prefix[i] === value[i]) i += 1;
+    prefix = prefix.slice(0, i);
+    if (!prefix) break;
+  }
+  return prefix;
+}
+
+export function ghostText(input: string, matches: SlashCommand[]) {
+  if (matches.length === 0) return "";
+  const prefix = longestCommonPrefix(matches.map((item) => item.name));
+  return prefix.startsWith(input) ? prefix.slice(input.length) : "";
+}
+
+export function resolveCommand(input: string) {
+  const trimmed = input.trim();
+  if (!trimmed.startsWith("/")) return trimmed;
+  const matches = matchCommands(trimmed);
+  const exact = matches.find((item) => item.name === trimmed);
+  if (exact) return exact.name;
+  if (matches.length === 1) return matches[0].name;
+  const prefix = longestCommonPrefix(matches.map((item) => item.name));
+  if (prefix && SLASH_COMMANDS.some((item) => item.name === prefix)) return prefix;
+  return trimmed;
+}
+
+export function completeCommand(input: string) {
+  const matches = matchCommands(input);
+  if (matches.length === 0) return input;
+  if (matches.length === 1) return matches[0].name;
+  const prefix = longestCommonPrefix(matches.map((item) => item.name));
+  return prefix.length > input.length ? prefix : input;
+}
