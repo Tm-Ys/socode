@@ -17,7 +17,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/mode full", hint: "Full Access，直接改文件" },
   { name: "/mode ask", hint: "Ask，改文件先审批" },
   { name: "/mode plan", hint: "Plan，只能看和写计划" },
-  { name: "/mode long", hint: "Long / 长程，长任务+任务状态" },
+  { name: "/mode long", hint: "Long / 长程，长任务 + LLM 审批副作用" },
   { name: "/mode 长程", hint: "Long 模式的中文别名" },
   { name: "/task", hint: "查看或更新长程任务状态" },
   { name: "/exit", hint: "退出" },

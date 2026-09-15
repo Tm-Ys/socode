@@ -38,6 +38,7 @@ import {
 import { formatConversationList, generateTitle, isDefaultTitle } from "./title.js";
 import { assistantPrefix, harnessModeMessage, lastHarnessMode, loadMode, modeHint, modeLabel, paintMode, parseMode, userPrefix, type AgentMode } from "./mode.js";
 import { createPolicy } from "./permissions.js";
+import { createLongApprover } from "./long-approve.js";
 import { promptYou, restoreTerminal, confirmQuit, takeForcedQuit, watchTurnAbort, setPermissionGate } from "./prompt.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import {
@@ -344,7 +345,7 @@ function handleMode(mode: AgentMode, arg: string): { mode: AgentMode; changed: b
     console.log(`\n/mode full   ${paintMode("full", "Full Access")}，直接改文件和跑命令`);
     console.log(`/mode ask    ${paintMode("ask", "Ask")}，创建/修改/删除先按 y/n/a 审批`);
     console.log(`/mode plan   ${paintMode("plan", "Plan")}，只能看和写计划，不能动手`);
-    console.log(`/mode long   ${paintMode("long", "Long")} / 长程，记住目标、自动压缩；只读预授权，写入仍要确认\n`);
+    console.log(`/mode long   ${paintMode("long", "Long")} / 长程，记住目标、自动压缩；副作用走 LLM 审批，不是 Full\n`);
     return { mode, changed: false };
   }
   const next = parseMode(rest);
@@ -484,7 +485,8 @@ async function main() {
   await rememberMode(pool, session, mode);
 
   const tasks = createTaskStore(lastTaskState(session.messages));
-  const policy = createPolicy(WORKSPACE, () => mode, tasks);
+  const longApprove = createLongApprover(() => provider);
+  const policy = createPolicy(WORKSPACE, () => mode, tasks, { longApprove });
   let lastUsage: TokenUsage | undefined;
 
   const currentSystem = () =>

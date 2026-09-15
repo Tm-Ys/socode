@@ -2,6 +2,11 @@ import type { AgentMode } from "./mode.js";
 import { workspaceModeLabel } from "./mode.js";
 import { writeAudit } from "./audit.js";
 import { askPermission, type PermissionAnswer } from "./prompt.js";
+import {
+  logLongApprove,
+  type LongApproveRequest,
+  type LongApprover,
+} from "./long-approve.js";
 import type { TaskStore } from "./task-state.js";
 import {
   bashAlwaysAsk,
@@ -26,7 +31,16 @@ export type Policy = {
   authorize: (name: string, args: Record<string, unknown>) => Promise<string | null>;
 };
 
-export function createPolicy(workspace: string, mode: () => AgentMode, tasks?: TaskStore): Policy {
+export type PolicyHooks = {
+  longApprove?: LongApprover;
+};
+
+export function createPolicy(
+  workspace: string,
+  mode: () => AgentMode,
+  tasks?: TaskStore,
+  hooks?: PolicyHooks,
+): Policy {
   const grants = new Set<string>();
 
   return {
@@ -37,7 +51,7 @@ export function createPolicy(workspace: string, mode: () => AgentMode, tasks?: T
     tasks,
     async authorize(name, args) {
       const current = mode();
-      const denied = await authorizeInner(current, workspace, grants, name, args);
+      const denied = await authorizeInner(current, workspace, grants, name, args, tasks, hooks);
       writeAudit({
         workspace,
         mode: current,
@@ -50,16 +64,17 @@ export function createPolicy(workspace: string, mode: () => AgentMode, tasks?: T
   };
 }
 
-// Long 与 Ask 共用工作区限制：只预授权工作区内只读 read/search，以及
-// classifyBash.readonly 的短命令。write/delete/git/网络/解释器仍走 y/n/a。
-// 不要把 Long 当成 Full。audit P0（symlink、密钥、bash 误判史）未全部封闭前，
-// 不对工作区写入做静默预授权。
+// Long：工作区只读仍本地预授权。副作用不走用户 y/n，也不盲目放行，
+// 而是独立 LLM 审批（见 long-approve.ts）。本地先硬拒绝密钥/区外/sudo。
+// Ask/Full/Plan 不使用该审批器。
 async function authorizeInner(
   current: AgentMode,
   workspace: string,
   grants: Set<string>,
   name: string,
   args: Record<string, unknown>,
+  tasks?: TaskStore,
+  hooks?: PolicyHooks,
 ): Promise<string | null> {
   if (name === "get_current_time" || name === "calculate" || name === "task_state") return null;
 
@@ -79,6 +94,10 @@ async function authorizeInner(
       op: writeKind(path),
       path,
       detail: displayPath(workspace, path),
+      tool: name,
+      args,
+      tasks,
+      hooks,
     });
   }
 
@@ -88,6 +107,10 @@ async function authorizeInner(
       op: "delete",
       path,
       detail: displayPath(workspace, path),
+      tool: name,
+      args,
+      tasks,
+      hooks,
     });
   }
 
@@ -116,6 +139,10 @@ async function authorizeInner(
         op: kind.op,
         path: cwd,
         detail: clip(command.replace(/\s+/g, " "), 72),
+        tool: name,
+        args,
+        tasks,
+        hooks,
       },
       bashAlwaysAsk(command) ? undefined : `${kind.op}:${isInsideWorkspace(workspace, cwd) ? "in" : "out"}:${commandHead(command)}`,
     );
@@ -128,12 +155,24 @@ async function decide(
   mode: AgentMode,
   workspace: string,
   grants: Set<string>,
-  req: { op: FileOp; path: string; detail: string },
+  req: {
+    op: FileOp;
+    path: string;
+    detail: string;
+    tool: string;
+    args: Record<string, unknown>;
+    tasks?: TaskStore;
+    hooks?: PolicyHooks;
+  },
   grantKey?: string,
 ): Promise<string | null> {
   const blocked = mutationDenied(mode, workspace, req.path, req.op);
   if (blocked) return blocked;
   if (mode === "full") return null;
+
+  if (mode === "long") {
+    return await longSideEffect(workspace, req);
+  }
 
   const inside = isInsideWorkspace(workspace, req.path);
   const key = grantKey ?? `${req.op}:${inside ? "in" : "out"}`;
@@ -146,6 +185,47 @@ async function decide(
   );
   if (answer === "deny") return `用户拒绝了${opLabel(req.op)}: ${req.detail}`;
   if (answer === "always") grants.add(key);
+  return null;
+}
+
+async function longSideEffect(
+  workspace: string,
+  req: {
+    op: FileOp;
+    detail: string;
+    tool: string;
+    args: Record<string, unknown>;
+    tasks?: TaskStore;
+    hooks?: PolicyHooks;
+  },
+): Promise<string | null> {
+  const payload: LongApproveRequest = {
+    tool: req.tool,
+    args: req.args,
+    workspace,
+    goal: req.tasks?.get().goal,
+  };
+  if (!req.hooks?.longApprove) {
+    return `Long 审批器未配置，已拒绝${opLabel(req.op)}: ${req.detail}`;
+  }
+  let verdict;
+  try {
+    verdict = await req.hooks.longApprove(payload);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    verdict = { allow: false as const, reason: `审批调用失败: ${reason}` };
+  }
+  logLongApprove(req.tool, verdict);
+  writeAudit({
+    workspace,
+    mode: "long",
+    tool: req.tool,
+    decision: verdict.allow ? "allow" : "deny",
+    detail: `judge ${verdict.allow ? "allow" : "deny"}: ${verdict.reason}`.slice(0, 200),
+  });
+  if (!verdict.allow) {
+    return `Long 审批拒绝: ${verdict.reason}`;
+  }
   return null;
 }
 

@@ -70,22 +70,69 @@ describe("createPolicy", () => {
     assert.equal(await policy.authorize("bash", { cwd: ws, command: "ls" }), null);
   });
 
-  it("auto-allows Long workspace reads but not writes", async () => {
+  it("auto-allows Long workspace reads but not unjudged writes", async () => {
     const policy = createPolicy(ws, () => "long");
     assert.equal(await policy.authorize("read", { path: `${ws}/src/mode.ts` }), null);
     assert.equal(await policy.authorize("search", { directory: `${ws}/src`, pattern: "AGENT_MODES" }), null);
     const denied = await policy.authorize("write", { path: `${ws}/src/mode.ts`, content: "x" });
-    assert.match(denied ?? "", /用户拒绝了/);
+    assert.match(denied ?? "", /审批器未配置|审批拒绝/);
   });
 
   it("does not treat Long as Full for deletes or secrets", async () => {
     const policy = createPolicy(ws, () => "long");
     const deleted = await policy.authorize("delete", { path: `${ws}/README.md` });
-    assert.match(deleted ?? "", /用户拒绝了/);
+    assert.match(deleted ?? "", /审批器未配置|审批拒绝/);
     const secret = await policy.authorize("read", { path: `${ws}/.env` });
     assert.match(secret ?? "", /受保护/);
     const outside = await policy.authorize("write", { path: "/tmp/socode-outside.txt", content: "x" });
     assert.match(outside ?? "", /工作区外/);
+  });
+
+  it("uses the Long LLM judge for in-workspace side effects", async () => {
+    const calls: string[] = [];
+    const policy = createPolicy(ws, () => "long", undefined, {
+      longApprove: async (req) => {
+        calls.push(req.tool);
+        return { allow: req.tool === "write", reason: req.tool === "write" ? "小范围修改" : "太危险" };
+      },
+    });
+    assert.equal(
+      await policy.authorize("write", { path: `${ws}/src/mode.ts`, content: "x" }),
+      null,
+    );
+    const denied = await policy.authorize("bash", { cwd: ws, command: "npm test" });
+    assert.match(denied ?? "", /Long 审批拒绝: 太危险/);
+    assert.deepEqual(calls, ["write", "bash"]);
+  });
+
+  it("does not call the Long judge for local hard-denies", async () => {
+    let called = 0;
+    const policy = createPolicy(ws, () => "long", undefined, {
+      longApprove: async () => {
+        called += 1;
+        return { allow: true, reason: "should not run" };
+      },
+    });
+    assert.match(
+      (await policy.authorize("write", { path: "/tmp/socode-outside.txt", content: "x" })) ?? "",
+      /工作区外/,
+    );
+    assert.match((await policy.authorize("read", { path: `${ws}/.env` })) ?? "", /受保护/);
+    assert.match((await policy.authorize("bash", { cwd: ws, command: "sudo ls" })) ?? "", /sudo/);
+    assert.equal(called, 0);
+  });
+
+  it("Ask side effects still use human y/n, not the Long judge", async () => {
+    let called = 0;
+    const policy = createPolicy(ws, () => "ask", undefined, {
+      longApprove: async () => {
+        called += 1;
+        return { allow: true, reason: "should not run" };
+      },
+    });
+    const denied = await policy.authorize("write", { path: `${ws}/src/mode.ts`, content: "x" });
+    assert.match(denied ?? "", /用户拒绝了/);
+    assert.equal(called, 0);
   });
 
   it("hard-denies sudo in Ask", async () => {

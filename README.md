@@ -48,7 +48,7 @@ npm start -- --mode long
 - **Full Access**（`/mode full`）：直接改文件和执行命令，仍禁止系统目录和密钥路径（`/etc`、`/usr`、`~/.ssh`、`~/.aws`、工作区 `.env` 等）。
 - **Ask**（`/mode ask`）：写、删、有副作用的 `bash` 和所有 `git` 命令先审批，且只能在工作区内；`ls` / `pwd` 这类短只读命令不打断。bash 的 cwd 和重定向都不能离开工作区。`a` 按命令名授权，不会把 `git status` 扩成 `sudo`。
 - **Plan**（`/mode plan`）：只能 `read` / `search` 和拟定计划，不能写文件、删文件、执行命令。
-- **Long / 长程**（`/mode long` 或 `/mode 长程`）：给多步骤长任务用。工作区 `read` / `search` 预授权；写、删、网络、git、密钥仍要确认，**不会变成 Full**。进入后维护 TaskState（`/task`），上下文接近上限时自动 `/compress`，步数或 `--budget` 用尽则留下检查点。设计说明见 `docs/LONG-MODE.md`。
+- **Long / 长程**（`/mode long` 或 `/mode 长程`）：给多步骤长任务用。工作区 `read` / `search` 预授权；写、删、git、网络等副作用走**独立 LLM 审批**（干净上下文、只输出 JSON，失败则拒绝），**不会变成 Full**。密钥、工作区外、sudo 仍本地硬拒绝。进入后维护 TaskState（`/task`），上下文接近上限时自动 `/compress`。设计说明见 `docs/LONG-MODE.md`。
 
 macOS 上 `bash` 会套 `sandbox-exec`，Linux Ask 需要 `bwrap`。Ask 下只允许写入工作区，沙箱起不来就拒绝执行。Full 在沙箱失败时会警告后裸跑。非 TTY（例如 `--input`）在 Ask 模式下会拒绝写入，需要 `--mode full`。每次授权会追加到工作区 `.socode-audit.jsonl`。
 

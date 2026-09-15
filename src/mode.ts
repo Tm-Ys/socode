@@ -82,7 +82,7 @@ export function modeHint(mode: AgentMode) {
   if (mode === "full") return "可改文件和跑命令，仍禁止系统目录与密钥文件";
   if (mode === "plan") return "只能阅读和拟定计划，不能改文件或执行有副作用的命令";
   if (mode === "long") {
-    return "长程：记住目标并自动压缩；工作区只读预授权；写/删/网络/密钥仍要确认，不会变成 Full";
+    return "长程：记住目标并自动压缩；只读预授权；副作用由独立 LLM 审批，不会变成 Full";
   }
   return "创建/修改/删除和 git 会先询问，仅限工作区内；回车视为拒绝；工作区外写入请改用 /mode full";
 }
@@ -97,7 +97,7 @@ export function modeRules(mode: AgentMode) {
   if (mode === "long") {
     return [
       "当前是 Long（长程）模式：面向多步骤、跨压缩的长任务。",
-      "权限与 Ask 同类，不是 Full：工作区内 `read` / `search` 自动允许；创建/修改/删除、git、网络、解释器、工作区外路径仍要用户确认。被拒绝后不要换一种方式硬做。",
+      "权限与 Ask 同类边界，不是 Full：工作区内 `read` / `search` 自动允许。创建/修改/删除、git、网络、解释器由独立的 Long 审批 LLM 决定（干净上下文、只输出 JSON），不是对用户 y/n，也不是盲目放行。密钥、工作区外、sudo 仍本地硬拒绝。被拒绝后不要换一种方式硬做。",
       "先 search 再 read，再做小范围编辑。每完成一个里程碑就验证（跑已记录的 verifyCommands 或最小测试），用 `task_state` 更新 TaskState。",
       "不要空转：同一工具连续失败就停下来改方法。上下文变挤时系统会自动 /compress；你只需在摘要后继续当前目标，不要重做已完成项。",
       "步数或 token 预算用尽时会保存检查点。用户下一轮同一会话即可接着做，不要假装任务已经全部完成。",
