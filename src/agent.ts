@@ -64,7 +64,6 @@ export async function runAgent(params: {
   useTools?: boolean;
   signal?: AbortSignal;
   policy?: Policy;
-  onGate?: (pause: boolean) => void;
   onEvent?: (event: AgentEvent) => void;
 }): Promise<AgentOutcome> {
   const maxSteps = Math.max(1, params.maxSteps ?? DEFAULT_MAX_AGENT_STEPS);
@@ -130,12 +129,7 @@ export async function runAgent(params: {
           output = `权限拒绝: 同一工具连续调用 ${REPEAT_LIMIT} 次，已停止以免空转。请换一种做法或直接回复用户。`;
           doom = true;
         } else {
-          params.onGate?.(true);
-          try {
-            output = await executeTool(call.name, call.arguments, params.signal, params.policy).catch(fail);
-          } finally {
-            params.onGate?.(false);
-          }
+          output = await executeTool(call.name, call.arguments, params.signal, params.policy).catch(fail);
         }
         if (isToolError(output)) {
           failCount = call.name === failName ? failCount + 1 : 1;
@@ -163,10 +157,22 @@ export async function runAgent(params: {
       }
 
       if (doom) {
+        const done = new Set(
+          trace.filter((message) => message.role === "tool").map((message) => message.toolCallId),
+        );
+        for (const call of result.toolCalls) {
+          if (done.has(call.id)) continue;
+          const output = "权限拒绝: 因重复调用已跳过";
+          params.onEvent?.({ type: "tool_result", name: call.name, result: output });
+          const skipped: Message = { role: "tool", content: output, toolCallId: call.id };
+          messages.push(skipped);
+          trace.push(skipped);
+        }
         const reply = "检测到重复或连续失败的工具调用，已停止以免空转。";
         const stop: Message = { role: "assistant", content: reply };
-        trace.push(stop);
-        return { reply, trace, usage: nonemptyUsage(usage) };
+        const closed = closeIncompleteTrace(trace);
+        closed.push(stop);
+        return { reply, trace: closed, usage: nonemptyUsage(usage) };
       }
     }
 

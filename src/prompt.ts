@@ -222,49 +222,60 @@ export function watchTurnAbort() {
 
 export type PermissionAnswer = "allow" | "deny" | "always";
 
+let permissionGate: { pause: () => void; resume: () => void } | undefined;
+
+export function setPermissionGate(gate?: { pause: () => void; resume: () => void }) {
+  permissionGate = gate;
+}
+
 export async function askPermission(title: string, detail: string): Promise<PermissionAnswer> {
   if (!stdin.isTTY || !stdout.isTTY) return "deny";
+  permissionGate?.pause();
   const yellow = "\x1b[33m";
   const dim = "\x1b[2m";
   stdout.write(
     `\n${yellow}? ${title}${RESET}\n  ${dim}${detail}${RESET}\n  ${dim}y 允许  n 拒绝  a 本会话同类一律允许${RESET}\n`,
   );
 
-  return await new Promise((resolve) => {
-    const wasRaw = stdin.isRaw;
-    stdin.setRawMode(true);
-    stdin.resume();
+  try {
+    return await new Promise((resolve) => {
+      const wasRaw = stdin.isRaw;
+      stdin.setRawMode(true);
+      stdin.resume();
 
-    const done = (answer: PermissionAnswer) => {
-      stdin.off("data", onData);
-      if (stdin.isTTY) stdin.setRawMode(Boolean(wasRaw));
-      const label = answer === "allow" ? "允许" : answer === "always" ? "本会话一律允许" : "拒绝";
-      stdout.write(`  → ${label}\n`);
-      resolve(answer);
-    };
+      const done = (answer: PermissionAnswer) => {
+        stdin.off("data", onData);
+        if (stdin.isTTY) stdin.setRawMode(Boolean(wasRaw));
+        const label = answer === "allow" ? "允许" : answer === "always" ? "本会话一律允许" : "拒绝";
+        stdout.write(`  → ${label}\n`);
+        resolve(answer);
+      };
 
-    const onData = (chunk: Buffer | string) => {
-      const key = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-      if (key === "y" || key === "Y" || key === "\r" || key === "\n") {
-        done("allow");
-        return;
-      }
-      if (key === "a" || key === "A") {
-        done("always");
-        return;
-      }
-      if (key === "n" || key === "N" || isEscapeKey(key)) {
-        done("deny");
-        return;
-      }
-      if (key === "\x03") {
-        confirmQuit();
-        done("deny");
-      }
-    };
+      const onData = (chunk: Buffer | string) => {
+        const key = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+        if (key === "y" || key === "Y") {
+          done("allow");
+          return;
+        }
+        if (key === "a" || key === "A") {
+          done("always");
+          return;
+        }
+        if (key === "n" || key === "N" || key === "\r" || key === "\n" || isEscapeKey(key)) {
+          done("deny");
+          return;
+        }
+        if (key === "\x03") {
+          confirmQuit();
+          done("deny");
+        }
+      };
 
-    stdin.on("data", onData);
-  });
+      stdin.on("data", onData);
+    });
+  } finally {
+    permissionGate?.resume();
+  }
 }
 
 async function readPlainLine(label: string) {

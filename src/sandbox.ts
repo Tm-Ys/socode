@@ -1,6 +1,6 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, normalize, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import type { AgentMode } from "./mode.js";
 
 export type FileOp = "create" | "modify" | "delete" | "exec";
@@ -22,12 +22,70 @@ const DENY_WRITE_DIRS = [
 const SECRET_DIR_NAMES = [".ssh", ".gnupg", ".aws", ".azure", ".kube", ".config/gcloud"];
 const SECRET_FILE_NAMES = [".netrc", ".npmrc", ".pypirc", ".git-credentials"];
 const SECRET_REL_FILES = [".docker/config.json"];
+const SECRET_BASENAMES = new Set([".env", "providers.json"]);
+
+const SHELL_META = /[;&|`$()<>\n]|&&|\|\|/;
+const READONLY_CMD =
+  /^(ls|pwd|whoami|date|uname|which|true|false|hostname|id)(\s+-[A-Za-z0-9-]+)*(\s+\.(?:\s|$)|$|\s+[A-Za-z0-9._/-]+)*$/;
+
+const HARD_DENY_BINS = new Set(["sudo", "su", "dd", "mkfs", "reboot", "shutdown"]);
+const NEVER_ALWAYS_BINS = new Set([
+  "sudo",
+  "su",
+  "dd",
+  "mkfs",
+  "curl",
+  "wget",
+  "python",
+  "python3",
+  "node",
+  "perl",
+  "ruby",
+  "osascript",
+  "kill",
+  "pkill",
+]);
+const WRAPPER_BINS = new Set([
+  "env",
+  "xargs",
+  "nohup",
+  "nice",
+  "timeout",
+  "watch",
+  "stdbuf",
+  "bash",
+  "sh",
+  "zsh",
+  "dash",
+  "command",
+  "eval",
+  "exec",
+]);
 
 export function resolvePath(input: string) {
   const path = input.trim();
   if (!path) throw new Error("缺少路径");
   if (!isAbsolute(path)) throw new Error(`必须是绝对路径，收到: ${path}`);
   return normalize(path);
+}
+
+export function realExistingPath(input: string) {
+  const path = resolvePath(input);
+  const missing: string[] = [];
+  let current = path;
+  while (!existsSync(current)) {
+    const parent = dirname(current);
+    if (parent === current) break;
+    missing.unshift(basename(current));
+    current = parent;
+  }
+  let real = current;
+  try {
+    if (existsSync(current)) real = realpathSync(current);
+  } catch {
+    real = current;
+  }
+  return missing.reduce((dir, name) => join(dir, name), real);
 }
 
 export function isInsideWorkspace(workspace: string, path: string) {
@@ -39,6 +97,10 @@ export function isInsideWorkspace(workspace: string, path: string) {
 
 export function denyReason(path: string): string | null {
   const target = normalize(path);
+  const base = basename(target);
+  if (SECRET_BASENAMES.has(base) || (/^\.env\./.test(base) && base !== ".env.example")) {
+    return `拒绝访问受保护文件: ${base}`;
+  }
   const home = homedir();
   for (const dir of [
     ...DENY_WRITE_DIRS,
@@ -90,9 +152,6 @@ export function mutationDenied(
   return null;
 }
 
-const READONLY_HEAD =
-  /^(ls|pwd|whoami|date|uname|which|type|file|stat|head|tail|wc|echo|printf|cat|rg|find|tree|du|df|env|id|hostname|realpath|dirname|basename)(\s|$)/;
-
 export function classifyBash(command: string): { readonly: boolean; op: FileOp } {
   const text = command.trim();
   if (!text) return { readonly: true, op: "exec" };
@@ -120,14 +179,97 @@ export function classifyBash(command: string): { readonly: boolean; op: FileOp }
   ) {
     return { readonly: false, op: "exec" };
   }
+  if (SHELL_META.test(text) || !READONLY_CMD.test(text)) {
+    return { readonly: false, op: "exec" };
+  }
+  return { readonly: true, op: "exec" };
+}
 
-  const chunks = text.split(/\s*(?:&&|\|\||;|\n)\s*/).filter(Boolean);
-  const allReadonly = chunks.every((chunk) => {
-    const pipes = chunk.split("|").map((part) => part.trim());
-    return pipes.every((part) => READONLY_HEAD.test(part) && !/(^|[\s;&|])>(?!>)|>>/.test(part));
-  });
-  if (allReadonly) return { readonly: true, op: "exec" };
-  return { readonly: false, op: "exec" };
+export function commandHead(command: string) {
+  const token = command.trim().split(/\s+/)[0] ?? "";
+  return token.replace(/^.*\//, "") || "sh";
+}
+
+export function bashAlwaysAsk(command: string) {
+  if (SHELL_META.test(command)) return true;
+  const head = commandHead(command);
+  if (NEVER_ALWAYS_BINS.has(head) || WRAPPER_BINS.has(head)) return true;
+  for (const bin of NEVER_ALWAYS_BINS) {
+    if (new RegExp(`(?:^|[\\s;/])${bin}(?:\\s|$)`).test(command)) return true;
+  }
+  return false;
+}
+
+export function bashHardDenied(mode: AgentMode, command: string): string | null {
+  if (mode === "full") return null;
+  const head = commandHead(command);
+  if (HARD_DENY_BINS.has(head)) {
+    return `Ask 模式禁止 ${head}。需要的话请 /mode full。`;
+  }
+  for (const bin of HARD_DENY_BINS) {
+    if (new RegExp(`(?:^|[\\s;/])${bin}(?:\\s|$)`).test(command)) {
+      return `Ask 模式禁止 ${bin}。需要的话请 /mode full。`;
+    }
+  }
+  return null;
+}
+
+export function extractAbsolutePaths(command: string, cwd: string) {
+  const found: string[] = [];
+  const home = homedir();
+  const add = (raw: string) => {
+    if (!raw) return;
+    found.push(raw);
+  };
+  const re = /(?:^|[\s"'=<>])(~(?:\/[^\s"';|&<>]*)?|\/[^\s"';|&<>]*)/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(command))) {
+    let raw = match[1];
+    if (raw === "~") raw = home;
+    else if (raw.startsWith("~/")) raw = `${home}${raw.slice(1)}`;
+    if (isAbsolute(raw)) add(raw);
+  }
+  if (/(^|[\s;&|])>(?!>)/.test(command) || />>/.test(command)) {
+    const redirect = command.match(/(?:^|[\s;&|])>>?\s*([^\s;&|]+)/);
+    if (redirect?.[1] && !redirect[1].startsWith("/") && !redirect[1].startsWith("~")) {
+      add(join(cwd, redirect[1]));
+    }
+  }
+  for (const token of command.match(/[^\s;|&<>`]+/g) ?? []) {
+    if (!token || token.startsWith("-")) continue;
+    const cleaned = token.replace(/^['"]|['"]$/g, "");
+    const base = basename(cleaned.replace(/\/+$/, ""));
+    const looksSecret = SECRET_BASENAMES.has(base) || (/^\.env\./.test(base) && base !== ".env.example");
+    const looksPath =
+      cleaned.startsWith("/") ||
+      cleaned.startsWith("~") ||
+      cleaned.startsWith(".") ||
+      cleaned.includes("/");
+    if (!looksSecret && !looksPath) continue;
+    let raw = cleaned;
+    if (raw === "~") raw = home;
+    else if (raw.startsWith("~/")) raw = `${home}${raw.slice(1)}`;
+    else if (!isAbsolute(raw)) raw = join(cwd, raw);
+    add(raw);
+  }
+  return found;
+}
+
+export function bashEscapesWorkspace(mode: AgentMode, workspace: string, cwd: string, command: string) {
+  if (mode === "full") {
+    for (const path of extractAbsolutePaths(command, cwd)) {
+      const real = realExistingPath(path);
+      const blocked = denyReason(real);
+      if (blocked) return blocked;
+    }
+    return null;
+  }
+  for (const path of extractAbsolutePaths(command, cwd)) {
+    const real = realExistingPath(path);
+    const blocked = mutationDenied(mode, workspace, real, classifyBash(command).op);
+    if (blocked) return blocked;
+  }
+  return null;
 }
 
 export function opLabel(op: FileOp) {
@@ -139,6 +281,7 @@ export function opLabel(op: FileOp) {
 
 export type BashSandbox = {
   workspace?: string;
+  cwd?: string;
   confineWrites?: boolean;
 };
 
@@ -146,18 +289,75 @@ export function bashSpawn(command: string, sandbox?: BashSandbox): {
   file: string;
   args: string[];
   fallback?: { file: string; args: string[] };
+  unavailable?: string;
 } {
   const direct = { file: "/bin/bash", args: ["-c", command] };
-  if (process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec")) return direct;
+  if (!sandbox?.confineWrites) {
+    if (process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec")) {
+      return {
+        file: "/usr/bin/sandbox-exec",
+        args: ["-p", seatbeltProfile(sandbox), "/bin/bash", "-c", command],
+        fallback: { ...direct, args: ["-c", `${command}`] },
+      };
+    }
+    return { ...direct, fallback: undefined, unavailable: undefined };
+  }
+
+  if (process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec")) {
+    return {
+      file: "/usr/bin/sandbox-exec",
+      args: ["-p", seatbeltProfile(sandbox), "/bin/bash", "-c", command],
+    };
+  }
+  if (process.platform === "linux" && existsSync("/usr/bin/bwrap") && sandbox.workspace) {
+    const root = normalize(resolve(sandbox.workspace));
+    const cwd = sandbox.cwd ?? root;
+    return {
+      file: "/usr/bin/bwrap",
+      args: [
+        "--die-with-parent",
+        "--new-session",
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--bind",
+        root,
+        root,
+        "--chdir",
+        cwd,
+        "/bin/bash",
+        "-c",
+        command,
+      ],
+    };
+  }
   return {
-    file: "/usr/bin/sandbox-exec",
-    args: ["-p", seatbeltProfile(sandbox), "/bin/bash", "-c", command],
-    fallback: sandbox?.confineWrites ? undefined : direct,
+    ...direct,
+    unavailable: "Ask 模式无法启用 OS 沙箱（需要 macOS sandbox-exec 或 Linux bwrap），已拒绝执行",
   };
 }
 
 export function shouldFallbackSandbox(stderr: string, code: number | null) {
   return code === 71 || /sandbox_apply|sandbox-exec:/i.test(stderr);
+}
+
+export function scrubEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (!value) continue;
+    if (/^(api_key|API|OPENAI_API_KEY|ANTHROPIC_API_KEY|AWS_SECRET_ACCESS_KEY|DATABASE_URL)$/i.test(key)) {
+      continue;
+    }
+    if (/(secret|token|password|api[_-]?key)/i.test(key) && !/^PATH|HOME|USER|SHELL|TERM|TMPDIR|LANG|LC_/i.test(key)) {
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
 }
 
 function seatbeltProfile(sandbox?: BashSandbox) {
@@ -179,14 +379,13 @@ function seatbeltProfile(sandbox?: BashSandbox) {
   const secrets = `(deny file-read* ${denySecretDirs} ${denySecretFiles})(deny file-write* ${denySecretFiles})`;
   if (sandbox?.confineWrites && sandbox.workspace) {
     const root = normalize(resolve(sandbox.workspace));
-    const tmp = `(subpath "/tmp") (subpath "/private/tmp") (subpath "/var/folders")`;
-    return `(version 1)(allow default)(deny file-write*)(allow file-write* (subpath ${sb(root)}) ${tmp})${secrets}`;
+    return `(version 1)(allow default)(deny file-write*)(allow file-write* (subpath ${sb(root)}))${secrets}`;
   }
   return `(version 1)(allow default)(deny file-write* ${denyWrite})${secrets}`;
 }
 
 function sb(path: string) {
-  return `"${path.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  return `"${path.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\)/g, "\\)")}"`;
 }
 
 function joinHome(home: string, name: string) {

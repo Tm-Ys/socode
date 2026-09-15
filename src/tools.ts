@@ -172,6 +172,7 @@ export async function executeTool(
     if (name === "bash") {
       return await runBash(str(args, "command"), str(args, "cwd"), 30_000, signal, {
         workspace: policy?.workspace ?? process.cwd(),
+        cwd: str(args, "cwd"),
         confineWrites: policy?.mode !== "full",
       });
     }

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import { createPolicy } from "./permissions.js";
 
@@ -23,16 +26,31 @@ describe("createPolicy", () => {
     assert.match(denied ?? "", /Plan/);
   });
 
-  it("allows readonly bash outside the workspace in Ask", async () => {
+  it("denies Ask bash cwd outside the workspace", async () => {
     const policy = createPolicy(ws, () => "ask");
     const denied = await policy.authorize("bash", { cwd: "/tmp", command: "ls" });
-    assert.equal(denied, null);
+    assert.match(denied ?? "", /工作区内/);
   });
 
   it("denies mutating bash outside the workspace in Ask", async () => {
     const policy = createPolicy(ws, () => "ask");
     const denied = await policy.authorize("bash", { cwd: "/tmp", command: "mkdir x" });
-    assert.match(denied ?? "", /工作区外/);
+    assert.match(denied ?? "", /工作区/);
+  });
+
+  it("denies Ask bash redirects to /tmp even with workspace cwd", async () => {
+    const policy = createPolicy(ws, () => "ask");
+    const denied = await policy.authorize("bash", {
+      cwd: ws,
+      command: "echo hi > /tmp/socode-audit-pwned",
+    });
+    assert.match(denied ?? "", /工作区外|受保护/);
+  });
+
+  it("denies Ask read of workspace .env", async () => {
+    const policy = createPolicy(ws, () => "ask");
+    const denied = await policy.authorize("read", { path: `${ws}/.env` });
+    assert.match(denied ?? "", /受保护/);
   });
 
   it("requires approval for git in Ask even when cwd is inside the workspace", async () => {
@@ -45,5 +63,35 @@ describe("createPolicy", () => {
     const policy = createPolicy(ws, () => "full");
     const denied = await policy.authorize("write", { path: "/etc/socode-test", content: "x" });
     assert.match(denied ?? "", /受保护/);
+  });
+
+  it("allows readonly ls in Ask inside the workspace", async () => {
+    const policy = createPolicy(ws, () => "ask");
+    assert.equal(await policy.authorize("bash", { cwd: ws, command: "ls" }), null);
+  });
+
+  it("hard-denies sudo in Ask", async () => {
+    const policy = createPolicy(ws, () => "ask");
+    const denied = await policy.authorize("bash", { cwd: ws, command: "sudo ls" });
+    assert.match(denied ?? "", /禁止 sudo/);
+  });
+
+  it("denies Ask bash reading .env", async () => {
+    const policy = createPolicy(ws, () => "ask");
+    const denied = await policy.authorize("bash", { cwd: ws, command: "cat .env" });
+    assert.match(denied ?? "", /受保护/);
+  });
+
+  it("denies Ask read through a symlink to /etc/passwd", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "socode-"));
+    const link = join(dir, "link");
+    try {
+      symlinkSync("/etc/passwd", link);
+      const policy = createPolicy(dir, () => "ask");
+      const denied = await policy.authorize("read", { path: link });
+      assert.match(denied ?? "", /受保护|工作区内/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

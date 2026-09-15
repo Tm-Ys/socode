@@ -38,7 +38,7 @@ import {
 import { formatConversationList, generateTitle, isDefaultTitle } from "./title.js";
 import { assistantPrefix, harnessModeMessage, lastHarnessMode, loadMode, modeHint, modeLabel, paintMode, parseMode, userPrefix, type AgentMode } from "./mode.js";
 import { createPolicy } from "./permissions.js";
-import { promptYou, restoreTerminal, confirmQuit, takeForcedQuit, watchTurnAbort } from "./prompt.js";
+import { promptYou, restoreTerminal, confirmQuit, takeForcedQuit, watchTurnAbort, setPermissionGate } from "./prompt.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { formatToolCallLine, formatToolResultLines } from "./tool-ui.js";
 import { toolSpecs } from "./tools.js";
@@ -434,6 +434,7 @@ async function main() {
   const ask = async (history: Message[], user: Message) => {
     const state = { replied: false };
     const abort = watchTurnAbort();
+    setPermissionGate(abort);
     try {
       return await runAgent({
         provider,
@@ -442,7 +443,6 @@ async function main() {
         useTools: agentEnabled,
         signal: abort.signal,
         policy,
-        onGate: (pause) => (pause ? abort.pause() : abort.resume()),
         messages: buildApiMessages({
           history,
           user,
@@ -458,6 +458,7 @@ async function main() {
         onEvent: (event) => printAgentEvent(event, state, mode),
       });
     } finally {
+      setPermissionGate(undefined);
       abort.dispose();
     }
   };

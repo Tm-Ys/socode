@@ -59,7 +59,7 @@ export function userPrefix(mode: AgentMode, tty = Boolean(process.stdout.isTTY))
 export function modeHint(mode: AgentMode) {
   if (mode === "full") return "可改文件和跑命令，仍禁止系统目录与密钥文件";
   if (mode === "plan") return "只能阅读和拟定计划，不能改文件或执行有副作用的命令";
-  return "创建/修改/删除和 git 会先询问，仅限工作区内；工作区外写入请改用 /mode full";
+  return "创建/修改/删除和 git 会先询问，仅限工作区内；回车视为拒绝；工作区外写入请改用 /mode full";
 }
 
 export function modeRules(mode: AgentMode) {
@@ -69,7 +69,7 @@ export function modeRules(mode: AgentMode) {
   if (mode === "full") {
     return "可以直接在工作区写文件和执行命令。不要碰系统目录和密钥文件。破坏性操作前仍要确认用户意图。";
   }
-  return "创建、修改、删除文件仅限工作区内，会先征得用户同意（y 允许 / n 拒绝 / a 本会话同类一律允许）。所有 git 命令同样要先问。不能在工作区外写文件、删文件或把有副作用的 bash cwd 放到工作区外；需要区外权限时让用户 `/mode full`。被拒绝后不要换一种方式硬做，改为说明并给计划。";
+  return "创建、修改、删除文件仅限工作区内，会先征得用户同意（y 允许 / n 拒绝 / 回车拒绝 / a 本会话同类一律允许）。所有 git 命令同样要先问。不能读 .env 等密钥文件，不能在工作区外写文件、删文件，也不能把 bash cwd 或重定向放到工作区外；需要区外权限时让用户 `/mode full`。被拒绝后不要换一种方式硬做，改为说明并给计划。";
 }
 
 export function modeInstruction(mode: AgentMode) {

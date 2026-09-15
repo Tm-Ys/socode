@@ -1,8 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
-import { dirname, extname, isAbsolute, join, normalize } from "node:path";
+import { mkdir, open, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { dirname, extname, isAbsolute, join } from "node:path";
 import { throwIfAborted, TurnAborted } from "./abort.js";
-import { bashSpawn, denyReason, shouldFallbackSandbox, type BashSandbox } from "./sandbox.js";
+import { bashSpawn, denyReason, realExistingPath, scrubEnv, shouldFallbackSandbox, type BashSandbox } from "./sandbox.js";
 
 const MAX_READ_BYTES = 200_000;
 const MAX_OUTPUT_CHARS = 32_000;
@@ -13,7 +13,7 @@ export function requireAbsolutePath(input: string, label: string) {
   const path = input.trim();
   if (!path) throw new Error(`缺少 ${label}`);
   if (!isAbsolute(path)) throw new Error(`${label} 必须是绝对路径，收到: ${path}`);
-  const resolved = normalize(path);
+  const resolved = realExistingPath(path);
   const blocked = denyReason(resolved);
   if (blocked) throw new Error(blocked);
   return resolved;
@@ -35,15 +35,25 @@ export async function readAbsoluteFile(path: string, offset?: number, limit?: nu
   const file = requireAbsolutePath(path, "path");
   const info = await stat(file);
   if (!info.isFile()) throw new Error(`path 必须是文件: ${file}`);
-  const buf = await readFile(file);
+  const toRead = Math.min(info.size, MAX_READ_BYTES);
+  const handle = await open(file, "r");
+  let buf: Buffer;
+  try {
+    buf = Buffer.alloc(toRead);
+    const got = await handle.read(buf, 0, toRead, 0);
+    buf = buf.subarray(0, got.bytesRead);
+  } finally {
+    await handle.close();
+  }
   if (buf.includes(0)) throw new Error(`拒绝读取二进制文件: ${file}`);
   const text = buf.toString("utf8");
+  const truncated = info.size > MAX_READ_BYTES;
   const lines = text.split("\n");
   const start = Math.max(1, offset ?? 1);
   const end = limit && limit > 0 ? Math.min(lines.length, start - 1 + limit) : lines.length;
   const slice = lines.slice(start - 1, end);
   const body = slice.map((line, i) => `${String(start + i).padStart(6)}|${line}`).join("\n");
-  const header = `${file} (${lines.length} lines, bytes=${info.size})`;
+  const header = `${file} (${lines.length} lines, bytes=${info.size}${truncated ? ", truncated" : ""})`;
   return clip(`${header}\n${body}`);
 }
 
@@ -77,7 +87,8 @@ export async function runBash(
   const dir = await requireAbsoluteDir(cwd, "cwd");
   if (!command.trim()) throw new Error("缺少 command");
   throwIfAborted(signal);
-  const spec = bashSpawn(command, sandbox);
+  const spec = bashSpawn(command, { ...sandbox, cwd: dir });
+  if (spec.unavailable) throw new Error(spec.unavailable);
   const first = await runBashProcess(spec.file, spec.args, dir, timeoutMs, signal, command);
   if (
     spec.fallback &&
@@ -92,7 +103,7 @@ export async function runBash(
       signal,
       command,
     );
-    return formatBashResult(retry);
+    return `警告: OS 沙箱未能启用，已裸跑 bash\n${formatBashResult(retry)}`;
   }
   return formatBashResult(first);
 }
@@ -119,7 +130,7 @@ function runBashProcess(
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(file, args, {
       cwd: dir,
-      env: process.env,
+      env: scrubEnv(process.env),
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -154,10 +165,10 @@ function runBashProcess(
     }, timeoutMs);
     signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout?.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString("utf8");
+      if (stdout.length < MAX_OUTPUT_CHARS) stdout += chunk.toString("utf8").slice(0, MAX_OUTPUT_CHARS - stdout.length);
     });
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
+      if (stderr.length < MAX_OUTPUT_CHARS) stderr += chunk.toString("utf8").slice(0, MAX_OUTPUT_CHARS - stderr.length);
     });
     child.on("error", (error) => {
       settle(() => reject(signal?.aborted ? new TurnAborted() : error));
@@ -217,7 +228,9 @@ async function searchWithRg(dir: string, pattern: string, glob?: string, signal?
     };
     signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString("utf8");
+      if (stdout.length < MAX_OUTPUT_CHARS) {
+        stdout += chunk.toString("utf8").slice(0, MAX_OUTPUT_CHARS - stdout.length);
+      }
     });
     child.stderr.resume();
     child.on("error", () => settle(() => resolve(null)));
