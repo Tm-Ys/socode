@@ -93,6 +93,26 @@ export function capActivated(decision: SkillActivation, prompt: string, allowed:
   return { activate: kept.filter((name) => reasons[name]), reasons };
 }
 
+export function mergeForcedSkills(
+  decision: SkillActivation,
+  forced: string[],
+  allowed: string[],
+  reason = "用户 /setplan 强制",
+): SkillActivation {
+  const names = forced.filter((name) => allowed.includes(name));
+  if (!names.length) return decision;
+  let activate = [...names, ...decision.activate.filter((name) => !names.includes(name))];
+  const reasons: Record<string, string> = { ...decision.reasons };
+  if (names.includes("grill-me") && !names.includes("brainstorm")) {
+    activate = activate.filter((name) => name !== "brainstorm");
+    delete reasons.brainstorm;
+  }
+  for (const name of activate) {
+    reasons[name] = names.includes(name) ? reason : reasons[name] ?? "";
+  }
+  return { activate: activate.filter((name) => reasons[name]), reasons };
+}
+
 export function formatActivateUser(prompt: string, mode: AgentMode, candidates: SkillRecord[]) {
   const cards = candidates.map((skill) => {
     const when = WHEN[skill.name as BaseSkillName] ?? skill.description.slice(0, 80);
@@ -110,17 +130,22 @@ export async function activateBaseSkills(params: {
   complete?: ChatFn;
   timeoutMs?: number;
   signal?: AbortSignal;
+  force?: string[];
 }): Promise<SkillActivation> {
   const allowed = params.skills
     .map((skill) => skill.name)
     .filter((name): name is BaseSkillName => (BASE_SKILL_NAMES as readonly string[]).includes(name));
   const unique = [...new Set(allowed)];
   const prompt = params.prompt.trim();
-  if (!unique.length || !prompt) return EMPTY_SKILL_ACTIVATION;
+  const forced = (params.force ?? []).filter((name) => unique.includes(name));
+  if (!unique.length || (!prompt && !forced.length)) return EMPTY_SKILL_ACTIVATION;
   const mentioned = mentionedBaseSkills(prompt, unique);
-  if (skipSkillActivate(prompt) && !mentioned.length) return EMPTY_SKILL_ACTIVATION;
+  if (skipSkillActivate(prompt) && !mentioned.length && !forced.length) return EMPTY_SKILL_ACTIVATION;
   if (!params.provider.url || !params.provider.api || !params.provider.model) {
-    return namedOnly(mentioned);
+    return mergeForcedSkills(namedOnly(mentioned), forced, unique);
+  }
+  if (skipSkillActivate(prompt) && forced.length && !mentioned.length) {
+    return mergeForcedSkills(EMPTY_SKILL_ACTIVATION, forced, unique);
   }
   const candidates = unique
     .map((name) => params.skills.find((skill) => skill.name === name))
@@ -145,9 +170,9 @@ export async function activateBaseSkills(params: {
       ],
     });
     const parsed = parseActivateReply(result.content ?? "", unique);
-    return capActivated(parsed, prompt, unique);
+    return mergeForcedSkills(capActivated(parsed, prompt, unique), forced, unique);
   } catch {
-    return namedOnly(mentioned);
+    return mergeForcedSkills(namedOnly(mentioned), forced, unique);
   } finally {
     clearTimeout(timer);
     params.signal?.removeEventListener("abort", onAbort);

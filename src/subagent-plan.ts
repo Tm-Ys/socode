@@ -70,7 +70,7 @@ export function parseSubagentPlan(args: Record<string, unknown>, max = MAX_SUBAG
 export function formatSubagentPlan(plan: SubagentPlan) {
   const lines = [
     `[subagent_plan] ${plan.jobs.length} 个任务${plan.goal ? `  goal: ${plan.goal}` : ""}`,
-    "下一步调用 subagent（不传参数则按顺序执行全部 pending）。可用 index 只跑其中一个。",
+    "下一步调用 subagent（不传参数则跑完全部 pending：explorer 并行，worker 彼此串行以免抢同一文件）。可用 index 只跑其中一个。",
   ];
   for (const job of plan.jobs) {
     lines.push(`${job.id}. ${job.status}  ${job.kind}  ${job.label}`);

@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { takeMessage } from "./mcp-client.js";
 import { expandEnv, parseMcpConfig } from "./mcp-config.js";
-import { formatToolResult, mcpToolName, normalizeSchema, openMcpHub, type McpHub } from "./mcp.js";
+import { formatToolResult, mcpChildEnv, mcpToolName, normalizeSchema, openMcpHub, type McpHub } from "./mcp.js";
 import { createPolicy } from "./permissions.js";
 import { executeTool, toolSpecs } from "./tools.js";
 
@@ -34,6 +34,20 @@ describe("mcp config", () => {
     assert.equal(parsed.servers[0].args[1], "@modelcontextprotocol/server-github");
     assert.match(parsed.errors[0] ?? "", /HTTP/);
     assert.equal(expandEnv("x${MISSING:-z}y"), "xzy");
+  });
+
+  it("scrubs inherited secrets but keeps server-provided env", () => {
+    const prev = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "sk-should-not-leak";
+    try {
+      const env = mcpChildEnv({ GITHUB_TOKEN: "from-config" });
+      assert.equal(env.GITHUB_TOKEN, "from-config");
+      assert.equal(env.OPENAI_API_KEY, undefined);
+      assert.ok(env.PATH);
+    } finally {
+      if (prev === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = prev;
+    }
   });
 });
 

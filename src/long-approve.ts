@@ -91,6 +91,14 @@ export function summarizeApproveArgs(name: string, args: Record<string, unknown>
       preview: clip(content, 400),
     };
   }
+  if (name === "edit") {
+    return {
+      path: str(args.path),
+      old: clip(str(args.old_string), 200),
+      neu: clip(str(args.new_string), 200),
+      replace_all: args.replace_all === true,
+    };
+  }
   if (name === "delete") return { path: str(args.path) };
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(args)) {

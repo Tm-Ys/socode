@@ -64,6 +64,34 @@ export async function writeAbsoluteFile(path: string, content: string) {
   return `已写入 ${file} (${Buffer.byteLength(content, "utf8")} bytes)`;
 }
 
+export async function editAbsoluteFile(path: string, oldText: string, newText: string, replaceAll = false) {
+  if (!oldText) throw new Error("old_string 不能为空");
+  const file = requireAbsolutePath(path, "path");
+  let info;
+  try {
+    info = await stat(file);
+  } catch {
+    throw new Error(`文件不存在: ${file}`);
+  }
+  if (!info.isFile()) throw new Error(`path 必须是文件: ${file}`);
+  const text = await readFile(file, "utf8");
+  let count = 0;
+  let from = 0;
+  while (from <= text.length) {
+    const at = text.indexOf(oldText, from);
+    if (at < 0) break;
+    count += 1;
+    from = at + Math.max(1, oldText.length);
+  }
+  if (count === 0) throw new Error("未找到要替换的文本。先 read，再提供文件里的精确片段。");
+  if (!replaceAll && count > 1) {
+    throw new Error(`找到 ${count} 处相同文本。把 old_string 写得更独特，或设 replace_all=true。`);
+  }
+  const next = replaceAll ? text.split(oldText).join(newText) : text.replace(oldText, newText);
+  await writeFile(file, next, "utf8");
+  return `已编辑 ${file}（${replaceAll ? count : 1} 处，${Buffer.byteLength(text)} → ${Buffer.byteLength(next)} bytes）`;
+}
+
 export async function deleteAbsoluteFile(path: string) {
   const file = requireAbsolutePath(path, "path");
   let info;

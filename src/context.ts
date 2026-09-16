@@ -13,6 +13,9 @@ import {
   type AgentMode,
 } from "./mode.js";
 import { formatTaskStateSummary, isTaskStateMessage, parseTaskStateMessage } from "./task-state.js";
+import { isPlanMessage, parsePlanMessage, planProgress } from "./plan.js";
+import { renderMarkdown, useColor } from "./markdown.js";
+import { isRecapMessage } from "./recap.js";
 import type { Message } from "./db.js";
 import type { ToolSpec } from "./tools.js";
 
@@ -22,7 +25,7 @@ export function normalizeHistory(history: Message[]): Message[] {
   const out: Message[] = [];
   for (const message of history) {
     if (message.role === "system") {
-      if (isHarnessModeMessage(message) || isTaskStateMessage(message)) out.push({ ...message });
+      if (isHarnessModeMessage(message) || isTaskStateMessage(message) || isPlanMessage(message)) out.push({ ...message });
       continue;
     }
     if (message.role === "tool") {
@@ -296,15 +299,27 @@ export function formatPreviewLine(message: Message, mode: AgentMode = "ask") {
     const summary = state ? formatTaskStateSummary(state) : "（无法解析）";
     return `task  ${summary}`;
   }
+  if (isPlanMessage(message)) {
+    const plan = parsePlanMessage(message);
+    if (!plan) return "plan  （无法解析）";
+    const { done, total } = planProgress(plan);
+    const goal = plan.goal.trim() || "（无目标）";
+    const short = goal.length > 48 ? `${goal.slice(0, 47)}…` : goal;
+    return `plan  ${short}  ${done}/${total}`;
+  }
   const prefix = assistantPrefix(mode);
+  const painted = (text: string) => renderMarkdown(text, { color: useColor() });
   if (message.role === "user") return `${userPrefix(mode)}${message.content}`;
+  if (isRecapMessage(message)) {
+    return useColor() ? `\x1b[2m${message.content}\x1b[0m` : message.content;
+  }
   if (message.role === "tool") return formatToolResultLines(message.content).join("\n");
   if (message.toolCalls?.length) {
     const calls = message.toolCalls
       .map((call) => formatToolCallLine(call.name, call.arguments))
       .join("\n");
     const text = message.content.trim();
-    return text ? `${prefix}${text}\n${calls}` : calls;
+    return text ? `${prefix}${painted(text)}\n${calls}` : calls;
   }
-  return `${prefix}${message.content}`;
+  return `${prefix}${painted(message.content)}`;
 }

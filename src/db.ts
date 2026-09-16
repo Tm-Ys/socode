@@ -111,7 +111,16 @@ export type Session = {
   id: string;
   title: string;
   messages: Message[];
+  persisted: boolean;
 };
+
+export function emptySession(title = "新会话"): Session {
+  return { id: "", title, messages: [], persisted: false };
+}
+
+export function sessionHasChat(messages: Message[]) {
+  return messages.some((message) => message.role === "user" || message.role === "assistant" || message.role === "tool");
+}
 
 export type ConversationRow = {
   id: string;
@@ -126,7 +135,7 @@ export async function createConversation(pool: pg.Pool, model: string, title = "
     "INSERT INTO conversations (model, title) VALUES ($1, $2) RETURNING id, title",
     [model, title],
   );
-  return { id: result.rows[0].id, title: result.rows[0].title, messages: [] as Message[] };
+  return { id: result.rows[0].id, title: result.rows[0].title, messages: [] as Message[], persisted: true };
 }
 
 export async function updateConversationTitle(pool: pg.Pool, conversationId: string, title: string) {
@@ -177,21 +186,36 @@ export async function loadSession(pool: pg.Pool, conversationId: string): Promis
   );
   const row = result.rows[0];
   if (!row) throw new Error(`找不到会话 ${conversationId}`);
-  return { id: row.id, title: row.title, messages: await loadMessages(pool, row.id) };
+  return { id: row.id, title: row.title, messages: await loadMessages(pool, row.id), persisted: true };
 }
 
 export async function openConversation(
   pool: pg.Pool,
-  opts: { model: string; id?: string; fresh?: boolean },
+  opts: { model: string; id?: string; resume?: boolean; fresh?: boolean },
 ): Promise<Session> {
   if (opts.id) return await loadSession(pool, opts.id);
-
-  if (!opts.fresh) {
+  if (opts.resume && !opts.fresh) {
     const latest = await latestConversationId(pool);
     if (latest) return await loadSession(pool, latest);
   }
+  return emptySession();
+}
 
-  return await createConversation(pool, opts.model);
+export async function persistSession(pool: pg.Pool, session: Session, model: string) {
+  if (session.persisted && session.id) return session;
+  const created = await createConversation(pool, model, session.title);
+  session.id = created.id;
+  session.title = created.title;
+  session.persisted = true;
+  if (session.messages.length) await saveMessages(pool, session.id, session.messages);
+  return session;
+}
+
+export async function discardEmptySession(pool: pg.Pool, session: Session) {
+  if (!session.persisted || !session.id || sessionHasChat(session.messages)) return;
+  await pool.query("DELETE FROM conversations WHERE id = $1", [session.id]);
+  session.id = "";
+  session.persisted = false;
 }
 
 export async function loadMessages(pool: pg.Pool, conversationId: string) {

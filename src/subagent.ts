@@ -1,4 +1,4 @@
-import { isTurnAborted, throwIfAborted, TurnAborted, TurnFailed } from "./abort.js";
+import { isTurnAborted, TurnAborted, TurnFailed } from "./abort.js";
 import { runAgent, type AgentEvent, type AgentOutcome } from "./agent.js";
 import type { Message } from "./db.js";
 import { createPolicy, type Policy } from "./permissions.js";
@@ -32,7 +32,7 @@ export function buildSubagentPrompt(workspace: string, kind: SubagentKind) {
   const tools =
     kind === "explorer"
       ? "`read`、`search`、`calculate`、`get_current_time`"
-      : "`read`、`write`、`delete`、`bash`、`search`、`calculate`、`get_current_time`";
+      : "`read`、`write`、`edit`、`delete`、`bash`、`search`、`calculate`、`get_current_time`";
   const role =
     kind === "explorer"
       ? "你是只读探索子代理。只搜集和总结，不能改文件、不能跑有副作用的命令。"
@@ -60,6 +60,7 @@ export function childPolicy(parent: Policy, kind: SubagentKind): Policy {
     nested: true,
     role: kind,
     mcp: parent.mcp,
+    longApprove: parent.longApprove,
   });
 }
 
@@ -113,6 +114,11 @@ export function createSubagentRunner(opts: {
   maxSteps?: number;
   stream?: boolean;
   onEvent?: (meta: SubagentJobEvent, event: AgentEvent) => void;
+  onBatch?: (jobs: SubagentJob[]) => void;
+  onJobStart?: (job: SubagentJob) => void;
+  onJobDone?: (job: SubagentJob) => void;
+  shouldStream?: (job: SubagentJob) => boolean;
+  execute?: typeof runSubagent;
 }) {
   return async (args: Record<string, unknown>, signal?: AbortSignal) => {
     const parent = opts.getPolicy();
@@ -128,31 +134,61 @@ export function createSubagentRunner(opts: {
     if (selected.length === 0) {
       return formatSubagentBatch(plan, plan.jobs);
     }
-    const ran: SubagentJob[] = [];
-    for (let i = 0; i < selected.length; i += 1) {
-      throwIfAborted(signal);
-      const job = selected[i];
-      if (job.status === "done" && job.result && args.retry !== true) {
-        ran.push(job);
-        continue;
-      }
-      const meta = { job, index: i + 1, total: selected.length };
-      const result = await runSubagent({
+    const retry = args.retry === true;
+    const live = selected.filter((job) => !(job.status === "done" && job.result && !retry));
+    const explorers = live.filter((job) => job.kind === "explorer");
+    const workers = live.filter((job) => job.kind === "worker");
+    const overlapping = explorers.length + Math.min(workers.length, 1) > 1;
+    const exec = opts.execute ?? runSubagent;
+    if (live.length) opts.onBatch?.(live);
+    const start = (job: SubagentJob) => {
+      const meta = { job, index: selected.indexOf(job) + 1, total: selected.length };
+      opts.onJobStart?.(job);
+      return exec({
         provider: opts.getProvider(),
-        workspace: opts.workspace,
+        workspace: parent.workspace,
         kind: job.kind,
         prompt: job.prompt,
         label: job.label,
         policy: childPolicy(parent, job.kind),
         signal,
-        stream: opts.stream,
+        stream: opts.shouldStream?.(job) ?? (overlapping ? false : opts.stream),
         maxSteps: opts.maxSteps,
         onEvent: (event) => opts.onEvent?.(meta, event),
-      });
-      const status = result.startsWith("工具执行失败") ? "error" : "done";
-      const updated = store.updateJob(job.id, { status, result }) ?? { ...job, status, result };
-      ran.push(updated);
+      })
+        .then((result) => {
+          const status: SubagentJob["status"] = result.startsWith("工具执行失败") ? "error" : "done";
+          const ran = store.updateJob(job.id, { status, result }) ?? { ...job, status, result };
+          opts.onJobDone?.(ran);
+          return ran;
+        })
+        .catch((error) => {
+          if (isTurnAborted(error) || signal?.aborted) throw new TurnAborted();
+          const message = error instanceof Error ? error.message : String(error);
+          const result = `工具执行失败: ${message}`;
+          const ran = store.updateJob(job.id, { status: "error", result }) ?? { ...job, status: "error" as const, result };
+          opts.onJobDone?.(ran);
+          return ran;
+        });
+    };
+    try {
+      const finished = new Map<number, SubagentJob>();
+      for (const job of selected) {
+        if (job.status === "done" && job.result && !retry) finished.set(job.id, job);
+      }
+      await Promise.all([
+        Promise.all(explorers.map((job) => start(job).then((ran) => finished.set(ran.id, ran)))),
+        (async () => {
+          for (const job of workers) {
+            finished.set(job.id, await start(job));
+          }
+        })(),
+      ]);
+      const ran = selected.map((job) => finished.get(job.id) ?? job);
+      return formatSubagentBatch(store.get() ?? plan, ran);
+    } catch (error) {
+      if (isTurnAborted(error) || signal?.aborted) throw new TurnAborted();
+      throw error;
     }
-    return formatSubagentBatch(store.get() ?? plan, ran);
   };
 }

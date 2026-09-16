@@ -1,9 +1,10 @@
 import { completeChat } from "./chat.js";
 import { COMPRESSED_PREFIX, messageTokens, normalizeHistory, type ContextReport } from "./context.js";
 import type { Message } from "./db.js";
-import { harnessModeMessage, lastHarnessMode } from "./mode.js";
+import { harnessModeMessage, isHarnessModeMessage, lastHarnessMode } from "./mode.js";
 import type { Provider } from "./provider.js";
-import { lastTaskState, taskStateMessage } from "./task-state.js";
+import { isTaskStateMessage, lastTaskState, taskStateMessage } from "./task-state.js";
+import { isPlanMessage, lastPlan, planMessage } from "./plan.js";
 
 const KEEP_USER_TURNS = 2;
 const MIN_STALE_TOKENS = 1200;
@@ -27,6 +28,8 @@ export function splitForCompress(history: Message[]) {
   if (mode) head.push(harnessModeMessage(mode));
   const task = lastTaskState(normalized);
   if (task) head.push(taskStateMessage(task));
+  const plan = lastPlan(normalized);
+  if (plan) head.push(planMessage(plan));
   return { stale, keep: [...head, ...keep] };
 }
 
@@ -56,10 +59,48 @@ export function canCompress(history: Message[]) {
   return stale.length > 0 && tokens >= MIN_STALE_TOKENS;
 }
 
+export function peelAgentPrefix(messages: Message[]) {
+  const head: Message[] = [];
+  let i = 0;
+  while (
+    i < messages.length &&
+    messages[i].role === "system" &&
+    !isHarnessModeMessage(messages[i]) &&
+    !isTaskStateMessage(messages[i]) &&
+    !isPlanMessage(messages[i])
+  ) {
+    head.push(messages[i]);
+    i += 1;
+  }
+  return { head, rest: messages.slice(i) };
+}
+
+export async function compressAgentMessages(params: {
+  provider: Provider;
+  messages: Message[];
+  signal?: AbortSignal;
+}): Promise<{ messages: Message[]; saved: number } | null> {
+  const { head, rest } = peelAgentPrefix(params.messages);
+  if (!canCompress(rest)) return null;
+  try {
+    const result = await compressHistory({
+      provider: params.provider,
+      history: rest,
+      signal: params.signal,
+      stream: false,
+    });
+    if (result.saved < 200) return null;
+    return { messages: [...head, ...result.messages], saved: result.saved };
+  } catch {
+    return null;
+  }
+}
+
 export async function compressHistory(params: {
   provider: Provider;
   history: Message[];
   signal?: AbortSignal;
+  stream?: boolean;
   onDelta?: (text: string) => void;
 }): Promise<{ messages: Message[]; saved: number; summaryTokens: number }> {
   const { stale, keep } = splitForCompress(params.history);
@@ -73,7 +114,7 @@ export async function compressHistory(params: {
       ...params.provider,
       maxOutput: Math.min(4096, Math.max(1024, params.provider.maxOutput)),
     },
-    stream: true,
+    stream: params.stream ?? true,
     signal: params.signal,
     onDelta: params.onDelta,
     messages: [

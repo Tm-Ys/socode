@@ -7,11 +7,14 @@ import {
   resolveCommand,
   type SlashCommand,
 } from "./commands.js";
+import { inputPlaceholder } from "./workarea.js";
 
 const DIM = "\x1b[2m";
 const RESET = "\x1b[0m";
 const RED = "\x1b[31m";
 const CLEAR_DOWN = "\x1b[J";
+const HIDE_CURSOR = "\x1b[?25l";
+const SHOW_CURSOR = "\x1b[?25h";
 const QUIT_CONFIRM_MS = 2000;
 
 export const USER_PROMPT = "> ";
@@ -62,14 +65,14 @@ export function restoreTerminal() {
   }
 }
 
-export async function promptYou(label = USER_PROMPT) {
+export async function promptYou(label = USER_PROMPT, opts?: { hint?: string }) {
   if (!stdin.isTTY || !stdout.isTTY) {
     return await readPlainLine(label);
   }
 
   return await new Promise<string>((resolve, reject) => {
     let buffer = "";
-    let rendered = 0;
+    let inputRows = 1;
     stdin.setRawMode(true);
     stdin.resume();
 
@@ -86,8 +89,10 @@ export async function promptYou(label = USER_PROMPT) {
 
     const finish = (value: string) => {
       disarmQuit();
-      if (rendered > 1 || value !== buffer) {
-        redraw(label, value, [], "", rendered);
+      const menuOpen = buffer.startsWith("/") && matchCommands(buffer).length > 0;
+      const hintShowing = Boolean(opts?.hint && !buffer);
+      if (menuOpen || value !== buffer || hintShowing) {
+        inputRows = redraw(label, value, [], "", inputRows);
       }
       stdout.write("\n");
       cleanup();
@@ -139,8 +144,8 @@ export async function promptYou(label = USER_PROMPT) {
     const render = () => {
       const matches = matchCommands(buffer);
       const ghost = ghostText(buffer, matches);
-      redraw(label, buffer, matches, ghost, rendered);
-      rendered = 1 + (buffer.startsWith("/") ? Math.min(matches.length, 6) : 0);
+      const hint = ghost ? "" : inputPlaceholder(buffer, opts?.hint);
+      inputRows = redraw(label, buffer, matches, ghost, inputRows, hint);
     };
 
     stdin.on("data", onData);
@@ -149,54 +154,111 @@ export async function promptYou(label = USER_PROMPT) {
   });
 }
 
+export function clipToWidth(text: string, cols: number) {
+  const limit = Math.max(1, cols);
+  if (visibleWidth(text) <= limit) return text;
+  const budget = Math.max(1, limit - 1);
+  let width = 0;
+  let out = "";
+  for (const char of text) {
+    const w = charWidth(char);
+    if (width + w > budget) break;
+    out += char;
+    width += w;
+  }
+  return `${out}…`;
+}
+
+export function visualRows(width: number, cols: number) {
+  const size = Math.max(1, cols);
+  if (width <= 0) return 1;
+  return Math.max(1, Math.ceil(width / size));
+}
+
 function redraw(
   label: string,
   buffer: string,
   matches: SlashCommand[],
   ghost: string,
-  previousLines = 0,
+  prevInputRows = 1,
+  hint = "",
 ) {
-  if (previousLines > 1) stdout.write(`\x1b[${previousLines - 1}A`);
+  const cols = Math.max(20, stdout.columns ?? 80);
+  stdout.write(HIDE_CURSOR);
+  if (prevInputRows > 1) stdout.write(`\x1b[${prevInputRows - 1}A`);
   stdout.write(`\r${CLEAR_DOWN}${label}${buffer}`);
   if (ghost) stdout.write(`${DIM}${ghost}${RESET}`);
+  else if (hint) stdout.write(`${DIM}${hint}${RESET}`);
   const shown = buffer.startsWith("/") ? matches.slice(0, 6) : [];
   if (shown.length > 0) {
-    stdout.write("\n");
-    stdout.write(
-      shown
-        .map((command) => `  ${DIM}${command.name.padEnd(18)} ${command.hint}${RESET}`)
-        .join("\n"),
+    const lines = shown.map((command) =>
+      clipToWidth(`  ${command.name.padEnd(18)} ${command.hint}`, cols),
     );
-    stdout.write(`\x1b[${shown.length}A`);
-    stdout.write(`\r\x1b[${visibleWidth(label + buffer) + 1}G`);
-  } else if (ghost) {
-    stdout.write(`\r\x1b[${visibleWidth(label + buffer) + 1}G`);
+    stdout.write(`\n${lines.map((line) => `${DIM}${line}${RESET}`).join("\n")}`);
+    stdout.write(`\x1b[${lines.length}A`);
+    stdout.write(`\r\x1b[${cursorColumn(visibleWidth(label + buffer), cols)}G`);
+  } else if (ghost || hint) {
+    stdout.write(`\r\x1b[${cursorColumn(visibleWidth(label + buffer), cols)}G`);
   }
+  stdout.write(SHOW_CURSOR);
+  return visualRows(visibleWidth(label + buffer + ghost + hint), cols);
+}
+
+function cursorColumn(width: number, cols: number) {
+  const size = Math.max(1, cols);
+  const col = width % size;
+  return (col === 0 && width > 0 ? size : col) + 1;
 }
 
 function visibleWidth(text: string) {
   let width = 0;
   for (const char of text.replace(/\x1b\[[0-9;]*m/g, "")) {
-    width += (char.codePointAt(0) ?? 0) > 127 ? 2 : 1;
+    width += charWidth(char);
   }
   return width;
 }
 
-export function watchTurnAbort() {
+function charWidth(char: string) {
+  if (char === "…" || char === "·") return 1;
+  return (char.codePointAt(0) ?? 0) > 127 ? 2 : 1;
+}
+
+export function watchTurnAbort(opts?: { onCommand?: (line: string) => void }) {
   const controller = new AbortController();
   const tty = Boolean(stdin.isTTY);
   let paused = false;
+  let command = "";
 
   const onData = (chunk: Buffer | string) => {
     if (paused) return;
     const key = typeof chunk === "string" ? chunk : chunk.toString("utf8");
     if (key === "\x03") {
+      command = "";
       confirmQuit();
       controller.abort();
       return;
     }
     if (controller.signal.aborted) return;
-    if (isEscapeKey(key)) controller.abort();
+    if (isEscapeKey(key)) {
+      command = "";
+      controller.abort();
+      return;
+    }
+    if (command || key === "/") {
+      if (key === "\r" || key === "\n" || key === "\r\n") {
+        const line = command;
+        command = "";
+        if (line) opts?.onCommand?.(line);
+        return;
+      }
+      if (key === "\x7f" || key === "\b") {
+        command = [...command].slice(0, -1).join("");
+        return;
+      }
+      if (key.startsWith("\x1b")) return;
+      if (![...key].every((ch) => ch >= " " || ch === "\t")) return;
+      command += key;
+    }
   };
 
   if (tty) {
@@ -223,13 +285,23 @@ export function watchTurnAbort() {
 export type PermissionAnswer = "allow" | "deny" | "always";
 
 let permissionGate: { pause: () => void; resume: () => void } | undefined;
+let permissionChain = Promise.resolve();
 
 export function setPermissionGate(gate?: { pause: () => void; resume: () => void }) {
   permissionGate = gate;
 }
 
 export async function askPermission(title: string, detail: string): Promise<PermissionAnswer> {
-  if (!stdin.isTTY || !stdout.isTTY) return "deny";
+  let release!: () => void;
+  const previous = permissionChain;
+  permissionChain = new Promise((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  if (!stdin.isTTY || !stdout.isTTY) {
+    release();
+    return "deny";
+  }
   permissionGate?.pause();
   const yellow = "\x1b[33m";
   const dim = "\x1b[2m";
@@ -275,6 +347,7 @@ export async function askPermission(title: string, detail: string): Promise<Perm
     });
   } finally {
     permissionGate?.resume();
+    release();
   }
 }
 

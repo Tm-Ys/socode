@@ -173,6 +173,10 @@ describe("createPolicy", () => {
       (await policy.authorize("write", { path: `${ws}/src/mode.ts`, content: "x" })) ?? "",
       /只读/,
     );
+    assert.match(
+      (await policy.authorize("edit", { path: `${ws}/src/mode.ts`, old_string: "a", new_string: "b" })) ?? "",
+      /只读/,
+    );
     assert.equal(await policy.authorize("read", { path: `${ws}/src/mode.ts` }), null);
     assert.match(
       (await policy.authorize("bash", { cwd: ws, command: "rm file" })) ?? "",

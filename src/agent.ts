@@ -1,8 +1,10 @@
 import { isTurnAborted, throwIfAborted, TurnAborted, TurnFailed } from "./abort.js";
+import { compressAgentMessages, LONG_COMPRESS_RATIO } from "./compress.js";
 import { completeChat, type TokenUsage } from "./chat.js";
 import { messageTokens } from "./context.js";
 import type { Policy } from "./permissions.js";
 import { checkpointReply } from "./task-state.js";
+import { PLAN_REVIEW_NUDGE, SETPLAN_NUDGE, shouldHoldForPlanReview, shouldHoldForSetplan } from "./plan.js";
 import { isToolError } from "./tool-ui.js";
 import { executeTool, toolSpecs } from "./tools.js";
 import type { Message } from "./db.js";
@@ -16,7 +18,9 @@ export type BudgetStop = "steps" | "tokens" | "context";
 export type AgentEvent =
   | { type: "delta"; text: string }
   | { type: "tool_call"; name: string; arguments: string }
-  | { type: "tool_result"; name: string; result: string };
+  | { type: "tool_result"; name: string; result: string }
+  | { type: "compress"; saved: number }
+  | { type: "notice"; text: string };
 
 export type AgentOutcome = {
   reply: string;
@@ -99,6 +103,7 @@ export async function runAgent(params: {
   signal?: AbortSignal;
   policy?: Policy;
   onEvent?: (event: AgentEvent) => void;
+  requirePlan?: boolean;
 }): Promise<AgentOutcome> {
   const maxSteps = Math.max(1, params.maxSteps ?? DEFAULT_MAX_AGENT_STEPS);
   const messages = [...params.messages];
@@ -128,6 +133,26 @@ export async function runAgent(params: {
   try {
     for (let step = 0; step < maxSteps; step += 1) {
       throwIfAborted(params.signal);
+      if (longHorizon && params.maxContextTokens) {
+        const used = messages.reduce((sum, message) => sum + messageTokens(message), 0);
+        if (used >= params.maxContextTokens * LONG_COMPRESS_RATIO) {
+          const compressed = await compressAgentMessages({
+            provider: params.provider,
+            messages,
+            signal: params.signal,
+          });
+          if (compressed) {
+            messages.length = 0;
+            messages.push(...compressed.messages);
+            params.onEvent?.({ type: "compress", saved: compressed.saved });
+          }
+          const still =
+            messages.reduce((sum, message) => sum + messageTokens(message), 0) >= params.maxContextTokens;
+          if (still) {
+            return stopForBudget("context", trace, usage, params.policy);
+          }
+        }
+      }
       const allowTools = tools.length > 0 && step < maxSteps - 1;
       const result = await completeChat({
         provider: params.provider,
@@ -143,6 +168,19 @@ export async function runAgent(params: {
       if (result.toolCalls.length === 0) {
         const reply = result.content.trim();
         if (!reply) return fail(new Error("模型没有给出最终回复"));
+        const canStillTool = tools.length > 0 && step < maxSteps - 1;
+        if (shouldHoldForSetplan(trace, Boolean(params.requirePlan), canStillTool)) {
+          messages.push({ role: "assistant", content: reply });
+          messages.push({ role: "user", content: SETPLAN_NUDGE });
+          params.onEvent?.({ type: "notice", text: "/setplan：请先调用 plan 写出目标，再按 grill-me 追问。" });
+          continue;
+        }
+        if (shouldHoldForPlanReview(params.policy?.plans?.get(), canStillTool)) {
+          messages.push({ role: "assistant", content: reply });
+          messages.push({ role: "user", content: PLAN_REVIEW_NUDGE });
+          params.onEvent?.({ type: "notice", text: "计划已全部勾完，尚未审查。请先调用 plan 写入 review。" });
+          continue;
+        }
         const assistant: Message = { role: "assistant", content: reply };
         trace.push(assistant);
         return { reply, trace, usage: nonemptyUsage(usage) };
@@ -223,7 +261,7 @@ export async function runAgent(params: {
           contextTokens: messages.reduce((sum, message) => sum + messageTokens(message), 0),
           maxContextTokens: params.maxContextTokens,
         });
-        if (reason === "tokens" || reason === "context") {
+        if (reason === "tokens") {
           return stopForBudget(reason, trace, usage, params.policy);
         }
       }

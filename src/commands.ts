@@ -22,6 +22,10 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/task", hint: "查看或更新长程任务状态" },
   { name: "/mcp", hint: "查看 MCP 服务器和工具" },
   { name: "/skills", hint: "查看已加载的说明文件和 Skills" },
+  { name: "/seesubagent", hint: "查看子代理过程（默认隐藏）" },
+  { name: "/seeplan", hint: "查看当前任务计划勾选进度" },
+  { name: "/setplan", hint: "强制本轮按说明建 Plan，并激活 grill-me" },
+  { name: "/setworkarea", hint: "空对话时设置工作区（选文件夹或绝对路径）" },
   { name: "/exit", hint: "退出" },
   { name: "/quit", hint: "退出" },
 ];

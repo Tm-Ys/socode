@@ -11,6 +11,7 @@ import type { McpHub } from "./mcp.js";
 import { isMcpTool } from "./mcp.js";
 import type { SubagentStore } from "./subagent-plan.js";
 import type { TaskStore } from "./task-state.js";
+import type { PlanStore } from "./plan.js";
 import {
   bashAlwaysAsk,
   bashEscapesWorkspace,
@@ -31,11 +32,13 @@ export type Policy = {
   mode: AgentMode;
   workspace: string;
   tasks?: TaskStore;
+  plans?: PlanStore;
   nested?: boolean;
   role?: "explorer" | "worker";
   subagents?: SubagentStore;
   spawnSubagent?: (args: Record<string, unknown>, signal?: AbortSignal) => Promise<string>;
   mcp?: McpHub;
+  longApprove?: LongApprover;
   authorize: (name: string, args: Record<string, unknown>) => Promise<string | null>;
 };
 
@@ -46,32 +49,39 @@ export type PolicyHooks = {
   subagents?: SubagentStore;
   spawnSubagent?: (args: Record<string, unknown>, signal?: AbortSignal) => Promise<string>;
   mcp?: McpHub;
+  plans?: PlanStore;
 };
 
 export function createPolicy(
-  workspace: string,
+  workspace: string | (() => string),
   mode: () => AgentMode,
   tasks?: TaskStore,
   hooks?: PolicyHooks,
 ): Policy {
   const grants = new Set<string>();
+  const getWorkspace = typeof workspace === "function" ? workspace : () => workspace;
 
   return {
     get mode() {
       return mode();
     },
-    workspace,
+    get workspace() {
+      return getWorkspace();
+    },
     tasks,
+    plans: hooks?.plans,
     nested: Boolean(hooks?.nested),
     role: hooks?.role,
     subagents: hooks?.subagents,
     spawnSubagent: hooks?.spawnSubagent,
     mcp: hooks?.mcp,
+    longApprove: hooks?.longApprove,
     async authorize(name, args) {
       const current = mode();
-      const denied = await authorizeInner(current, workspace, grants, name, args, tasks, hooks);
+      const currentWorkspace = getWorkspace();
+      const denied = await authorizeInner(current, currentWorkspace, grants, name, args, tasks, hooks);
       writeAudit({
-        workspace,
+        workspace: currentWorkspace,
         mode: current,
         tool: name,
         decision: denied ? "deny" : "allow",
@@ -94,7 +104,7 @@ async function authorizeInner(
   tasks?: TaskStore,
   hooks?: PolicyHooks,
 ): Promise<string | null> {
-  if (name === "get_current_time" || name === "calculate" || name === "task_state") return null;
+  if (name === "get_current_time" || name === "calculate" || name === "task_state" || name === "plan") return null;
 
   if (name === "subagent_plan" || name === "subagent") {
     if (current === "plan") {
@@ -104,7 +114,7 @@ async function authorizeInner(
     return null;
   }
 
-  if (hooks?.role === "explorer" && (name === "write" || name === "delete")) {
+  if (hooks?.role === "explorer" && (name === "write" || name === "edit" || name === "delete")) {
     return "explorer 子代理是只读的，不能写或删文件";
   }
 
@@ -118,7 +128,7 @@ async function authorizeInner(
     return null;
   }
 
-  if (name === "write") {
+  if (name === "write" || name === "edit") {
     const path = realExistingPath(str(args, "path"));
     return await decide(current, workspace, grants, {
       op: writeKind(path),

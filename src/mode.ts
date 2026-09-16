@@ -75,7 +75,7 @@ export function userPrefix(mode: AgentMode, tty = Boolean(process.stdout.isTTY))
         : mode === "long"
           ? "long mode"
           : "ask mode";
-  return `${paintMode(mode, `${name} >`, tty)} `;
+  return `${paintMode(mode, `${name}>`, tty)} `;
 }
 
 export function modeHint(mode: AgentMode) {
@@ -98,7 +98,7 @@ export function modeRules(mode: AgentMode) {
     return [
       "当前是 Long（长程）模式：面向多步骤、跨压缩的长任务。",
       "权限与 Ask 同类边界，不是 Full：工作区内 `read` / `search` 自动允许。创建/修改/删除、git、网络、解释器由独立的 Long 审批 LLM 决定（干净上下文、只输出 JSON），不是对用户 y/n，也不是盲目放行。密钥、工作区外、sudo 仍本地硬拒绝。被拒绝后不要换一种方式硬做。",
-      "先 search 再 read，再做小范围编辑。每完成一个里程碑就验证（跑已记录的 verifyCommands 或最小测试），用 `task_state` 更新 TaskState。",
+      "先 search 再 read，再做小范围编辑。每完成一个里程碑，harness 会强制跑已记录的 verifyCommands（仅测试/类型检查，不是任意 bash）；失败则撤回 done 并写入 failures，必须停手。",
       "不要空转：同一工具连续失败就停下来改方法。上下文变挤时系统会自动 /compress；你只需在摘要后继续当前目标，不要重做已完成项。",
       "步数或 token 预算用尽时会保存检查点。用户下一轮同一会话即可接着做，不要假装任务已经全部完成。",
     ].join("");

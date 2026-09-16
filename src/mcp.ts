@@ -2,6 +2,7 @@ import { isTurnAborted, TurnAborted } from "./abort.js";
 import type { AgentMode } from "./mode.js";
 import { loadMcpServers, type McpServerConfig } from "./mcp-config.js";
 import { McpStdioClient } from "./mcp-client.js";
+import { scrubEnv } from "./sandbox.js";
 
 export type McpToolSpec = {
   name: string;
@@ -149,10 +150,14 @@ export async function openMcpHub(workspace: string): Promise<McpHub> {
   };
 }
 
+export function mcpChildEnv(extra: NodeJS.ProcessEnv = {}) {
+  return { ...scrubEnv(), ...extra };
+}
+
 async function connectServer(config: McpServerConfig, workspace: string): Promise<LiveServer> {
   const client = new McpStdioClient(config.command, config.args, {
     cwd: config.cwd ?? workspace,
-    env: { ...process.env, ...config.env },
+    env: mcpChildEnv(config.env),
   });
   try {
     await client.request(

@@ -26,7 +26,7 @@ describe("harness mode messages", () => {
   });
 
   it("uses a distinct prompt for long instead of falling back to ask", () => {
-    assert.match(userPrefix("long", false), /long mode/);
+    assert.match(userPrefix("long", false), /long mode>/);
     assert.doesNotMatch(userPrefix("long", false), /ask mode/);
   });
 

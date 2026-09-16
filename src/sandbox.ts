@@ -26,8 +26,98 @@ const SECRET_REL_FILES = [".docker/config.json"];
 const SECRET_BASENAMES = new Set([".env", "providers.json"]);
 
 const SHELL_META = /[;&|`$()<>\n]|&&|\|\|/;
-const READONLY_CMD =
-  /^(ls|pwd|whoami|date|uname|which|true|false|hostname|id)(\s+-[A-Za-z0-9-]+)*(\s+\.(?:\s|$)|$|\s+[A-Za-z0-9._/-]+)*$/;
+const READONLY_BINS = new Set([
+  "ls",
+  "pwd",
+  "whoami",
+  "date",
+  "uname",
+  "which",
+  "true",
+  "false",
+  "hostname",
+  "id",
+  "echo",
+  "printf",
+  "cat",
+  "head",
+  "tail",
+  "wc",
+  "rg",
+  "grep",
+  "egrep",
+  "fgrep",
+  "ag",
+  "file",
+  "stat",
+  "basename",
+  "dirname",
+  "realpath",
+  "readlink",
+  "sort",
+  "uniq",
+  "cut",
+  "tr",
+  "column",
+  "paste",
+  "comm",
+  "cmp",
+  "diff",
+  "md5",
+  "md5sum",
+  "sha256sum",
+  "shasum",
+  "cksum",
+  "seq",
+  "sleep",
+  "test",
+  "[",
+  "[[",
+  "type",
+  "jq",
+]);
+const DELETE_BINS = new Set(["rm", "rmdir", "unlink", "shred"]);
+const MODIFY_BINS = new Set(["mv", "cp", "chmod", "chown", "ln", "truncate", "tee", "install"]);
+const CREATE_BINS = new Set(["mkdir", "touch", "install"]);
+const NEVER_READONLY_BINS = new Set([
+  "python",
+  "python3",
+  "node",
+  "perl",
+  "ruby",
+  "osascript",
+  "curl",
+  "wget",
+  "git",
+  "kill",
+  "pkill",
+  "sudo",
+  "su",
+  "dd",
+  "mkfs",
+]);
+const SHELL_KEYWORDS = new Set([
+  "if",
+  "then",
+  "else",
+  "elif",
+  "fi",
+  "for",
+  "while",
+  "until",
+  "do",
+  "done",
+  "case",
+  "esac",
+  "select",
+  "function",
+  "time",
+  "coproc",
+  "{",
+  "}",
+  "(",
+  "[[",
+]);
 
 const HARD_DENY_BINS = new Set(["sudo", "su", "dd", "mkfs", "reboot", "shutdown"]);
 const NEVER_ALWAYS_BINS = new Set([
@@ -156,39 +246,308 @@ export function mutationDenied(
 export function classifyBash(command: string): { readonly: boolean; op: FileOp } {
   const text = command.trim();
   if (!text) return { readonly: true, op: "exec" };
-  if (/\b(rm|rmdir|unlink|shred)\b/.test(text) || /\bgit\s+clean\b/.test(text)) {
-    return { readonly: false, op: "delete" };
+  const parsed = parseBash(text);
+  if (!parsed.ok) return { readonly: false, op: "exec" };
+  let readonly = true;
+  let op: FileOp = "exec";
+  for (const argv of parsed.commands) {
+    const kind = classifyArgv(argv, 0);
+    if (!kind.readonly) readonly = false;
+    op = worseOp(op, kind.op);
   }
-  if (
-    /(^|[\s;&|])>(?!>)|>>/.test(text) ||
-    /\b(tee|sed\s+-i|perl\s+-pi)\b/.test(text) ||
-    /\b(mv|cp|chmod|chown|ln|truncate)\b/.test(text) ||
-    /\bgit\s+(commit|reset|checkout|stash|rebase|push|add|mv|rm)\b/.test(text)
-  ) {
-    return { readonly: false, op: "modify" };
+  if (parsed.redirects) {
+    readonly = false;
+    op = worseOp(op, "modify");
   }
-  if (
-    /\b(mkdir|touch|install)\b/.test(text) ||
-    /\b(npm|pnpm|yarn|bun|pip|cargo|brew)\s+(i|install|add|uninstall|remove)\b/.test(text)
-  ) {
-    return { readonly: false, op: "create" };
-  }
-  if (
-    /\b(kill|pkill|reboot|shutdown|dd|mkfs|sudo|su)\b/.test(text) ||
-    /\b(curl|wget)\b[\s\S]*\|\s*(ba)?sh\b/.test(text) ||
-    /\bgit\b/.test(text)
-  ) {
-    return { readonly: false, op: "exec" };
-  }
-  if (SHELL_META.test(text) || !READONLY_CMD.test(text)) {
-    return { readonly: false, op: "exec" };
-  }
-  return { readonly: true, op: "exec" };
+  return { readonly, op };
 }
 
 export function commandHead(command: string) {
+  const parsed = parseBash(command);
+  if (parsed.ok && parsed.commands[0]?.length) {
+    const argv = unwrapArgv(parsed.commands[0]);
+    const bin = argv[0] === "__script__" ? "sh" : argv[0];
+    if (bin) return bin.replace(/^.*\//, "") || "sh";
+  }
   const token = command.trim().split(/\s+/)[0] ?? "";
   return token.replace(/^.*\//, "") || "sh";
+}
+
+type BashParse = { ok: true; commands: string[][]; redirects: boolean } | { ok: false };
+
+function parseBash(input: string): BashParse {
+  const commands: string[][] = [];
+  let cur: string[] = [];
+  let token = "";
+  let quote: "" | "'" | '"' = "";
+  let redirects = false;
+  let i = 0;
+  const flushToken = () => {
+    if (token !== "") {
+      cur.push(token);
+      token = "";
+    }
+  };
+  const flushCmd = () => {
+    flushToken();
+    if (cur.length) commands.push(cur);
+    cur = [];
+  };
+  const skipRedirectTarget = () => {
+    while (i < input.length && /\s/.test(input[i])) i += 1;
+    if (input[i] === "&") {
+      i += 1;
+      while (i < input.length && /[0-9]/.test(input[i])) i += 1;
+      return true;
+    }
+    if (i >= input.length) return false;
+    const start = i;
+    const one = readUnquotedToken();
+    if (one === null) {
+      i = start;
+      return false;
+    }
+    return true;
+  };
+  const readUnquotedToken = (): string | null => {
+    if (i >= input.length) return null;
+    const c = input[i];
+    if (/[\s;&|<>]/.test(c) || c === "\n") return null;
+    let out = "";
+    let q: "" | "'" | '"' = "";
+    while (i < input.length) {
+      const ch = input[i];
+      if (q === "'") {
+        if (ch === "'") q = "";
+        else out += ch;
+        i += 1;
+        continue;
+      }
+      if (q === '"') {
+        if (ch === '"') {
+          q = "";
+          i += 1;
+          continue;
+        }
+        if (ch === "`" || (ch === "$" && input[i + 1] === "(")) return null;
+        out += ch;
+        i += 1;
+        continue;
+      }
+      if (ch === "'" || ch === '"') {
+        q = ch;
+        i += 1;
+        continue;
+      }
+      if (ch === "\\" && i + 1 < input.length) {
+        out += input[i + 1];
+        i += 2;
+        continue;
+      }
+      if (/[\s;&|<>]/.test(ch) || ch === "\n") break;
+      if (ch === "`" || (ch === "$" && input[i + 1] === "(") || (ch === "<" && input[i + 1] === "(") || (ch === ">" && input[i + 1] === "(")) {
+        return null;
+      }
+      out += ch;
+      i += 1;
+    }
+    if (q) return null;
+    return out;
+  };
+
+  while (i < input.length) {
+    const c = input[i];
+    if (quote === "'") {
+      if (c === "'") quote = "";
+      else token += c;
+      i += 1;
+      continue;
+    }
+    if (quote === '"') {
+      if (c === '"') {
+        quote = "";
+        i += 1;
+        continue;
+      }
+      if (c === "\\" && i + 1 < input.length) {
+        token += input[i + 1];
+        i += 2;
+        continue;
+      }
+      if (c === "`" || (c === "$" && input[i + 1] === "(")) return { ok: false };
+      token += c;
+      i += 1;
+      continue;
+    }
+    if (c === "\\" && i + 1 < input.length) {
+      token += input[i + 1];
+      i += 2;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      quote = c;
+      i += 1;
+      continue;
+    }
+    if (c === "`" || (c === "$" && input[i + 1] === "(") || (c === "<" && input[i + 1] === "(") || (c === ">" && input[i + 1] === "(")) {
+      return { ok: false };
+    }
+    if (c === "#" && token === "" && (i === 0 || /\s/.test(input[i - 1]))) {
+      while (i < input.length && input[i] !== "\n") i += 1;
+      continue;
+    }
+    if (c === "\n" || c === ";") {
+      flushCmd();
+      i += 1;
+      continue;
+    }
+    if (c === "&") {
+      flushCmd();
+      i += input[i + 1] === "&" ? 2 : 1;
+      continue;
+    }
+    if (c === "|") {
+      flushCmd();
+      i += input[i + 1] === "|" ? 2 : 1;
+      continue;
+    }
+    const fdRedirect = token === "" && /[0-9]/.test(c) && (input[i + 1] === ">" || input[i + 1] === "<");
+    if (c === "<" || c === ">" || fdRedirect) {
+      redirects = true;
+      flushToken();
+      if (fdRedirect) i += 1;
+      if (input[i] === ">" && input[i + 1] === ">") i += 2;
+      else if (input[i] === "<" && input[i + 1] === "<") i += 2;
+      else i += 1;
+      if (input[i] === "&" || input[i] === ">" || input[i] === "|") i += 1;
+      if (!skipRedirectTarget()) return { ok: false };
+      continue;
+    }
+    if (/\s/.test(c)) {
+      flushToken();
+      i += 1;
+      continue;
+    }
+    token += c;
+    i += 1;
+  }
+  if (quote) return { ok: false };
+  flushCmd();
+  return { ok: true, commands, redirects };
+}
+
+function unwrapArgv(argv: string[]): string[] {
+  const a = [...argv];
+  while (a[0] && /^[A-Za-z_][A-Za-z0-9_]*=/.test(a[0])) a.shift();
+  if (!a.length) return a;
+  const bin = a[0].replace(/^.*\//, "");
+  if (bin === "env") {
+    a.shift();
+    while (a[0] && /^-/.test(a[0])) {
+      if ((a[0] === "-u" || a[0] === "--unset" || a[0] === "-C" || a[0] === "-S") && a[1]) {
+        a.splice(0, 2);
+        continue;
+      }
+      if (a[0] === "-i" || a[0] === "--ignore-environment") return ["__script__", ""];
+      a.shift();
+    }
+    while (a[0] && /^[A-Za-z_][A-Za-z0-9_]*=/.test(a[0])) a.shift();
+    return unwrapArgv(a);
+  }
+  if (bin === "timeout") {
+    a.shift();
+    while (a[0]?.startsWith("-")) {
+      if (/^-[ks]$/.test(a[0]) && a[1]) {
+        a.splice(0, 2);
+        continue;
+      }
+      a.shift();
+    }
+    if (a[0] && /^\d/.test(a[0])) a.shift();
+    return unwrapArgv(a);
+  }
+  if (bin === "xargs") {
+    a.shift();
+    while (a[0]?.startsWith("-")) {
+      if (["-I", "-i", "-n", "-P", "-L", "-E", "-s"].includes(a[0]) && a[1]) {
+        a.splice(0, 2);
+        continue;
+      }
+      a.shift();
+    }
+    return unwrapArgv(a);
+  }
+  if (WRAPPER_BINS.has(bin) && bin !== "eval" && !["bash", "sh", "zsh", "dash"].includes(bin)) {
+    a.shift();
+    while (a[0]?.startsWith("-")) {
+      if (bin === "stdbuf" && /^-[ioe]$/.test(a[0]) && a[1]) {
+        a.splice(0, 2);
+        continue;
+      }
+      a.shift();
+    }
+    return unwrapArgv(a);
+  }
+  if (["bash", "sh", "zsh", "dash"].includes(bin)) {
+    const cAt = a.findIndex((item) => item === "-c");
+    if (cAt >= 0 && a[cAt + 1] !== undefined) return ["__script__", a[cAt + 1]];
+  }
+  if (bin === "eval") return ["__script__", a.slice(1).join(" ")];
+  return a;
+}
+
+function classifyArgv(argv: string[], depth: number): { readonly: boolean; op: FileOp } {
+  if (depth > 4) return { readonly: false, op: "exec" };
+  const unwrapped = unwrapArgv(argv);
+  if (!unwrapped.length) return { readonly: false, op: "exec" };
+  if (unwrapped[0] === "__script__") {
+    const script = unwrapped[1] ?? "";
+    if (!script.trim()) return { readonly: false, op: "exec" };
+    const inner = parseBash(script);
+    if (!inner.ok) return { readonly: false, op: "exec" };
+    let readonly = !inner.redirects;
+    let op: FileOp = inner.redirects ? "modify" : "exec";
+    for (const innerArgv of inner.commands) {
+      const kind = classifyArgv(innerArgv, depth + 1);
+      if (!kind.readonly) readonly = false;
+      op = worseOp(op, kind.op);
+    }
+    return { readonly, op };
+  }
+  const bin = unwrapped[0].replace(/^.*\//, "") || "sh";
+  const rest = unwrapped.slice(1);
+  if (SHELL_KEYWORDS.has(bin) && bin !== "[[") return { readonly: false, op: "exec" };
+  if (HARD_DENY_BINS.has(bin)) return { readonly: false, op: "exec" };
+  if (DELETE_BINS.has(bin) || (bin === "git" && rest[0] === "clean")) return { readonly: false, op: "delete" };
+  if (bin === "git" && ["rm", "mv", "checkout", "reset", "stash", "rebase", "commit", "add", "push"].includes(rest[0] ?? "")) {
+    return { readonly: false, op: "modify" };
+  }
+  if (
+    (bin === "sed" && rest.some((arg) => arg === "-i" || arg.startsWith("-i"))) ||
+    (bin === "perl" && rest.some((arg) => arg === "-pi" || arg.startsWith("-i"))) ||
+    (bin === "find" && rest.some((arg) => arg === "-delete" || arg === "-exec" || arg === "-ok" || arg === "-fprint"))
+  ) {
+    return { readonly: false, op: "modify" };
+  }
+  if (MODIFY_BINS.has(bin)) return { readonly: false, op: "modify" };
+  if (
+    CREATE_BINS.has(bin) ||
+    (["npm", "pnpm", "yarn", "bun", "pip", "cargo", "brew"].includes(bin) &&
+      ["i", "install", "add", "uninstall", "remove"].includes(rest[0] ?? ""))
+  ) {
+    return { readonly: false, op: "create" };
+  }
+  if (NEVER_READONLY_BINS.has(bin)) return { readonly: false, op: "exec" };
+  if (["awk", "sed"].includes(bin) && rest.some((arg) => arg.includes(">"))) return { readonly: false, op: "modify" };
+  if (READONLY_BINS.has(bin) || bin === "sed" || bin === "awk" || bin === "find") {
+    return { readonly: true, op: "exec" };
+  }
+  return { readonly: false, op: "exec" };
+}
+
+function worseOp(current: FileOp, next: FileOp): FileOp {
+  const rank = { exec: 0, create: 1, modify: 2, delete: 3 };
+  return rank[next] >= rank[current] ? next : current;
 }
 
 export function bashAlwaysAsk(command: string) {

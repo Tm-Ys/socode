@@ -4,6 +4,7 @@ import {
   activateBaseSkills,
   capActivated,
   formatActivateUser,
+  mergeForcedSkills,
   parseActivateReply,
   skipSkillActivate,
 } from "./skill-activate.js";
@@ -36,6 +37,14 @@ const candidates: SkillRecord[] = [
     scope: "base",
     auto: false,
     body: "design",
+  },
+  {
+    name: "grill-me",
+    description: "追问决策",
+    path: "/skills/grill-me/SKILL.md",
+    scope: "base",
+    auto: false,
+    body: "grill",
   },
 ];
 
@@ -80,6 +89,22 @@ describe("capActivated", () => {
       ["brainstorm", "ponytail", "superpowers"],
     );
     assert.deepEqual(capped.activate, ["ponytail", "superpowers"]);
+  });
+});
+
+describe("mergeForcedSkills", () => {
+  it("prepends /setplan force and drops brainstorm when grill-me is forced", () => {
+    const merged = mergeForcedSkills(
+      {
+        activate: ["brainstorm", "ponytail"],
+        reasons: { brainstorm: "设计", ponytail: "要改代码" },
+      },
+      ["grill-me"],
+      ["brainstorm", "grill-me", "ponytail"],
+    );
+    assert.deepEqual(merged.activate, ["grill-me", "ponytail"]);
+    assert.equal(merged.reasons["grill-me"], "用户 /setplan 强制");
+    assert.equal(merged.reasons.ponytail, "要改代码");
   });
 });
 
@@ -142,5 +167,21 @@ describe("activateBaseSkills", () => {
     });
     assert.deepEqual(decision.activate, ["brainstorm"]);
     assert.equal(decision.reasons.brainstorm, "用户点名");
+  });
+
+  it("forces grill-me for /setplan even if the judge disagrees", async () => {
+    const decision = await activateBaseSkills({
+      prompt: "做登录页",
+      mode: "ask",
+      skills: candidates,
+      provider,
+      force: ["grill-me"],
+      complete: async () => ({
+        content: '{"activate":["brainstorm"],"reasons":{"brainstorm":"设计未定"}}',
+      }),
+    });
+    assert.equal(decision.activate[0], "grill-me");
+    assert.equal(decision.activate.includes("brainstorm"), false);
+    assert.equal(decision.reasons["grill-me"], "用户 /setplan 强制");
   });
 });

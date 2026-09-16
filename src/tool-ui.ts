@@ -14,6 +14,7 @@ export function summarizeTool(name: string, rawArgs: string) {
   switch (name) {
     case "read":
     case "write":
+    case "edit":
     case "delete":
       return shortPath(str(args.path));
     case "bash":
@@ -33,6 +34,18 @@ export function summarizeTool(name: string, rawArgs: string) {
     }
     case "subagent":
       return args.index !== undefined ? `index=${args.index}` : "all pending";
+    case "plan": {
+      if (args.clear === true) return "clear";
+      if (typeof args.review === "string") return "review";
+      if (args.done !== undefined) {
+        const refs = Array.isArray(args.done) ? args.done.join(",") : String(args.done);
+        return `done ${clip(refs, 40)}`;
+      }
+      if (Array.isArray(args.items)) return `${args.items.length} items`;
+      if (typeof args.add === "string") return `add ${clip(args.add, 40)}`;
+      if (typeof args.goal === "string") return clip(args.goal, 48);
+      return "";
+    }
     default: {
       const compact = Object.entries(args)
         .map(([key, value]) => `${key}=${clip(String(value), 24)}`)

@@ -78,4 +78,74 @@ describe("subagent plan", () => {
     const out = await run({});
     assert.match(out, /还没有子代理规划/);
   });
+
+  it("runs explorers in parallel, including alongside one worker", async () => {
+    const { run, store, peak } = timedRunner([
+      { kind: "explorer", prompt: "a" },
+      { kind: "worker", prompt: "b" },
+    ]);
+    const out = await run({});
+    assert.equal(peak(), 2);
+    assert.match(out, /ok-a/);
+    assert.match(out, /ok-b/);
+    assert.equal(store.get()?.jobs.every((job) => job.status === "done"), true);
+  });
+
+  it("serializes workers so they do not write the same workspace at once", async () => {
+    const { run, peak } = timedRunner([
+      { kind: "worker", prompt: "a" },
+      { kind: "worker", prompt: "b" },
+    ]);
+    const out = await run({});
+    assert.equal(peak(), 1);
+    assert.match(out, /ok-a/);
+    assert.match(out, /ok-b/);
+  });
+
+  it("notifies the UI when a batch starts", async () => {
+    const started: string[] = [];
+    const { run } = timedRunner(
+      [
+        { kind: "explorer", prompt: "a" },
+        { kind: "worker", prompt: "b" },
+      ],
+      {
+        onBatch: (jobs) => started.push(jobs.map((job) => job.kind).join(",")),
+      },
+    );
+    await run({});
+    assert.deepEqual(started, ["explorer,worker"]);
+  });
 });
+
+function timedRunner(
+  agents: Array<{ kind: string; prompt: string }>,
+  hooks?: { onBatch?: (jobs: { kind: string }[]) => void },
+) {
+  const store = createSubagentStore(parseSubagentPlan({ agents }));
+  const policy = createPolicy(process.cwd(), () => "ask", undefined, { subagents: store });
+  let running = 0;
+  let peak = 0;
+  const run = createSubagentRunner({
+    getProvider: () => ({
+      name: "t",
+      url: "",
+      api: "",
+      model: "",
+      contextWindow: 0,
+      maxOutput: 0,
+      thinkingEffort: "none",
+    }),
+    getPolicy: () => policy,
+    workspace: process.cwd(),
+    onBatch: hooks?.onBatch,
+    execute: async ({ prompt }) => {
+      running += 1;
+      peak = Math.max(peak, running);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      running -= 1;
+      return `ok-${prompt}`;
+    },
+  });
+  return { run, store, peak: () => peak };
+}

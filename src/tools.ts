@@ -1,6 +1,7 @@
 import { isTurnAborted, throwIfAborted, TurnAborted } from "./abort.js";
 import {
   deleteAbsoluteFile,
+  editAbsoluteFile,
   readAbsoluteFile,
   requireAbsolutePath,
   runBash,
@@ -12,6 +13,8 @@ import { isMcpTool } from "./mcp.js";
 import type { Policy } from "./permissions.js";
 import { formatSubagentPlan, parseSubagentPlan } from "./subagent-plan.js";
 import { formatTaskStateCli, patchFromToolArgs } from "./task-state.js";
+import { formatPlanCli, patchFromPlanArgs, planNeedsReview } from "./plan.js";
+import { newDoneItems, runVerifyCommands } from "./verify.js";
 
 export type ToolSpec = {
   name: string;
@@ -93,6 +96,28 @@ const tools: Tool[] = [
     },
   },
   {
+    name: "edit",
+    description:
+      "在已有文件里替换一段精确文本。old_string 必须在文件中唯一（或设 replace_all）。改已有文件优先用 edit，不要整文件 write。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "绝对文件路径" },
+        old_string: { type: "string", description: "文件中要被替换的原文，必须精确匹配" },
+        new_string: { type: "string", description: "替换后的文本，可为 empty 表示删除该段" },
+        replace_all: { type: "boolean", description: "为 true 时替换全部出现处" },
+      },
+      required: ["path", "old_string", "new_string"],
+    },
+    execute: async (args) => {
+      const path = str(args, "path");
+      if (typeof args.old_string !== "string") throw new Error("缺少 old_string");
+      if (typeof args.new_string !== "string") throw new Error("缺少 new_string");
+      requireAbsolutePath(path, "path");
+      return await editAbsoluteFile(path, args.old_string, args.new_string, args.replace_all === true);
+    },
+  },
+  {
     name: "delete",
     description: "删除绝对路径文件。只能删文件，不能删目录。",
     parameters: {
@@ -151,7 +176,7 @@ const tools: Tool[] = [
         done: { type: "array", items: { type: "string" }, description: "已完成项（替换）" },
         failures: { type: "array", items: { type: "string" }, description: "失败与卡点（替换）" },
         key_files: { type: "array", items: { type: "string" }, description: "关键文件路径（替换）" },
-        verify_commands: { type: "array", items: { type: "string" }, description: "验证命令（替换）" },
+        verify_commands: { type: "array", items: { type: "string" }, description: "验证命令（替换；仅 npm test / npx tsc 等检查）" },
         add_milestone: { type: "string" },
         add_done: { type: "string" },
         add_failure: { type: "string" },
@@ -161,6 +186,27 @@ const tools: Tool[] = [
     },
     execute: () => {
       throw new Error("task_state 需要会话上下文");
+    },
+  },
+  {
+    name: "plan",
+    description:
+      "把当前任务拆成可勾选目标并跟踪进度。先写入 goal 和 items（2–8 项），每完成一项用 done 勾掉（序号从 1 起或标题）。全部勾完后必须再调用一次写入 review，然后才能给用户最终结果。用户可用 /seeplan 查看。一步能做完的事不要建计划。",
+    parameters: {
+      type: "object",
+      properties: {
+        goal: { type: "string", description: "这一次要完成的总目标" },
+        items: { type: "array", items: { type: "string" }, description: "拆分后的目标列表（替换；同标题会保留已勾选）" },
+        add: { type: "string", description: "追加一项" },
+        done: {
+          description: "勾选已完成项：序号（从 1 起）、标题，或它们的数组",
+        },
+        review: { type: "string", description: "全部勾完后的审查结论（查漏、改动、验证）" },
+        clear: { type: "boolean", description: "清空计划" },
+      },
+    },
+    execute: () => {
+      throw new Error("plan 需要会话上下文");
     },
   },
   {
@@ -195,7 +241,7 @@ const tools: Tool[] = [
   {
     name: "subagent",
     description:
-      "按最近一次 subagent_plan 执行子代理。不传参数则按顺序跑完全部 pending；传 index 只跑其中一个。每个子代理独立上下文，只把摘要返回给你。",
+      "按最近一次 subagent_plan 执行子代理。不传参数则跑完全部 pending：explorer 并行，worker 彼此串行。传 index 只跑其中一个。每个子代理独立上下文，只把摘要返回给你。",
     parameters: {
       type: "object",
       properties: {
@@ -217,10 +263,12 @@ export function toolSpecs(
 ): ToolSpec[] {
   const builtin = tools
     .filter((tool) => {
-      if (opts?.nested && (tool.name === "subagent_plan" || tool.name === "subagent")) return false;
+      if (opts?.nested && (tool.name === "subagent_plan" || tool.name === "subagent" || tool.name === "plan")) {
+        return false;
+      }
       if (tool.name === "task_state") return mode === "long" && !opts?.nested;
       if (opts?.role === "explorer") return READ_TOOLS.has(tool.name);
-      if (mode === "plan") return READ_TOOLS.has(tool.name);
+      if (mode === "plan") return READ_TOOLS.has(tool.name) || tool.name === "plan";
       return true;
     })
     .map(({ name, description, parameters }) => ({ name, description, parameters }));
@@ -246,6 +294,7 @@ export async function executeTool(
     if (
       policy?.mode === "plan" &&
       !READ_TOOLS.has(name) &&
+      name !== "plan" &&
       !(isMcpTool(name) && policy.mcp?.isReadOnly(name))
     ) {
       return `权限拒绝: 当前是 Plan 模式，不能使用 ${name}。请只给出计划，或让用户输入 /mode ask、/mode long 或 /mode full。`;
@@ -253,8 +302,10 @@ export async function executeTool(
     if (name === "task_state" && policy?.mode !== "long") {
       return "权限拒绝: task_state 只在 Long 模式下可用。请先 /mode long。";
     }
-    if ((name === "subagent_plan" || name === "subagent") && policy?.nested) {
-      return "权限拒绝: 子代理不能再派生子代理（max_depth=1）";
+    if ((name === "subagent_plan" || name === "subagent" || name === "plan") && policy?.nested) {
+      return name === "plan"
+        ? "权限拒绝: 子代理不能改父计划"
+        : "权限拒绝: 子代理不能再派生子代理（max_depth=1）";
     }
     if (policy) {
       const denied = await policy.authorize(name, args);
@@ -263,8 +314,46 @@ export async function executeTool(
     throwIfAborted(signal);
     if (name === "task_state") {
       if (!policy?.tasks) return "工具执行失败: 当前会话没有任务状态";
-      const next = policy.tasks.patch(patchFromToolArgs(args));
+      const before = policy.tasks.get();
+      let next = policy.tasks.patch(patchFromToolArgs(args));
+      const finished = newDoneItems(before.done, next.done);
+      if (finished.length) {
+        const cmds = next.verifyCommands;
+        if (!cmds.length) {
+          return `${formatTaskStateCli(next)}\n\n未设置 verifyCommands，该里程碑未自动验证。`;
+        }
+        const report = await runVerifyCommands({
+          workspace: policy.workspace,
+          commands: cmds,
+          signal,
+        });
+        const log = report.lines.join("\n\n");
+        if (!report.ok) {
+          next = policy.tasks.patch({
+            done: before.done,
+            addFailure: `verify 失败: ${finished.join("、")}`,
+          });
+          return `验证失败，已停手。done 未更新。\n${formatTaskStateCli(next)}\n\n${log}`;
+        }
+        return `${formatTaskStateCli(next)}\n\n验证通过\n${log}`;
+      }
       return formatTaskStateCli(next);
+    }
+    if (name === "plan") {
+      if (!policy?.plans) return "工具执行失败: 当前会话没有计划状态";
+      try {
+        const next = policy.plans.patch(patchFromPlanArgs(args));
+        if (planNeedsReview(next)) {
+          return `${formatPlanCli(next)}\n\n全部勾完。下一步必须调用 plan 写入 review（对照每项目标查漏、确认改动和验证），然后再给用户最终结果。`;
+        }
+        if (next.review.trim()) {
+          return `${formatPlanCli(next)}\n\n审查已记录。现在可以给用户最终结果。不要把整份计划贴进回复。`;
+        }
+        return formatPlanCli(next);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return `${message}\n${formatPlanCli(policy.plans.get())}`;
+      }
     }
     if (name === "subagent_plan") {
       if (!policy?.subagents) return "工具执行失败: 当前会话没有子代理规划器";
