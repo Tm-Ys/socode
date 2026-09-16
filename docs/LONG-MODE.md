@@ -157,6 +157,10 @@ npm start -- --mode long
 3. **循环内压缩** 工具步中间调用现有 compress，而不是停一轮再压。
 4. **更强验证** 里程碑完成强制跑 `verifyCommands`，失败则写 `failures` 并停手。
 
+## 论文适配（规划，未实现）
+
+把五条 2026 CCF-A 机制接到现有 Long loop 的详细设计见 [`LONG-MODE-PAPER-ADAPT.md`](./LONG-MODE-PAPER-ADAPT.md)。那份文档是未来实现蓝图（动态预算、CAT 压缩工具、分层子代理、里程碑 Rubric、AdaCoder 两阶段）；本文只描述已经落地的 MVP。
+
 ## 非目标
 
 - MCP、多 agent
