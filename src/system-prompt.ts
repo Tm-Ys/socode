@@ -27,10 +27,10 @@ export function buildSystemPrompt(
 function basePrompt(workspace: string, mode: AgentMode, mcpTools: string[] = []) {
   const tools =
     mode === "plan"
-      ? "`read`、`search`、`calculate`、`get_current_time`、`plan`"
+      ? "`read`、`search`、`calculate`、`get_current_time`、`plan`、`question`"
       : mode === "long"
-        ? "`read`、`write`、`edit`、`delete`、`bash`、`search`、`calculate`、`get_current_time`、`task_state`、`plan`、`subagent_plan`、`subagent`、`context_compress`"
-        : "`read`、`write`、`edit`、`delete`、`bash`、`search`、`calculate`、`get_current_time`、`plan`、`subagent_plan`、`subagent`";
+        ? "`read`、`write`、`edit`、`delete`、`bash`、`search`、`calculate`、`get_current_time`、`task_state`、`plan`、`subagent_plan`、`subagent`、`context_compress`、`question`"
+        : "`read`、`write`、`edit`、`delete`、`bash`、`search`、`calculate`、`get_current_time`、`plan`、`subagent_plan`、`subagent`、`question`";
   const editRule =
     mode === "plan"
       ? "- 当前不能改仓库。不要调用写文件、删文件或 bash。"
@@ -60,6 +60,8 @@ ${mcpTools.length ? `# MCP\n\n外部 MCP 工具：${mcpTools.map((name) => `\`${
 一批相关工具调用前，用一两句中文说明下一步要做什么。单次 trivial 的 \`read\` 可以省略。能并行的调用放在同一轮。
 
 任务涉及多文件、步骤不清、或多个要求时，先用 \`plan\` 拆成 2–8 个可勾选目标（用户能用 /seeplan 看进度），再动手。一步能做完的不要建计划。每完成一项立刻 \`plan\` 勾掉对应序号。全部勾完后必须再调用 \`plan\` 写入 review（对照目标查漏、确认改动和验证），然后才给用户最终结果。不要把整份计划贴进回复。
+
+有多个互斥或可选项要问用户时，调用 \`question\`，一次列出全部问题（1–8）。每题给 2–5 个短选项（\`label\` 1–5 词 + \`description\`），推荐项放第一并在 label 末尾加 \`(Recommended)\`。不要自己加「其他」或 Type your own answer——系统会追加：单选作为最后一项，多选作为倒数第二（最后一项是提交答案）。可多选的题设 \`multiple: true\`。不要用一长串聊天问句代替问卷。
 
 改已有代码要手术刀式：跟周围风格，不重命名、不顺手格式化、不修无关 bug。用户明确在开新东西时可以更大胆。
 

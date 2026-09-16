@@ -14,6 +14,8 @@ import type { Policy } from "./permissions.js";
 import { formatSubagentPlan, isReadonlyKind, isVerifyKind, parseSubagentPlan, type SubagentKind } from "./subagent-plan.js";
 import { formatTaskStateCli, patchFromToolArgs } from "./task-state.js";
 import { formatPlanCli, patchFromPlanArgs, planNeedsReview } from "./plan.js";
+import { formatQuestionResult, parseQuestions } from "./question.js";
+import { askQuestions } from "./question-ui.js";
 import { newDoneItems, runVerifyCommands } from "./verify.js";
 
 export type ToolSpec = {
@@ -58,6 +60,49 @@ const tools: Tool[] = [
     execute: (args) => {
       if (typeof args.expression !== "string") throw new Error("缺少 expression");
       return String(calculate(args.expression));
+    },
+  },
+  {
+    name: "question",
+    description:
+      "向用户弹出问卷：一次提出多个问题，每题带预设选项。用于偏好、歧义、实现抉择。系统会追加 Type your own answer，不要自己加「其他」。单选它是最后一项；多选它是倒数第二，最后一项是提交答案。可多选设 multiple: true。推荐项放第一并在 label 末尾加 (Recommended)。不要用聊天问句代替本工具。",
+    parameters: {
+      type: "object",
+      properties: {
+        questions: {
+          type: "array",
+          minItems: 1,
+          maxItems: 8,
+          description: "要问的问题列表",
+          items: {
+            type: "object",
+            properties: {
+              question: { type: "string", description: "完整问题" },
+              header: { type: "string", description: "短标签，最多约 30 字" },
+              options: {
+                type: "array",
+                minItems: 1,
+                maxItems: 8,
+                description: "预设选项。不要包含 Other / Type your own answer",
+                items: {
+                  type: "object",
+                  properties: {
+                    label: { type: "string", description: "选项标题，1–5 个词" },
+                    description: { type: "string", description: "选项说明" },
+                  },
+                  required: ["label"],
+                },
+              },
+              multiple: { type: "boolean", description: "是否可多选" },
+            },
+            required: ["question", "options"],
+          },
+        },
+      },
+      required: ["questions"],
+    },
+    execute: () => {
+      throw new Error("question 需要会话上下文");
     },
   },
   {
@@ -292,14 +337,15 @@ export function toolSpecs(
           tool.name === "subagent" ||
           tool.name === "plan" ||
           tool.name === "task_state" ||
-          tool.name === "context_compress")
+          tool.name === "context_compress" ||
+          tool.name === "question")
       ) {
         return false;
       }
       if (tool.name === "task_state" || tool.name === "context_compress") return mode === "long" && !opts?.nested;
       if (isReadonlyKind(opts?.role)) return READ_TOOLS.has(tool.name);
       if (isVerifyKind(opts?.role)) return READ_TOOLS.has(tool.name) || tool.name === "bash";
-      if (mode === "plan") return READ_TOOLS.has(tool.name) || tool.name === "plan";
+      if (mode === "plan") return READ_TOOLS.has(tool.name) || tool.name === "plan" || tool.name === "question";
       return true;
     })
     .map(({ name, description, parameters }) => ({ name, description, parameters }));
@@ -326,6 +372,7 @@ export async function executeTool(
       policy?.mode === "plan" &&
       !READ_TOOLS.has(name) &&
       name !== "plan" &&
+      name !== "question" &&
       !(isMcpTool(name) && policy.mcp?.isReadOnly(name))
     ) {
       return `权限拒绝: 当前是 Plan 模式，不能使用 ${name}。请只给出计划，或让用户输入 /mode ask、/mode long 或 /mode full。`;
@@ -333,12 +380,14 @@ export async function executeTool(
     if (name === "task_state" && policy?.mode !== "long") {
       return "权限拒绝: task_state 只在 Long 模式下可用。请先 /mode long。";
     }
-    if ((name === "subagent_plan" || name === "subagent" || name === "plan" || name === "context_compress") && policy?.nested) {
+    if ((name === "subagent_plan" || name === "subagent" || name === "plan" || name === "context_compress" || name === "question") && policy?.nested) {
       return name === "plan"
         ? "权限拒绝: 子代理不能改父计划"
         : name === "context_compress"
           ? "权限拒绝: 子代理不能压缩父上下文"
-          : "权限拒绝: 子代理不能再派生子代理（max_depth=1）";
+          : name === "question"
+            ? "权限拒绝: 子代理不能向用户提问"
+            : "权限拒绝: 子代理不能再派生子代理（max_depth=1）";
     }
     if (name === "context_compress" && policy?.mode !== "long") {
       return "权限拒绝: context_compress 只在 Long 模式下可用。";
@@ -445,6 +494,18 @@ export async function executeTool(
     if (name === "subagent") {
       if (!policy?.spawnSubagent) return "工具执行失败: 子代理运行器未配置";
       return await policy.spawnSubagent(args, signal);
+    }
+    if (name === "question") {
+      const questions = parseQuestions(args);
+      const ask = policy?.askQuestions ?? askQuestions;
+      const outcome = await ask(questions, signal);
+      if (outcome === "unavailable") {
+        return "非 TTY 无法弹出问卷。请改用文字说明偏好，不要再调用 question。";
+      }
+      if (outcome === "reject") {
+        return "用户取消了问卷。不要假设答案；可以改用文字再问，或继续不依赖这些选择的工作。";
+      }
+      return formatQuestionResult(questions, outcome);
     }
     if (name === "bash") {
       return await runBash(str(args, "command"), str(args, "cwd"), 30_000, signal, {

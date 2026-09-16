@@ -11,7 +11,7 @@
 | 模式 | 适合 | 写入 / 副作用 |
 | --- | --- | --- |
 | **Ask**（默认） | 日常改代码 | 工作区内先 `y` / `n` / `a`；只读管道不打断 |
-| **Plan** | 先看再动手 | 只能 `read` / `search` / `plan`，没有写、删、bash |
+| **Plan** | 先看再动手 | 只能 `read` / `search` / `plan` / `question`，没有写、删、bash |
 | **Full** | 你已经信任这次会话 | 直接改文件、跑命令；系统目录和密钥仍禁 |
 | **Long / 长程** | 跨很多步的任务 | 只读预授权；副作用由**独立 LLM 审批**，**不会变成 Full** |
 
@@ -19,21 +19,23 @@ Long 的审批器拿一份干净上下文、只输出 JSON；解析失败、超�
 
 **失败即拒绝，OS 沙箱和应用层叠在一起。** Ask / Long 下 `bash` 在 macOS 走 `sandbox-exec`（只允许写工作区），Linux 走 `bwrap`。沙箱起不来就拒绝执行，Full 才会警告后裸跑。bash 不再靠整句正则：拆成 argv，剥掉 `env` / `timeout` / `xargs` / `bash -c`，按每一段管道分类——`ls | wc` 仍只读，`ls | tee out` / `find | xargs rm` 会升级；`$()` 和进程替换解析不了就当有副作用。另有：`.env` / `providers.json` / `~/.ssh` 等 denylist、symlink `realpath`、`git status` 的 `a` 不会扩成 `sudo`。bash 和 MCP 子进程都剥掉密钥。每次授权追加到工作区 `.socode-audit.jsonl`。非 TTY（脚本、`--input`）在 Ask 下无法弹窗，写入直接拒绝。
 
-**长任务能接着做，但不扩大权限。** Long 把目标记在 TaskState 里（会话中的 `【task state】` 消息，不另建表）。上下文挤到约 82% 会自动压缩（轮次之间、工具步之间、以及 `context_compress`），压缩时把最新模式和 TaskState **钉在保留区**。步数默认 Dynamic P50→P75：先给一半，工具后提醒还剩几步；本段有写入/里程碑/验证才延期一次。里程碑写入 `done` 时 harness **强制**跑 `verifyCommands`，并可再过一道 fail-closed rubric。失败则撤回这次 done。步数 / token 用尽或 Esc 中止会留下 `【checkpoint】`。Ask / Full 步数用尽仍报错，只有 Long 优雅停。
+**长任务能接着做，但不扩大权限。** Long 把目标记在 TaskState 里（会话中的 `【task state】` 消息，不另建表）。上下文挤到约 82% 会自动压缩（轮次之间、工具步之间、以及 `context_compress`），压缩时把最新模式、TaskState 和 plan **钉在保留区**。步数默认 Dynamic P50→P75：先给一半，工具后提醒还剩几步；本段有写入/里程碑/验证才延期一次，纯 read 或 doom 不加。里程碑写入 `done` 时 harness **强制**跑白名单 `verifyCommands`，并可再过一道 fail-closed rubric（四轴、权重 3 必须全过、加权 ≥ 0.7）。失败则撤回这次 done。步数 / token 用尽或 Esc 中止会留下 `【checkpoint】`。Ask / Full 步数用尽仍报错，只有 Long 优雅停。
 
-**子代理是干净上下文，只读并行、写入串行。** Ask / Full / Long 可先 `subagent_plan` 再 `subagent`。Long 推荐 `localize` / `edit` / `verify`（Ask/Full 仍可用 explorer/worker）：localize 并行（Long 同时最多 2 个），edit/worker 一个接一个，verify 等写入完成后再跑。交回 JSON；verify 的 `ok` 由退出码覆盖。过程默认隐藏，`/seesubagent [序号]` 查看某一个。子代理看不到父对话，不能再开子代理。Plan 模式没有这两个工具。
+**子代理是干净上下文，只读并行、写入串行。** Ask / Full / Long 可先 `subagent_plan` 再 `subagent`。Long 推荐 `localize` / `edit` / `verify`（Ask/Full 仍可用 explorer/worker）：localize 并行（Long 同时最多 2 个），edit/worker 一个接一个，verify 等写入完成后再跑。交回 JSON：edit 的 `ok` 必须真有改文件，verify 的 `ok` 由退出码覆盖。过程默认隐藏，`/seesubagent [序号]` 查看某一个。子代理看不到父对话，不能再开子代理。Plan 模式没有这两个工具。
 
 **多步骤任务用 `plan` 勾着做。** 模型和权限模式无关：非平凡请求先拆成 2–8 个目标，做完一项勾一项，全部勾完必须再 `plan` 写入 review，然后才给最终结果。勾选板会打在终端上，`/seeplan` 随时看进度。`/setplan <说明>` 强制本轮必须写出计划，并激活 grill-me（未达成共识前不改代码）。计划钉在会话里的 `【plan】` 消息，压缩时和 harness mode / TaskState 一起保留。这和 Plan **模式**（只读）不是一回事，也和 Long 的 TaskState 分开。
+
+**多个决策一次问完。** 模型有一组互斥或可选项要确认时调用 `question`：每题带预设答案，并追加 Type your own answer（单选在最后，多选在倒数第二，多选最后一项是提交答案）。↑↓ / j k 移动，1–9 快捷，Enter 确认或勾选，Tab 切题，Esc 取消。多题最后还有 Confirm。和 Ask 审批一样让出 TTY，子代理不能弹问卷。
 
 **MCP 和 Skills 进同一套循环。** 读 Claude/Cursor 风格的 `.mcp.json`（stdio JSON-RPC），把服务器工具挂进同一套权限，名字是 `mcp__服务器__工具`。`readOnlyHint` 为真的 MCP 在 Plan 里也能用；有副作用的走 Ask / Long / Full。HTTP MCP 暂不支持。`/mcp` 看连接状态。
 
 项目说明从用户目录到 git 根再到工作区加载 `AGENTS.md` / `CLAUDE.md`（同层 AGENTS 在前、CLAUDE 更具体）。内置基础 skill（`brainstorm` / `grill-me` / `ponytail` / `superpowers`）默认不灌全文：每轮用一次短 JSON 询问当前用户话该激活哪几个，最多 2 个，闲聊和解析失败都不注入。`/skills` 查看实际加载结果。
 
-**终端自己就是前端。** 没有 React / Ink：流式 Markdown 差量重绘（标题、代码块、列表、粗体），工具行和失败红色，Ask 审批，子代理默认藏过程、右下角 HUD。说明见 [`docs/FRONTEND.md`](docs/FRONTEND.md)。
+**终端自己就是前端。** 没有 React / Ink：流式 Markdown 差量重绘（标题、代码块、列表、粗体），思考块暗色斜体和正文分开，工具行和失败红色，Ask 审批，问卷（`question`），子代理默认藏过程、右下角 HUD。说明见 [`docs/FRONTEND.md`](docs/FRONTEND.md)。
 
 **上下文看得见、会话回得去。** `/context` 用色块标 system / tools / 对话 / 预留输出 / 空闲。一轮工具超过 6 次、或模型输出超过约 2400 字时，结束后打一条灰色 `recap`；**这一轮入库和后续上下文只留 recap**，需要细节请自行 grep。PostgreSQL 自动建库、迁移；短轮次仍存完整 tool trace。`npm start` 默认新会话，空对话不入库。生成中 Esc 中止当前轮：用户问题留下，半截回复不入库。连续三次同调用或同失败会停，避免空转。`/` 后有幽灵补全和 Tab。
 
-**小到能审。** 大约 50 个 TypeScript 文件、运行时依赖只有 `pg`。权限、沙箱、Long 审批、MCP、Skills、压缩、验证、子代理、计划、recap 都有测试（`npm test`）。策略写在代码里，不藏在框架配置后面。
+**小到能审。** 大约 50 个 TypeScript 文件、运行时依赖只有 `pg`。权限、沙箱、Long 审批、预算、rubric、MCP、Skills、压缩、验证、子代理、计划、问卷、recap 都有测试（`npm test`）。策略写在代码里，不藏在框架配置后面。
 
 ## 安装
 
@@ -61,9 +63,9 @@ MAX_AGENT_STEPS="80"
 MODE="ask"
 ```
 
-`THINKING_EFFORT` 可选：`none` / `minimal` / `low` / `medium` / `high` / `xhigh`。多个 Provider 存在 gitignore 的 `providers.json`。已保存的 Provider 整份生效，不再和环境变量字段混拼；没有 `providers.json` 时才用环境变量。
+`THINKING_EFFORT` 可选：`none` / `minimal` / `low` / `medium` / `high` / `xhigh`，默认 `medium`。运行中请用 `/effort` 调整，不要走 `/provider edit`。多个 Provider 存在 gitignore 的 `providers.json`。已保存的 Provider 整份生效，不再和环境变量字段混拼；没有 `providers.json` 时才用环境变量。
 
-可选：`MAX_AGENT_TOKENS`（Long 的 token 预算）、`LONG_APPROVE_MODEL` / `JUDGE_MODEL`（Long 审批与 skill 激活模型）、`SUBAGENT_STEPS`（子代理步数，默认 24）。审批器也会选用 `providers.json` 里名为 `judge` / `fast` / `cheap` / `mini` 的项。
+可选：`MAX_AGENT_TOKENS`（Long 的 token 预算）、`LONG_APPROVE_MODEL` / `JUDGE_MODEL`（Long 审批、skill 激活、rubric）、`SUBAGENT_STEPS`（子代理步数，默认 24）。`LONG_BUDGET_POLICY` 默认 `dynamic`（也可 `fixed` / `unlimited`），`LONG_BUDGET_DYNAMIC` 默认 `50-75`。审批器也会选用 `providers.json` 里名为 `judge` / `fast` / `cheap` / `mini` 的项。
 
 ## 用法
 
@@ -92,7 +94,7 @@ npm test
 
 - **Ask**：写、`edit`、删、有副作用的 `bash` 和所有 `git` 先审批，且只能在工作区内；解析后的只读管道（`ls` / `pwd` / `cat | rg`）不打断。bash 的 cwd 和重定向都不能离开工作区。
 - **Full**（`/mode full`）：直接改文件和执行命令，仍禁止 `/etc`、`/usr`、`~/.ssh`、`~/.aws`、工作区 `.env` 等。
-- **Plan**（`/mode plan`）：只能看和写计划。只读 MCP 可用。
+- **Plan**（`/mode plan`）：只能看、写计划和向用户提问。只读 MCP 可用。
 - **Long**（`/mode long` 或 `/mode 长程`）：Ask 的权限边界 + 长程编排 + LLM 审批副作用。进入后维护 TaskState（`/task`）。
 
 Long **不会**在沙箱起不来时 fallback 裸跑，也**不会**把本地已能判定的危险请求交给审批器。
@@ -101,7 +103,9 @@ Long **不会**在沙箱起不来时 fallback 裸跑，也**不会**把本地已
 
 输入 `/` 后会按前缀提示，Tab 补全。
 
-- `/provider` 查看当前适配；`/provider edit` 编辑；`/provider list` 列出；`/provider <name>` 切换；`/provider new` 新增
+- `/provider` 查看当前适配；`/provider edit` 按字段编辑；`/provider list` 列出；`/provider <name>` 切换；`/provider new` 按字段新增（不套用当前值）
+- `/model` 在已保存的 Provider 和模型之间切换（←→ 提供商，↑↓ 模型）
+- `/effort` 先从 API 读取思考强度，再用方向键调整（默认 medium）
 - `/new` 开新会话（空的不入库）
 - `/session` 或 `/chat` 恢复历史对话
 - `/context` 查看上下文占用
@@ -126,9 +130,11 @@ Long **不会**在沙箱起不来时 fallback 裸跑，也**不会**把本地已
 | `search` | 目录内正则搜索，可 glob |
 | `bash` | 绝对 cwd 下执行，30s 超时，Ask/Long 套 OS 沙箱 |
 | `calculate` / `get_current_time` | 纯本地，不走权限询问 |
-| `task_state` | 仅 Long：更新 goal / milestones / done / keyFiles / verifyCommands；写入 done 时强制跑验证 |
+| `task_state` | 仅 Long：更新 goal / milestones / done / keyFiles / verifyCommands；写入 done 时强制跑验证，并可再过 rubric |
 | `plan` | 拆任务、勾进度、全部完成后审查；Ask / Full / Long / Plan 都有 |
-| `subagent_plan` / `subagent` | Ask / Full / Long：规划并执行子代理（explorer 并行，worker 串行） |
+| `question` | 一次弹出多题问卷，每题预设选项；追加 Type your own answer（多选倒数第二，最后一项提交答案） |
+| `subagent_plan` / `subagent` | Ask / Full / Long：规划并执行。Long 推荐 localize / edit / verify；Ask/Full 仍可用 explorer / worker |
+| `context_compress` | 仅 Long：把较早 ReAct 步折成摘要（节流，不能连着压） |
 | `mcp__…` | 来自 `.mcp.json` 的外部 MCP 工具 |
 
 路径、`cwd`、`search` 的 `directory` 必须是绝对路径。
@@ -176,17 +182,19 @@ Skills 来自各目录下的 `<name>/SKILL.md`（YAML frontmatter 的 `name` / `
 | `src/long-approve.ts` | Long 副作用的独立 JSON 审批器 |
 | `src/task-state.ts` | 长程状态（活在对话消息里） |
 | `src/plan.ts` | 可勾选任务计划，`/seeplan` 查看 |
+| `src/question.ts` / `src/question-ui.ts` | 问卷工具与 raw-mode TUI |
 | `src/workarea.ts` | `/setworkarea` 选文件夹或设绝对路径 |
 | `src/verify.ts` | Long 里程碑验证：跑 `verifyCommands`，失败撤回 done |
 | `src/long-budget.ts` | Long 动态步数预算、reminder、`shouldExtend` |
 | `src/long-rubric.ts` | 里程碑级 fail-closed 评分 |
-| `src/compress.ts` | 摘要压缩，钉住 mode / TaskState |
-| `src/subagent.ts` | 干净上下文子代理：explorer 并行，worker 串行 |
+| `src/compress.ts` | 摘要压缩，钉住 mode / TaskState / plan |
+| `src/subagent.ts` | 干净上下文子代理：localize 并行，edit 串行，verify 最后跑 |
 | `src/subagent-ui.ts` | 子代理过程默认隐藏，`/seesubagent` 查看 |
 | `src/mcp.ts` | stdio MCP hub |
 | `src/skills.ts` / `src/skill-activate.ts` | 说明文件、Skills、按轮激活 |
 | `src/chat.ts` / `src/provider.ts` | OpenAI 兼容流式、多 Provider |
-| `src/markdown.ts` | 轻量 Markdown → TUI ANSI |
+| `src/provider-api.ts` / `src/select-ui.ts` | `/effort` `/model`：读 `/models`、方向键选择 |
+| `src/think.ts` / `src/markdown.ts` | 思考块拆分、轻量 Markdown → TUI ANSI |
 | `src/recap.ts` | 长轮次灰色回顾；触发后历史只留 recap |
 | `src/db.ts` | PostgreSQL 自动建库与迁移；空会话不入库 |
 | `src/context.ts` | 上下文计量与 `/context` 色块 |

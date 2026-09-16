@@ -2,7 +2,7 @@
 
 面向「做一件要跑很久的事」：记住目标、压缩上下文、计划–执行–验证、预算用尽时留下检查点。权限上它**不是 Full**。
 
-对照实现：`src/mode.ts`、`src/task-state.ts`、`src/verify.ts`、`src/permissions.ts`、`src/long-approve.ts`、`src/agent.ts`、`src/compress.ts`、`src/index.ts`。
+对照实现：`src/mode.ts`、`src/task-state.ts`、`src/verify.ts`、`src/long-budget.ts`、`src/long-rubric.ts`、`src/permissions.ts`、`src/long-approve.ts`、`src/agent.ts`、`src/compress.ts`、`src/index.ts`。
 
 ## 为什么要单独一种模式
 
@@ -27,7 +27,9 @@ CLI --mode long / /mode long / /mode 长程
         ├─ permissions.ts     与 Ask 同沙箱；read/search 预授权
         ├─ long-approve.ts    Long 独有：干净上下文 JSON 审批器
         ├─ compress.ts        接近窗口或已经在丢历史时自动压缩
-        ├─ agent.ts           步数 / token / 上下文预算用尽则优雅停
+        ├─ agent.ts           步数 / token / 上下文预算用尽则优雅停；context_compress
+        ├─ long-budget.ts     Dynamic P50→P75 + 延期门
+        ├─ long-rubric.ts     里程碑 fail-closed 评分
         ├─ verify.ts          写入 done 时强制跑 verifyCommands
         └─ task-state.ts      内存 TaskStore + 会话里的【task state】消息
                     │
@@ -50,6 +52,9 @@ type TaskState = {
   verifyCommands: string[];
   notes: string;
   updatedAt: string; // ISO
+  lastVerify?: LastVerify;
+  verifyRubric?: VerifyRubric;
+  lastRubricScore?: RubricScore;
 };
 ```
 

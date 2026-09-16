@@ -28,6 +28,7 @@ export type BudgetStop = "steps" | "tokens" | "context";
 
 export type AgentEvent =
   | { type: "delta"; text: string }
+  | { type: "thinking"; text: string }
   | { type: "tool_call"; name: string; arguments: string }
   | { type: "tool_result"; name: string; result: string }
   | { type: "compress"; saved: number }
@@ -122,6 +123,7 @@ export async function runAgent(params: {
     stream?: boolean;
     signal?: AbortSignal;
     onDelta?: (text: string) => void;
+    onThinking?: (text: string) => void;
   }) => Promise<Pick<ChatResult, "content" | "toolCalls" | "usage">>;
 }): Promise<AgentOutcome> {
   const maxSteps = Math.max(1, params.maxSteps ?? DEFAULT_MAX_AGENT_STEPS);
@@ -225,6 +227,7 @@ export async function runAgent(params: {
         stream: params.stream,
         signal: params.signal,
         onDelta: (text) => params.onEvent?.({ type: "delta", text }),
+        onThinking: (text) => params.onEvent?.({ type: "thinking", text }),
       }).catch(fail);
       addUsage(usage, result.usage);
       throwIfAborted(params.signal);

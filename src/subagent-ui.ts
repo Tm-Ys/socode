@@ -65,7 +65,19 @@ export function formatSubagentLog(job: SubagentUiJob) {
   const header = `# ${job.id}. ${job.kind}  ${job.label}  ${job.phase}`;
   const chunks: string[] = [];
   let inText = false;
+  let inThink = false;
   for (const event of job.events) {
+    if (event.type === "thinking" && event.text) {
+      if (!inThink) {
+        chunks.push(chunks.length ? "\n" : "");
+        chunks.push("  思考  ");
+        inThink = true;
+        inText = false;
+      }
+      chunks.push(event.text);
+      continue;
+    }
+    inThink = false;
     if (event.type === "delta" && event.text) {
       if (!inText) {
         chunks.push(chunks.length ? "\n" : "");

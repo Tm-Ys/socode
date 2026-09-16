@@ -13,16 +13,13 @@ source: https://github.com/mattpocock/skills/blob/main/skills/productivity/grill
 
 ## 轮次
 
-**前沿** = 前提已经定下来、现在就能问、不必猜未回答的题。一轮问完整前沿，编号，每题带你的推荐答案，然后等用户。
+**前沿** = 前提已经定下来、现在就能问、不必猜未回答的题。一轮问完整前沿。有预设选项的决策调用 `question`（每题带选项，推荐项放第一并在 label 加 `(Recommended)`；不要自己加「其他」，系统会追加 Type your own answer。多选时它是倒数第二，最后一项是提交答案）。没有合适选项的开放题才写成聊天问句。
 
 ```
-❓ **Q1** - **标题**：题干（可含选项）
-
-➡️ 推荐：…
-
----
-
-❓ **Q2** - **标题**：…
+调用 question：
+- header: 短标签
+- question: 题干
+- options: [{ label, description }, …]
 ```
 
 用户一答，树就变：已决的点把前沿往外推。本题答案还依赖本轮另一题 → 放到下一轮。

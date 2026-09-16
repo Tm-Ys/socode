@@ -75,6 +75,37 @@ export function paintMarkdownDelta(params: {
   params.live.rows = displayRows(rendered, params.columns);
 }
 
+export function thinkingPrefix(nest = "", color = false) {
+  if (!color) return `${nest}  思考  `;
+  return `${nest}  ${DIM}思考${RESET}  `;
+}
+
+export function renderThinking(src: string, opts?: { prefix?: string; color?: boolean }) {
+  const color = opts?.color ?? false;
+  const prefix = opts?.prefix ?? thinkingPrefix("", color);
+  const indent = " ".repeat(Math.max(1, visibleWidth(prefix)));
+  return src.split("\n").map((line, i) => {
+    const lead = i === 0 ? prefix : indent;
+    if (!color) return `${lead}${line}`;
+    return `${lead}${DIM}${ITALIC}${line}${RESET}`;
+  }).join("\n");
+}
+
+export function paintThinkingDelta(params: {
+  live: MarkdownLive;
+  chunk: string;
+  prefix: string;
+  write: (text: string) => void;
+  columns: number;
+  color: boolean;
+}) {
+  params.live.raw += params.chunk;
+  const rendered = renderThinking(params.live.raw, { prefix: params.prefix, color: params.color });
+  rewindLive(params.write, params.live.rows);
+  params.write(rendered);
+  params.live.rows = displayRows(rendered, params.columns);
+}
+
 export function finishMarkdownLive(live: MarkdownLive) {
   live.raw = "";
   live.rows = 0;

@@ -2,6 +2,7 @@ import { isTurnAborted, throwIfAborted, TurnAborted } from "./abort.js";
 import type { ToolSpec } from "./tools.js";
 import type { Message, ToolCall } from "./db.js";
 import { chatCompletionsUrl, type Provider } from "./provider.js";
+import { absorbChatDelta, finishThinkStream, newThinkStream, type ThinkStream } from "./think.js";
 
 export type { ToolCall };
 
@@ -12,15 +13,21 @@ export type TokenUsage = {
 
 export type ChatResult = {
   content: string;
+  thinking?: string;
   toolCalls: ToolCall[];
   finishReason: string;
   usage?: TokenUsage;
 };
 
+export type ChatStreamHandlers = {
+  onDelta?: (text: string) => void;
+  onThinking?: (text: string) => void;
+};
+
 type ChatCompletion = {
   choices?: Array<{
     finish_reason?: string | null;
-    delta?: {
+    delta?: Record<string, unknown> & {
       content?: string | null;
       tool_calls?: Array<{
         index?: number;
@@ -28,7 +35,7 @@ type ChatCompletion = {
         function?: { name?: string; arguments?: string };
       }>;
     };
-    message?: {
+    message?: Record<string, unknown> & {
       content?: string | null;
       tool_calls?: Array<{
         id?: string;
@@ -51,6 +58,7 @@ export async function completeChat(params: {
   stream?: boolean;
   signal?: AbortSignal;
   onDelta?: (text: string) => void;
+  onThinking?: (text: string) => void;
 }): Promise<ChatResult> {
   throwIfAborted(params.signal);
   const stream = params.stream ?? true;
@@ -96,8 +104,13 @@ export async function completeChat(params: {
     throw error;
   }
 
+  const handlers: ChatStreamHandlers = {
+    onDelta: params.onDelta,
+    onThinking: params.onThinking,
+  };
+
   if (!stream) {
-    return await readJsonReply(response, params.onDelta, params.signal);
+    return await readJsonReply(response, handlers, params.signal);
   }
 
   if (!response.ok) {
@@ -110,10 +123,10 @@ export async function completeChat(params: {
 
   const contentType = response.headers.get("content-type") ?? "";
   if (contentType.includes("application/json") && !contentType.includes("event-stream")) {
-    return await readJsonReply(response, params.onDelta, params.signal);
+    return await readJsonReply(response, handlers, params.signal);
   }
 
-  const result = await readSseReply(response.body, params.onDelta, params.signal);
+  const result = await readSseReply(response.body, handlers, params.signal);
   if (!result.content.trim() && result.toolCalls.length === 0) {
     throwIfAborted(params.signal);
     throw new Error("流式响应缺少内容");
@@ -145,7 +158,7 @@ function toApiMessage(message: Message) {
 
 async function readJsonReply(
   response: Response,
-  onDelta?: (text: string) => void,
+  handlers: ChatStreamHandlers,
   signal?: AbortSignal,
 ): Promise<ChatResult> {
   throwIfAborted(signal);
@@ -166,7 +179,10 @@ async function readJsonReply(
     throw new Error(data.error?.message ?? `HTTP ${response.status}: ${text.slice(0, 400)}`);
   }
   const message = data.choices?.[0]?.message;
-  const content = message?.content ?? "";
+  const stream = newThinkStream();
+  const result: ChatResult = { content: "", toolCalls: [], finishReason: "stop" };
+  emitChatParts(result, absorbChatDelta(stream, message), handlers);
+  emitChatParts(result, finishThinkStream(stream), handlers);
   const toolCalls = (message?.tool_calls ?? [])
     .map((call) => ({
       id: call.id ?? "",
@@ -174,12 +190,11 @@ async function readJsonReply(
       arguments: call.function?.arguments ?? "{}",
     }))
     .filter((call) => call.id && call.name);
-  if (!content.trim() && toolCalls.length === 0) {
+  if (!result.content.trim() && toolCalls.length === 0) {
     throw new Error(`响应缺少内容: ${text.slice(0, 400)}`);
   }
-  if (content) onDelta?.(content);
   return {
-    content,
+    ...result,
     toolCalls,
     finishReason: data.choices?.[0]?.finish_reason ?? (toolCalls.length ? "tool_calls" : "stop"),
     usage: parseUsage(data.usage),
@@ -198,7 +213,7 @@ async function errorMessage(response: Response) {
 
 async function readSseReply(
   body: ReadableStream<Uint8Array>,
-  onDelta?: (text: string) => void,
+  handlers: ChatStreamHandlers,
   signal?: AbortSignal,
 ): Promise<ChatResult> {
   const reader = body.getReader();
@@ -206,12 +221,13 @@ async function readSseReply(
   let buffer = "";
   const result: ChatResult = { content: "", toolCalls: [], finishReason: "stop" };
   const pending = new Map<number, ToolCall>();
+  const stream = newThinkStream();
 
   const consume = (chunk: string) => {
     buffer += chunk;
     const lines = buffer.split(/\r?\n/);
     buffer = lines.pop() ?? "";
-    for (const line of lines) applySseLine(line, result, pending, onDelta);
+    for (const line of lines) applySseLine(line, result, pending, stream, handlers);
   };
 
   const onAbort = () => {
@@ -231,7 +247,8 @@ async function readSseReply(
       consume(decoder.decode(value, { stream: true }));
     }
     consume(decoder.decode());
-    applySseLine(buffer, result, pending, onDelta);
+    applySseLine(buffer, result, pending, stream, handlers);
+    emitChatParts(result, finishThinkStream(stream), handlers);
   } catch (error) {
     if (signal?.aborted || isTurnAborted(error)) throw new TurnAborted();
     throw error;
@@ -254,7 +271,8 @@ function applySseLine(
   line: string,
   result: ChatResult,
   pending: Map<number, ToolCall>,
-  onDelta?: (text: string) => void,
+  stream: ThinkStream,
+  handlers: ChatStreamHandlers,
 ) {
   const trimmed = line.trim();
   if (!trimmed.startsWith("data:")) return;
@@ -280,10 +298,7 @@ function applySseLine(
 
   const delta = choice.delta;
   if (!delta) return;
-  if (typeof delta.content === "string" && delta.content) {
-    result.content += delta.content;
-    onDelta?.(delta.content);
-  }
+  emitChatParts(result, absorbChatDelta(stream, delta), handlers);
   for (const call of delta.tool_calls ?? []) {
     const index = call.index ?? 0;
     const current = pending.get(index) ?? { id: "", name: "", arguments: "" };
@@ -291,6 +306,21 @@ function applySseLine(
     if (call.function?.name) current.name = call.function.name;
     if (call.function?.arguments) current.arguments += call.function.arguments;
     pending.set(index, current);
+  }
+}
+
+function emitChatParts(
+  result: ChatResult,
+  parts: { thinking: string; text: string },
+  handlers: ChatStreamHandlers,
+) {
+  if (parts.thinking) {
+    result.thinking = `${result.thinking ?? ""}${parts.thinking}`;
+    handlers.onThinking?.(parts.thinking);
+  }
+  if (parts.text) {
+    result.content += parts.text;
+    handlers.onDelta?.(parts.text);
   }
 }
 

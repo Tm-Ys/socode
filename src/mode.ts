@@ -89,7 +89,7 @@ export function modeHint(mode: AgentMode) {
 
 export function modeRules(mode: AgentMode) {
   if (mode === "plan") {
-    return "你只能阅读代码和拟定计划，不能改文件、不能创建/删除文件、不能运行有副作用的命令。可用 `read` / `search` / `calculate` / `get_current_time`。把步骤写成计划，等用户 `/mode ask`、`/mode long` 或 `/mode full` 后再动手。";
+    return "你只能阅读代码、拟定计划和向用户提问，不能改文件、不能创建/删除文件、不能运行有副作用的命令。可用 `read` / `search` / `calculate` / `get_current_time` / `plan` / `question`。把步骤写成计划，等用户 `/mode ask`、`/mode long` 或 `/mode full` 后再动手。";
   }
   if (mode === "full") {
     return "可以直接在工作区写文件和执行命令。不要碰系统目录和密钥文件。破坏性操作前仍要确认用户意图。";

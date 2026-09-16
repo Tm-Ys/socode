@@ -12,6 +12,7 @@ import { inputPlaceholder } from "./workarea.js";
 const DIM = "\x1b[2m";
 const RESET = "\x1b[0m";
 const RED = "\x1b[31m";
+const ORANGE = "\x1b[38;5;208m";
 const CLEAR_DOWN = "\x1b[J";
 const HIDE_CURSOR = "\x1b[?25l";
 const SHOW_CURSOR = "\x1b[?25h";
@@ -65,7 +66,28 @@ export function restoreTerminal() {
   }
 }
 
-export async function promptYou(label = USER_PROMPT, opts?: { hint?: string }) {
+export function promptStatusLine(
+  model: string,
+  effort: string,
+  opts?: { context?: string; columns?: number },
+) {
+  const left = `${model} · ${effort}`;
+  const right = opts?.context?.trim() ?? "";
+  if (!right) return left;
+  const cols = Math.max(20, opts?.columns ?? 80);
+  const minGap = 2;
+  const budget = cols - visibleWidth(right) - minGap;
+  const shownLeft = visibleWidth(left) > budget ? clipToWidth(left, Math.max(8, budget)) : left;
+  const gap = Math.max(minGap, cols - visibleWidth(shownLeft) - visibleWidth(right));
+  return `${shownLeft}${" ".repeat(gap)}${right}`;
+}
+
+export function paintPromptStatus(text: string, color = false) {
+  if (!color || !text) return text;
+  return `${ORANGE}${text}${RESET}`;
+}
+
+export async function promptYou(label = USER_PROMPT, opts?: { hint?: string; status?: string }) {
   if (!stdin.isTTY || !stdout.isTTY) {
     return await readPlainLine(label);
   }
@@ -91,7 +113,8 @@ export async function promptYou(label = USER_PROMPT, opts?: { hint?: string }) {
       disarmQuit();
       const menuOpen = buffer.startsWith("/") && matchCommands(buffer).length > 0;
       const hintShowing = Boolean(opts?.hint && !buffer);
-      if (menuOpen || value !== buffer || hintShowing) {
+      const statusShowing = Boolean(opts?.status);
+      if (menuOpen || value !== buffer || hintShowing || statusShowing) {
         inputRows = redraw(label, value, [], "", inputRows);
       }
       stdout.write("\n");
@@ -145,7 +168,7 @@ export async function promptYou(label = USER_PROMPT, opts?: { hint?: string }) {
       const matches = matchCommands(buffer);
       const ghost = ghostText(buffer, matches);
       const hint = ghost ? "" : inputPlaceholder(buffer, opts?.hint);
-      inputRows = redraw(label, buffer, matches, ghost, inputRows, hint);
+      inputRows = redraw(label, buffer, matches, ghost, inputRows, hint, opts?.status);
     };
 
     stdin.on("data", onData);
@@ -182,20 +205,27 @@ function redraw(
   ghost: string,
   prevInputRows = 1,
   hint = "",
+  status = "",
 ) {
   const cols = Math.max(20, stdout.columns ?? 80);
+  const color = stdout.isTTY && !process.env.NO_COLOR;
   stdout.write(HIDE_CURSOR);
   if (prevInputRows > 1) stdout.write(`\x1b[${prevInputRows - 1}A`);
   stdout.write(`\r${CLEAR_DOWN}${label}${buffer}`);
   if (ghost) stdout.write(`${DIM}${ghost}${RESET}`);
   else if (hint) stdout.write(`${DIM}${hint}${RESET}`);
   const shown = buffer.startsWith("/") ? matches.slice(0, 6) : [];
+  const statusLine = status ? clipToWidth(status, cols) : "";
+  if (statusLine) stdout.write(`\n${paintPromptStatus(statusLine, color)}`);
   if (shown.length > 0) {
     const lines = shown.map((command) =>
       clipToWidth(`  ${command.name.padEnd(18)} ${command.hint}`, cols),
     );
     stdout.write(`\n${lines.map((line) => `${DIM}${line}${RESET}`).join("\n")}`);
-    stdout.write(`\x1b[${lines.length}A`);
+  }
+  const extra = (statusLine ? 1 : 0) + shown.length;
+  if (extra > 0) {
+    stdout.write(`\x1b[${extra}A`);
     stdout.write(`\r\x1b[${cursorColumn(visibleWidth(label + buffer), cols)}G`);
   } else if (ghost || hint) {
     stdout.write(`\r\x1b[${cursorColumn(visibleWidth(label + buffer), cols)}G`);
@@ -291,25 +321,31 @@ export function setPermissionGate(gate?: { pause: () => void; resume: () => void
   permissionGate = gate;
 }
 
-export async function askPermission(title: string, detail: string): Promise<PermissionAnswer> {
+export async function withPermissionLock<T>(run: () => Promise<T>): Promise<T> {
   let release!: () => void;
   const previous = permissionChain;
   permissionChain = new Promise((resolve) => {
     release = resolve;
   });
   await previous;
-  if (!stdin.isTTY || !stdout.isTTY) {
-    release();
-    return "deny";
-  }
   permissionGate?.pause();
-  const yellow = "\x1b[33m";
-  const dim = "\x1b[2m";
-  stdout.write(
-    `\n${yellow}? ${title}${RESET}\n  ${dim}${detail}${RESET}\n  ${dim}y 允许  n 拒绝  a 本会话同类一律允许${RESET}\n`,
-  );
-
   try {
+    return await run();
+  } finally {
+    permissionGate?.resume();
+    release();
+  }
+}
+
+export async function askPermission(title: string, detail: string): Promise<PermissionAnswer> {
+  return await withPermissionLock(async () => {
+    if (!stdin.isTTY || !stdout.isTTY) return "deny";
+    const yellow = "\x1b[33m";
+    const dim = "\x1b[2m";
+    stdout.write(
+      `\n${yellow}? ${title}${RESET}\n  ${dim}${detail}${RESET}\n  ${dim}y 允许  n 拒绝  a 本会话同类一律允许${RESET}\n`,
+    );
+
     return await new Promise((resolve) => {
       const wasRaw = stdin.isRaw;
       stdin.setRawMode(true);
@@ -345,10 +381,7 @@ export async function askPermission(title: string, detail: string): Promise<Perm
 
       stdin.on("data", onData);
     });
-  } finally {
-    permissionGate?.resume();
-    release();
-  }
+  });
 }
 
 async function readPlainLine(label: string) {

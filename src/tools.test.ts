@@ -29,6 +29,7 @@ describe("task_state tool", () => {
     assert.equal(names.includes("bash"), false);
     assert.equal(names.includes("read"), true);
     assert.equal(names.includes("plan"), true);
+    assert.equal(names.includes("question"), true);
   });
 
   it("updates TaskState in Long", async () => {
@@ -202,7 +203,7 @@ describe("plan tool", () => {
       undefined,
       policy,
     );
-    assert.match(created, /\[ \] 1\. 拆/);
+    assert.match(created, /1\. 拆/);
     await executeTool("plan", JSON.stringify({ done: [1, 2] }), undefined, policy);
     const last = await executeTool("plan", JSON.stringify({ done: 3 }), undefined, policy);
     assert.match(last, /全部勾完/);
@@ -219,5 +220,59 @@ describe("plan tool", () => {
     const out = await executeTool("plan", JSON.stringify({ review: "too soon" }), undefined, policy);
     assert.match(out, /未勾选/);
     assert.equal(plans.get().review, "");
+  });
+});
+
+describe("question tool", () => {
+  const payload = {
+    questions: [
+      {
+        question: "用哪种存储？",
+        header: "存储",
+        options: [
+          { label: "SQLite (Recommended)", description: "本地文件" },
+          { label: "PostgreSQL", description: "已有库" },
+        ],
+      },
+    ],
+  };
+
+  it("is advertised in Ask/Full/Long/Plan but not nested children", () => {
+    for (const mode of ["ask", "full", "long", "plan"] as const) {
+      assert.equal(toolSpecs(mode).some((tool) => tool.name === "question"), true);
+    }
+    assert.equal(toolSpecs("ask", { nested: true }).some((tool) => tool.name === "question"), false);
+    assert.equal(toolSpecs("ask", { nested: true, role: "explorer" }).some((tool) => tool.name === "question"), false);
+  });
+
+  it("returns the user's answers", async () => {
+    const policy = createPolicy(ws, () => "ask", undefined, {
+      askQuestions: async () => [["SQLite (Recommended)"]],
+    });
+    const out = await executeTool("question", JSON.stringify(payload), undefined, policy);
+    assert.match(out, /SQLite \(Recommended\)/);
+    assert.match(out, /User has answered your questions/);
+  });
+
+  it("is allowed in Plan mode", async () => {
+    const policy = createPolicy(ws, () => "plan", undefined, {
+      askQuestions: async () => [["PostgreSQL"]],
+    });
+    const out = await executeTool("question", JSON.stringify(payload), undefined, policy);
+    assert.match(out, /PostgreSQL/);
+  });
+
+  it("reports dismiss without assuming answers", async () => {
+    const policy = createPolicy(ws, () => "ask", undefined, {
+      askQuestions: async () => "reject",
+    });
+    const out = await executeTool("question", JSON.stringify(payload), undefined, policy);
+    assert.match(out, /取消了问卷/);
+  });
+
+  it("refuses nested subagents", async () => {
+    const policy = createPolicy(ws, () => "ask", undefined, { nested: true });
+    const out = await executeTool("question", JSON.stringify(payload), undefined, policy);
+    assert.match(out, /子代理不能向用户提问/);
   });
 });

@@ -151,6 +151,7 @@ export type ContextReport = {
   keptCount: number;
   droppedCount: number;
   droppedTokens: number;
+  recapCount: number;
   used: number;
   free: number;
   slices: ContextSlice[];
@@ -191,6 +192,7 @@ export function measureContext(params: {
     (modeNotice && lastHarnessMode(kept) !== params.mode ? messageTokens(modeNotice) : 0);
   const droppedCount = Math.max(0, full.length - kept.length);
   const droppedTokens = Math.max(0, fullTokens - messages);
+  const recapCount = full.filter((message) => isRecapMessage(message)).length;
   const used = system + tools + messages;
   const free = Math.max(0, window - used - maxOutput);
 
@@ -220,6 +222,7 @@ export function measureContext(params: {
     keptCount: kept.length,
     droppedCount,
     droppedTokens,
+    recapCount,
     used,
     free,
     slices,
@@ -253,12 +256,32 @@ export function formatContextReport(report: ContextReport, width = 40, color = t
     report.droppedCount > 0
       ? `\n发送时丢弃更早 ${report.droppedCount} 条（约 ${fmt(report.droppedTokens)} tokens）`
       : "";
+  const recap = report.recapCount > 0 ? `  recap ${report.recapCount} 轮` : "";
   return [
     `上下文  ${fmt(report.used)} / ${fmt(report.window)}  ${pct}%    预算 ${fmt(report.budget)}${over}`,
     bar,
     legend,
-    `对话 ${report.keptCount}/${report.messageCount} 条${dropped}`,
+    `对话 ${report.keptCount}/${report.messageCount} 条${recap}${dropped}`,
   ].join("\n");
+}
+
+export function compactTokens(n: number) {
+  const value = Math.max(0, Math.round(n));
+  if (value < 1000) return String(value);
+  if (value < 1_000_000) {
+    if (value % 1000 === 0) return `${value / 1000}K`;
+    const k = Math.round((value / 1000) * 10) / 10;
+    return `${String(k).replace(/\.0$/, "")}K`;
+  }
+  if (value % 1_000_000 === 0) return `${value / 1_000_000}M`;
+  const m = Math.round((value / 1_000_000) * 10) / 10;
+  return `${String(m).replace(/\.0$/, "")}M`;
+}
+
+export function formatContextMeter(used: number, window: number) {
+  const total = Math.max(1, window);
+  const pct = Math.max(0, Math.round((Math.max(0, used) / total) * 100));
+  return `context ${pct}%(${compactTokens(used)} / ${compactTokens(window)})`;
 }
 
 function allocate(values: number[], width: number, total: number) {

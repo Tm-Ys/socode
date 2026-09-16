@@ -19,6 +19,7 @@ import {
 } from "./subagent-plan.js";
 import type { TaskStore } from "./task-state.js";
 import type { PlanStore } from "./plan.js";
+import type { QuestionInfo, QuestionOutcome } from "./question.js";
 import { verifyCommandDenied } from "./verify.js";
 import {
   bashAlwaysAsk,
@@ -45,6 +46,7 @@ export type Policy = {
   role?: SubagentKind;
   subagents?: SubagentStore;
   spawnSubagent?: (args: Record<string, unknown>, signal?: AbortSignal) => Promise<string>;
+  askQuestions?: (questions: QuestionInfo[], signal?: AbortSignal) => Promise<QuestionOutcome>;
   mcp?: McpHub;
   longApprove?: LongApprover;
   longBudget?: LongBudgetPlan;
@@ -58,6 +60,7 @@ export type PolicyHooks = {
   role?: SubagentKind;
   subagents?: SubagentStore;
   spawnSubagent?: (args: Record<string, unknown>, signal?: AbortSignal) => Promise<string>;
+  askQuestions?: (questions: QuestionInfo[], signal?: AbortSignal) => Promise<QuestionOutcome>;
   mcp?: McpHub;
   plans?: PlanStore;
   longBudget?: LongBudgetPlan;
@@ -86,6 +89,7 @@ export function createPolicy(
     role: hooks?.role,
     subagents: hooks?.subagents,
     spawnSubagent: hooks?.spawnSubagent,
+    askQuestions: hooks?.askQuestions,
     mcp: hooks?.mcp,
     longApprove: hooks?.longApprove,
     longBudget: hooks?.longBudget,
@@ -118,7 +122,17 @@ async function authorizeInner(
   tasks?: TaskStore,
   hooks?: PolicyHooks,
 ): Promise<string | null> {
-  if (name === "get_current_time" || name === "calculate" || name === "task_state" || name === "plan" || name === "context_compress") return null;
+  if (
+    name === "get_current_time" ||
+    name === "calculate" ||
+    name === "task_state" ||
+    name === "plan" ||
+    name === "context_compress" ||
+    name === "question"
+  ) {
+    if (name === "question" && hooks?.nested) return "子代理不能向用户提问";
+    return null;
+  }
 
   if (name === "subagent_plan" || name === "subagent") {
     if (current === "plan") {

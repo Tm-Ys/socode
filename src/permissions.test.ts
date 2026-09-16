@@ -167,6 +167,13 @@ describe("createPolicy", () => {
     assert.match((await child.authorize("subagent", {})) ?? "", /不能再派生/);
   });
 
+  it("allows question in Ask/Plan and denies it for nested children", async () => {
+    assert.equal(await createPolicy(ws, () => "ask").authorize("question", { questions: [] }), null);
+    assert.equal(await createPolicy(ws, () => "plan").authorize("question", { questions: [] }), null);
+    const child = createPolicy(ws, () => "ask", undefined, { nested: true });
+    assert.match((await child.authorize("question", { questions: [] })) ?? "", /不能向用户提问/);
+  });
+
   it("keeps explorer subagents read-only", async () => {
     const policy = createPolicy(ws, () => "ask", undefined, { nested: true, role: "explorer" });
     assert.match(

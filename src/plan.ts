@@ -1,4 +1,5 @@
 import type { Message } from "./db.js";
+import { useColor } from "./markdown.js";
 
 export const PLAN_PREFIX = "【plan】";
 export const PLAN_REVIEW_NUDGE =
@@ -214,24 +215,53 @@ export function patchFromPlanArgs(args: Record<string, unknown>): PlanPatch {
   return patch;
 }
 
-export function formatPlanCli(plan: WorkPlan) {
+export function planCliWidth(columns = process.stdout.columns ?? 60) {
+  return Math.max(42, Math.min(72, Math.max(20, columns) - 2));
+}
+
+export function formatPlanCli(plan: WorkPlan, opts?: { width?: number; color?: boolean }) {
+  const color = opts?.color ?? useColor();
+  const boxWidth = opts?.width ?? planCliWidth();
+  const inner = boxWidth - 4;
   const { done, total } = planProgress(plan);
-  const lines = ["--- Plan ---", `目标: ${plan.goal.trim() || "（未设定）"}`, `进度: ${done}/${total}`];
+  const dim = color ? "\x1b[2m" : "";
+  const bold = color ? "\x1b[1m" : "";
+  const reset = color ? "\x1b[0m" : "";
+
+  let title = total ? `📋 Plan  ${done}/${total}` : "📋 Plan";
+  if (planNeedsReview(plan)) title += "  🔍 待审查";
+  else if (plan.review.trim()) title += "  ✨ 已审查";
+
+  const body: string[] = [];
+  body.push(...wrapLabeled("🎯", plan.goal.trim() || "（未设定）", inner));
+  if (total) {
+    const barWidth = Math.min(12, Math.max(8, inner - 18));
+    const filled = Math.round((done / total) * barWidth);
+    const bar = `${"█".repeat(filled)}${"░".repeat(barWidth - filled)}`;
+    body.push(clipCells(`📊  ${bar}  ${done}/${total}`, inner));
+  }
+  body.push("");
+
   if (!plan.items.length) {
-    lines.push("（还没有拆分项。模型会用 plan 工具写入。）");
+    body.push(...wrapLabeled("📭", "还没有拆分项。模型会用 plan 工具写入。", inner));
   } else {
+    const nextId = plan.items.find((item) => !item.done)?.id;
     for (const item of plan.items) {
-      const mark = item.done ? "[x]" : "[ ]";
-      lines.push(`  ${mark} ${item.id}. ${item.title}`);
+      const mark = item.done ? "✅" : item.id === nextId ? "👉" : "⬜";
+      const wrapped = wrapCells(`${mark}  ${item.id}. ${item.title}`, inner);
+      if (color && item.done) body.push(...wrapped.map((row) => `${dim}${row}${reset}`));
+      else if (color && item.id === nextId) body.push(...wrapped.map((row) => `${bold}${row}${reset}`));
+      else body.push(...wrapped);
     }
   }
-  lines.push(`审查: ${plan.review.trim() || "（未审查）"}`);
-  if (planNeedsReview(plan)) lines.push("下一步: 对照目标审查，再用 plan 写入 review。");
-  else if (plan.review.trim()) lines.push("下一步: 已审查，可以给最终结果。");
-  else if (total) lines.push("下一步: 完成下一项并勾选。");
-  lines.push("用法: /seeplan");
-  lines.push("------------");
-  return lines.join("\n");
+
+  body.push("");
+  body.push(...wrapLabeled("📝", plan.review.trim() || "（未审查）", inner));
+  if (planNeedsReview(plan)) body.push(...wrapLabeled("🔍", "对照目标审查，再用 plan 写入 review。", inner));
+  else if (plan.review.trim()) body.push(...wrapLabeled("✨", "已审查，可以给最终结果。", inner));
+  else if (total) body.push(...wrapLabeled("👉", "完成下一项并勾选。", inner));
+
+  return drawBox(title, body, boxWidth, { dim, reset });
 }
 
 export function formatPlanForPrompt(plan: WorkPlan) {
@@ -310,4 +340,90 @@ function clipText(text: string, max: number) {
   const trimmed = text.trim();
   if (trimmed.length <= max) return trimmed;
   return `${trimmed.slice(0, max - 1)}…`;
+}
+
+function drawBox(title: string, rows: string[], width: number, paint: { dim: string; reset: string }) {
+  const inner = width - 4;
+  const clippedTitle = clipCells(title, width - 6);
+  const dash = Math.max(1, width - lineWidth(clippedTitle) - 5);
+  const top = `${paint.dim}╭─ ${paint.reset}${clippedTitle}${paint.dim} ${"─".repeat(dash)}╮${paint.reset}`;
+  const bottom = `${paint.dim}╰${"─".repeat(width - 2)}╯${paint.reset}`;
+  const middle = rows.map((row) => `${paint.dim}│${paint.reset} ${padPainted(row, inner)} ${paint.dim}│${paint.reset}`);
+  return [top, ...middle, bottom].join("\n");
+}
+
+function wrapLabeled(emoji: string, text: string, width: number) {
+  const prefix = `${emoji}  `;
+  const indent = " ".repeat(lineWidth(prefix));
+  const chunks = text.split(/\n/).flatMap((line) => wrapCells(line || " ", Math.max(8, width - lineWidth(prefix))));
+  return chunks.map((chunk, index) => `${index === 0 ? prefix : indent}${chunk}`);
+}
+
+function wrapCells(text: string, width: number) {
+  const lines: string[] = [];
+  let current = "";
+  let used = 0;
+  for (const char of text) {
+    const size = cellWidth(char);
+    if (used + size > width && current) {
+      lines.push(current);
+      current = char;
+      used = size;
+      continue;
+    }
+    current += char;
+    used += size;
+  }
+  lines.push(current);
+  return lines.length ? lines : [""];
+}
+
+function clipCells(text: string, width: number) {
+  if (lineWidth(text) <= width) return text;
+  const budget = Math.max(1, width - 1);
+  let out = "";
+  let used = 0;
+  for (const char of text) {
+    const size = cellWidth(char);
+    if (used + size > budget) break;
+    out += char;
+    used += size;
+  }
+  return `${out}…`;
+}
+
+function padCells(text: string, width: number) {
+  const clipped = clipCells(text, width);
+  return `${clipped}${" ".repeat(Math.max(0, width - lineWidth(clipped)))}`;
+}
+
+function padPainted(text: string, width: number) {
+  const match = /^(\x1b\[[0-9;]*m)?([\s\S]*?)(\x1b\[0m)?$/.exec(text);
+  if (!match?.[1]) return padCells(text, width);
+  return `${match[1]}${padCells(match[2] ?? "", width)}${match[3] ?? ""}`;
+}
+
+function stripAnsi(text: string) {
+  return text.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function lineWidth(text: string) {
+  let width = 0;
+  for (const char of stripAnsi(text)) width += cellWidth(char);
+  return width;
+}
+
+function cellWidth(char: string) {
+  const cp = char.codePointAt(0) ?? 0;
+  if (cp <= 0x1f || cp === 0x7f) return 0;
+  if (cp === 0x200b || cp === 0x200c || cp === 0x200d) return 0;
+  if (cp >= 0xfe00 && cp <= 0xfe0f) return 0;
+  if (cp >= 0x300 && cp <= 0x36f) return 0;
+  if (cp >= 0x20d0 && cp <= 0x20ff) return 0;
+  if (cp >= 0x2500 && cp <= 0x259f) return 1;
+  if (cp >= 0x1f000) return 2;
+  if (cp >= 0x2600 && cp <= 0x27bf) return 2;
+  if (cp >= 0x2b00 && cp <= 0x2bff) return 2;
+  if (cp > 127) return 2;
+  return 1;
 }

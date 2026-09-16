@@ -46,6 +46,13 @@ export function summarizeTool(name: string, rawArgs: string) {
       if (typeof args.goal === "string") return clip(args.goal, 48);
       return "";
     }
+    case "question": {
+      const questions = Array.isArray(args.questions) ? args.questions : [];
+      const first = questions[0] && typeof questions[0] === "object" && questions[0] !== null
+        ? str((questions[0] as Record<string, unknown>).header) || str((questions[0] as Record<string, unknown>).question)
+        : "";
+      return `${questions.length} 题${first ? `  ${clip(first, 40)}` : ""}`;
+    }
     default: {
       const compact = Object.entries(args)
         .map(([key, value]) => `${key}=${clip(String(value), 24)}`)

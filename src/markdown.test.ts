@@ -5,7 +5,10 @@ import {
   finishMarkdownLive,
   newMarkdownLive,
   paintMarkdownDelta,
+  paintThinkingDelta,
   renderMarkdown,
+  renderThinking,
+  thinkingPrefix,
 } from "./markdown.js";
 
 describe("renderMarkdown", () => {
@@ -66,5 +69,34 @@ describe("markdown live reprint", () => {
   it("counts wrapped rows", () => {
     assert.equal(displayRows("abcd", 2), 2);
     assert.equal(displayRows("a\nb", 80), 2);
+  });
+});
+
+describe("thinking live reprint", () => {
+  it("paints dim italic separately from markdown", () => {
+    const chunks: string[] = [];
+    const live = newMarkdownLive();
+    paintThinkingDelta({
+      live,
+      chunk: "reason",
+      prefix: thinkingPrefix("", false),
+      write: (text) => chunks.push(text),
+      columns: 80,
+      color: false,
+    });
+    assert.equal(chunks.join(""), "  思考  reason");
+    chunks.length = 0;
+    paintThinkingDelta({
+      live,
+      chunk: "\nmore",
+      prefix: thinkingPrefix("", false),
+      write: (text) => chunks.push(text),
+      columns: 80,
+      color: false,
+    });
+    assert.equal(chunks.at(-1), "  思考  reason\n        more");
+    const color = renderThinking("note", { prefix: thinkingPrefix("", true), color: true });
+    assert.match(color, /\x1b\[2m思考\x1b\[0m/);
+    assert.match(color, /\x1b\[3mnote\x1b\[0m/);
   });
 });

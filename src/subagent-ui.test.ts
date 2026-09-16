@@ -35,6 +35,7 @@ describe("subagent ui copy", () => {
         label: "find-auth",
         phase: "done" as const,
         events: [
+          { type: "thinking" as const, text: "先看入口" },
           { type: "tool_call" as const, name: "read", arguments: JSON.stringify({ path: "/tmp/a.ts" }) },
           { type: "tool_result" as const, name: "read", result: "ok\nline2\nline3\nline4" },
           { type: "delta" as const, text: "找到入口" },
@@ -44,6 +45,7 @@ describe("subagent ui copy", () => {
     assert.match(formatSubagentList(jobs), /1\. done\s+explorer/);
     assert.match(formatSubagentLog(jobs[0]), /# 1\. explorer {2}find-auth {2}done/);
     assert.match(formatSubagentLog(jobs[0]), /● read/);
+    assert.match(formatSubagentLog(jobs[0]), /思考  先看入口/);
     assert.match(formatSubagentLog(jobs[0]), /找到入口/);
   });
 });

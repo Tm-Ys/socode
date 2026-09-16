@@ -77,13 +77,20 @@ describe("plan persistence", () => {
 });
 
 describe("formatPlanCli / seeplan", () => {
-  it("renders checkboxes and progress", () => {
+  it("renders a boxed plan with emoji", () => {
     const plan = applyPlanPatch(emptyPlan(), { goal: "demo", items: ["read", "edit"], done: [1] });
-    const text = formatPlanCli(plan);
-    assert.match(text, /进度: 1\/2/);
-    assert.match(text, /\[x\] 1\. read/);
-    assert.match(text, /\[ \] 2\. edit/);
-    assert.match(text, /\/seeplan/);
+    const text = formatPlanCli(plan, { color: false, width: 56 });
+    assert.match(text, /📋 Plan  1\/2/);
+    assert.match(text, /🎯 {2}demo/);
+    assert.match(text, /✅ {2}1\. read/);
+    assert.match(text, /👉 {2}2\. edit/);
+    assert.match(text, /📝/);
+    assert.match(text, /╭/);
+    assert.match(text, /╰/);
+    const lines = text.split("\n");
+    assert.equal(lines[0]?.startsWith("╭"), true);
+    assert.equal(lines.at(-1)?.startsWith("╰"), true);
+    assert.ok(lines.every((line) => /[╭│╰]/.test(line[0] ?? "") && /[╮│╯]/.test(line.at(-1) ?? "")));
   });
 
   it("parses /seeplan", () => {

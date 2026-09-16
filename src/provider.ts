@@ -1,8 +1,11 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+export const DEFAULT_CONTEXT_WINDOW = 128000;
+export const DEFAULT_MAX_OUTPUT = 8192;
 export const THINKING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"] as const;
 export type ThinkingEffort = (typeof THINKING_EFFORTS)[number];
+export const DEFAULT_THINKING_EFFORT: ThinkingEffort = "medium";
 
 export type Provider = {
   name: string;
@@ -27,6 +30,10 @@ export function chatCompletionsUrl(base: string) {
   return trimmed.endsWith("/chat/completions") ? trimmed : `${trimmed}/chat/completions`;
 }
 
+export function openaiBaseUrl(base: string) {
+  return chatCompletionsUrl(base).replace(/\/chat\/completions$/, "");
+}
+
 export function isThinkingEffort(value: string): value is ThinkingEffort {
   return (THINKING_EFFORTS as readonly string[]).includes(value);
 }
@@ -42,9 +49,9 @@ export function loadProvider(): Provider {
     url: fromEnv.url || "",
     api: fromEnv.api || "",
     model: fromEnv.model || "",
-    contextWindow: fromEnv.contextWindow || 128000,
-    maxOutput: fromEnv.maxOutput || 8192,
-    thinkingEffort: fromEnv.thinkingEffort || "none",
+    contextWindow: fromEnv.contextWindow || DEFAULT_CONTEXT_WINDOW,
+    maxOutput: fromEnv.maxOutput || DEFAULT_MAX_OUTPUT,
+    thinkingEffort: fromEnv.thinkingEffort || DEFAULT_THINKING_EFFORT,
   });
 }
 
@@ -61,11 +68,64 @@ export function listProviders(current?: Provider): Provider[] {
   return rows;
 }
 
-export function saveProvider(provider: Provider) {
-  const normalized = normalizeProvider(provider);
-  if (!normalized.name || !normalized.url || !normalized.api || !normalized.model) {
-    throw new Error("Provider 需要 name、url、api、model");
+export type ProviderDraft = {
+  name: string;
+  url: string;
+  api: string;
+  model: string;
+  contextWindow: string;
+  maxOutput: string;
+  thinkingEffort: string;
+};
+
+export function emptyProvider(): Provider {
+  return {
+    name: "",
+    url: "",
+    api: "",
+    model: "",
+    contextWindow: DEFAULT_CONTEXT_WINDOW,
+    maxOutput: DEFAULT_MAX_OUTPUT,
+    thinkingEffort: DEFAULT_THINKING_EFFORT,
+  };
+}
+
+export function providerReady(provider: Provider) {
+  return Boolean(provider.url && provider.api && provider.model);
+}
+
+export function hasSavedProvider(name: string) {
+  const key = name.trim();
+  if (!key) return false;
+  return Boolean(readStore()?.providers.some((item) => item.name === key));
+}
+
+export function applyProviderDraft(draft: ProviderDraft, fallback?: Provider): Provider {
+  const contextRaw = draft.contextWindow.trim();
+  const outputRaw = draft.maxOutput.trim();
+  const effortRaw = draft.thinkingEffort.trim().toLowerCase();
+  if (contextRaw && (!Number.isFinite(Number(contextRaw)) || Number(contextRaw) <= 0)) {
+    throw new Error("上下文窗口必须是正数");
   }
+  if (outputRaw && (!Number.isFinite(Number(outputRaw)) || Number(outputRaw) <= 0)) {
+    throw new Error("最大输出必须是正数");
+  }
+  if (effortRaw && !isThinkingEffort(effortRaw)) {
+    throw new Error("思考强度必须是 none | minimal | low | medium | high | xhigh");
+  }
+  return normalizeProvider({
+    name: draft.name,
+    url: draft.url,
+    api: draft.api,
+    model: draft.model,
+    contextWindow: numberOr(contextRaw, fallback?.contextWindow || DEFAULT_CONTEXT_WINDOW),
+    maxOutput: numberOr(outputRaw, fallback?.maxOutput || DEFAULT_MAX_OUTPUT),
+    thinkingEffort: isThinkingEffort(effortRaw) ? effortRaw : (fallback?.thinkingEffort ?? DEFAULT_THINKING_EFFORT),
+  });
+}
+
+export function saveProvider(provider: Provider) {
+  const normalized = requireComplete(normalizeProvider(provider));
   const store = readStore() ?? { active: normalized.name, providers: [] };
   const index = store.providers.findIndex((item) => item.name === normalized.name);
   if (index >= 0) store.providers[index] = normalized;
@@ -83,6 +143,14 @@ export function saveProvider(provider: Provider) {
     THINKING_EFFORT: normalized.thinkingEffort,
   });
   return normalized;
+}
+
+export function addProvider(provider: Provider) {
+  const normalized = requireComplete(normalizeProvider(provider));
+  if (hasSavedProvider(normalized.name)) {
+    throw new Error(`已有同名 Provider: ${normalized.name}。换个名字，或先 /provider ${normalized.name} 再 /provider edit`);
+  }
+  return saveProvider(normalized);
 }
 
 export function switchProvider(name: string) {
@@ -133,18 +201,25 @@ function providerFromEnv(): Partial<Provider> {
   };
 }
 
+function requireComplete(provider: Provider) {
+  if (!provider.name || !provider.url || !provider.api || !provider.model) {
+    throw new Error("Provider 需要名称、API URL、API Key、模型");
+  }
+  return provider;
+}
+
 function normalizeProvider(input: Provider): Provider {
   const rawName = input.name.trim();
   const name =
     (rawName && rawName !== "default" ? rawName : "") || hostnameName(input.url) || "default";
-  const thinking = isThinkingEffort(input.thinkingEffort) ? input.thinkingEffort : "none";
+  const thinking = isThinkingEffort(input.thinkingEffort) ? input.thinkingEffort : DEFAULT_THINKING_EFFORT;
   return {
     name,
     url: input.url.trim(),
     api: input.api.trim(),
     model: input.model.trim(),
-    contextWindow: Math.max(1024, Math.floor(input.contextWindow || 128000)),
-    maxOutput: Math.max(16, Math.floor(input.maxOutput || 8192)),
+    contextWindow: Math.max(1024, Math.floor(input.contextWindow || DEFAULT_CONTEXT_WINDOW)),
+    maxOutput: Math.max(16, Math.floor(input.maxOutput || DEFAULT_MAX_OUTPUT)),
     thinkingEffort: thinking,
   };
 }

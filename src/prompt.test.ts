@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { clipToWidth, visualRows } from "./prompt.js";
+import { clipToWidth, paintPromptStatus, promptStatusLine, visualRows } from "./prompt.js";
 
 describe("slash menu layout", () => {
   it("clips hints to a single terminal row", () => {
@@ -14,6 +14,25 @@ describe("slash menu layout", () => {
     assert.equal(visualRows(10, 80), 1);
     assert.equal(visualRows(80, 80), 1);
     assert.equal(visualRows(81, 80), 2);
+  });
+});
+
+describe("prompt status", () => {
+  it("joins model and thinking effort", () => {
+    assert.equal(promptStatusLine("deepseek-flash", "medium"), "deepseek-flash · medium");
+    assert.match(paintPromptStatus("deepseek-flash · medium", true), /\x1b\[38;5;208mdeepseek-flash · medium\x1b\[0m/);
+    assert.equal(paintPromptStatus("deepseek-flash · medium", false), "deepseek-flash · medium");
+  });
+
+  it("right-aligns context occupancy on the model line", () => {
+    const line = promptStatusLine("deepseek-flash", "medium", {
+      context: "context 5%(6.4K / 128K)",
+      columns: 60,
+    });
+    assert.equal(line.length, 60);
+    assert.ok(line.startsWith("deepseek-flash · medium"));
+    assert.ok(line.endsWith("context 5%(6.4K / 128K)"));
+    assert.match(line, /medium {2,}context/);
   });
 });
 

@@ -3,11 +3,12 @@ import { resolve } from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { isTurnAborted, TurnAborted, TurnFailed } from "./abort.js";
-import { closeIncompleteTrace, DEFAULT_MAX_AGENT_STEPS, runAgent } from "./agent.js";
+import { closeIncompleteTrace, DEFAULT_MAX_AGENT_STEPS, runAgent, type AgentEvent } from "./agent.js";
 import type { TokenUsage } from "./chat.js";
 import { canCompress, compressHistory, shouldAutoCompress } from "./compress.js";
 import {
   buildApiMessages,
+  formatContextMeter,
   formatContextReport,
   formatPreviewLine,
   measureContext,
@@ -30,14 +31,26 @@ import {
   type Session,
 } from "./db.js";
 import {
+  addProvider,
+  applyProviderDraft,
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_OUTPUT,
+  DEFAULT_THINKING_EFFORT,
+  emptyProvider,
   formatProvider,
+  hasSavedProvider,
   isThinkingEffort,
   listProviders,
   loadProvider,
+  maskApiKey,
+  providerReady,
   saveProvider,
   switchProvider,
+  THINKING_EFFORTS,
   type Provider,
 } from "./provider.js";
+import { createModelPickState, defaultEffortIndex, fetchModelCatalog } from "./provider-api.js";
+import { pickEffort, pickProviderModel } from "./select-ui.js";
 import { formatConversationList, generateTitle, isDefaultTitle } from "./title.js";
 import { assistantPrefix, harnessModeMessage, lastHarnessMode, loadMode, modeHint, modeLabel, paintMode, parseMode, userPrefix, type AgentMode } from "./mode.js";
 import { createPolicy } from "./permissions.js";
@@ -47,7 +60,7 @@ import { resolveLongBudgetFromEnv } from "./long-budget.js";
 import { openMcpHub } from "./mcp.js";
 import { formatSkillsCli, loadSkillBundle } from "./skills.js";
 import { activateBaseSkills, logSkillActivate } from "./skill-activate.js";
-import { promptYou, restoreTerminal, confirmQuit, takeForcedQuit, watchTurnAbort, setPermissionGate } from "./prompt.js";
+import { promptYou, promptStatusLine, restoreTerminal, confirmQuit, takeForcedQuit, watchTurnAbort, setPermissionGate } from "./prompt.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { createSubagentRunner, createSubagentStore, DEFAULT_SUBAGENT_STEPS } from "./subagent.js";
 import { createSubagentUi, parseSeesubagent } from "./subagent-ui.js";
@@ -77,7 +90,15 @@ import {
   type PlanStore,
 } from "./plan.js";
 import { formatToolCallLine, formatToolResultLines } from "./tool-ui.js";
-import { finishMarkdownLive, newMarkdownLive, paintMarkdownDelta, useColor, type MarkdownLive } from "./markdown.js";
+import {
+  finishMarkdownLive,
+  newMarkdownLive,
+  paintMarkdownDelta,
+  paintThinkingDelta,
+  thinkingPrefix,
+  useColor,
+  type MarkdownLive,
+} from "./markdown.js";
 import { historyAfterTurn, recapLine } from "./recap.js";
 import { toolSpecs } from "./tools.js";
 import {
@@ -169,7 +190,7 @@ function printBanner(session: Session, extra: { provider: Provider; stream: bool
   console.log(`流式: ${extra.stream ? "开" : "关"}  Agent: ${extra.agent ? "开" : "关"}  工具步数: ${extra.steps}`);
   console.log(`模式: ${paintMode(extra.mode, modeLabel(extra.mode))}  ${modeHint(extra.mode)}`);
   if (extra.mcp) console.log(extra.mcp);
-  console.log("/new 新会话  /session 恢复  /provider 适配  /context 上下文  /compress 压缩  /mode 权限  /task 长程  /mcp  MCP  /skills 技能  /seesubagent 子代理  /seeplan 计划  /setplan 强制计划  /setworkarea 工作区  /quit 退出");
+  console.log("/new 新会话  /session 恢复  /provider 适配  /model 模型  /effort 思考  /context 上下文  /compress 压缩  /mode 权限  /task 长程  /mcp  MCP  /skills 技能  /seesubagent 子代理  /seeplan 计划  /setplan 强制计划  /setworkarea 工作区  /quit 退出");
   console.log("输入 / 后会按前缀提示命令，Tab 补全。生成中 Esc 中止当前轮，Ctrl+C 按两次退出。\n");
 }
 
@@ -184,16 +205,64 @@ function printContext(history: Message[], mode: AgentMode) {
   console.log("--------------\n");
 }
 
+type PrintState = {
+  replied: boolean;
+  md?: MarkdownLive;
+  think?: MarkdownLive;
+  thinkingShown?: boolean;
+};
+
+function closeThinking(state: PrintState) {
+  if (state.think) {
+    finishMarkdownLive(state.think);
+    state.think = undefined;
+    process.stdout.write("\n");
+    state.thinkingShown = false;
+    return;
+  }
+  if (state.thinkingShown) {
+    state.thinkingShown = false;
+    process.stdout.write("\n");
+  }
+}
+
 function printAgentEvent(
-  event: { type: string; text?: string; name?: string; arguments?: string; result?: string; saved?: number },
-  state: { replied: boolean; md?: MarkdownLive },
+  event: AgentEvent,
+  state: PrintState,
   mode: AgentMode,
   tag?: string,
   hud?: { guard: (fn: () => void) => void },
 ) {
   const nest = tag ? `  [${tag}] ` : "";
   const paint = () => {
+    if (event.type === "thinking" && event.text) {
+      if (state.md) {
+        finishMarkdownLive(state.md);
+        state.md = undefined;
+        if (state.replied) process.stdout.write("\n");
+        state.replied = false;
+      }
+      if (!process.stdout.isTTY) {
+        if (!state.thinkingShown) {
+          process.stdout.write(`${thinkingPrefix(nest, false)}`);
+          state.thinkingShown = true;
+        }
+        process.stdout.write(event.text);
+        return;
+      }
+      if (!state.think) state.think = newMarkdownLive();
+      paintThinkingDelta({
+        live: state.think,
+        chunk: event.text,
+        prefix: thinkingPrefix(nest, useColor()),
+        write: (text) => process.stdout.write(text),
+        columns: process.stdout.columns ?? 80,
+        color: useColor(),
+      });
+      return;
+    }
     if (event.type === "delta" && event.text) {
+      closeThinking(state);
       if (!process.stdout.isTTY) {
         if (!state.replied) {
           process.stdout.write(nest || assistantPrefix(mode));
@@ -214,6 +283,7 @@ function printAgentEvent(
       });
       return;
     }
+    closeThinking(state);
     if (state.md) {
       finishMarkdownLive(state.md);
       state.md = undefined;
@@ -308,39 +378,75 @@ function parseSlash(prompt: string) {
 async function askField(
   rl: readline.Interface,
   label: string,
-  current?: string,
-  secret = false,
+  opts?: { current?: string; hint?: string; secret?: boolean; required?: boolean },
 ) {
-  const shown = secret && current ? "****" : (current ?? "");
-  const suffix = shown ? ` [${shown}]` : "";
-  const value = (await rl.question(`${label}${suffix}: `)).trim();
-  return value || current || "";
+  const current = opts?.current ?? "";
+  const shown = opts?.secret && current ? maskApiKey(current) : current;
+  const parts = [shown && `[${shown}]`, opts?.hint && `(${opts.hint})`].filter(Boolean);
+  const suffix = parts.length ? ` ${parts.join(" ")}` : "";
+  while (true) {
+    const value = (await rl.question(`${label}${suffix}: `)).trim();
+    if (value) return value;
+    if (!opts?.required) return current;
+    console.log(`  ${label} 不能为空`);
+  }
 }
 
-async function editProvider(rl: readline.Interface, current: Provider): Promise<Provider> {
-  console.log("\nOpenAI 兼容 Provider（回车保留当前值）");
-  const name = await askField(rl, "LLM Provider name", current.name);
-  const url = await askField(rl, "API url", current.url);
-  const api = await askField(rl, "API", current.api, true);
-  const model = await askField(rl, "model name", current.model);
-  const contextWindow = Number(await askField(rl, "context window", String(current.contextWindow)));
-  const maxOutput = Number(await askField(rl, "max output", String(current.maxOutput)));
-  const thinking = (await askField(rl, "thinking effort", current.thinkingEffort)).toLowerCase();
-  if (!isThinkingEffort(thinking)) {
-    throw new Error("thinking effort 必须是 none | minimal | low | medium | high | xhigh");
-  }
-  if (!Number.isFinite(contextWindow) || !Number.isFinite(maxOutput)) {
-    throw new Error("context window / max output 必须是数字");
-  }
-  return saveProvider({
-    name,
-    url,
-    api,
-    model,
-    contextWindow,
-    maxOutput,
-    thinkingEffort: thinking,
+async function promptProviderForm(
+  rl: readline.Interface,
+  mode: "new" | "edit" | "setup",
+  current: Provider,
+): Promise<Provider> {
+  const creating = mode === "new";
+  const title =
+    mode === "new" ? "新增 Provider（OpenAI 兼容）" : mode === "setup" ? "配置 Provider（OpenAI 兼容）" : "编辑 Provider（OpenAI 兼容）";
+  const hint =
+    creating
+      ? "按字段填写。名称 / API URL / API Key / 模型必填；其余回车用默认值。思考强度请用 /effort 调整。"
+      : "按字段修改。回车保留方括号里的当前值。思考强度请用 /effort 调整。";
+  console.log(`\n${title}\n${hint}`);
+  const name = await askField(rl, "名称", {
+    current: creating ? "" : current.name,
+    hint: "例如 deepseek",
+    required: true,
   });
+  if (creating && hasSavedProvider(name)) {
+    throw new Error(`已有同名 Provider: ${name}。换个名字，或先 /provider ${name} 再 /provider edit`);
+  }
+  const url = await askField(rl, "API URL", {
+    current: creating ? "" : current.url,
+    hint: "例如 https://api.deepseek.com/v1",
+    required: true,
+  });
+  const api = await askField(rl, "API Key", {
+    current: creating ? "" : current.api,
+    secret: true,
+    required: true,
+  });
+  const model = await askField(rl, "模型", {
+    current: creating ? "" : current.model,
+    hint: "例如 deepseek-flash",
+    required: true,
+  });
+  const contextWindow = await askField(rl, "上下文窗口", {
+    current: String(creating ? DEFAULT_CONTEXT_WINDOW : current.contextWindow),
+  });
+  const maxOutput = await askField(rl, "最大输出", {
+    current: String(creating ? DEFAULT_MAX_OUTPUT : current.maxOutput),
+  });
+  const next = applyProviderDraft(
+    {
+      name,
+      url,
+      api,
+      model,
+      contextWindow,
+      maxOutput,
+      thinkingEffort: creating ? DEFAULT_THINKING_EFFORT : current.thinkingEffort,
+    },
+    creating ? emptyProvider() : current,
+  );
+  return creating ? addProvider(next) : saveProvider(next);
 }
 
 async function handleProvider(
@@ -365,8 +471,7 @@ async function handleProvider(
   }
   if (rest === "edit" || rest === "new") {
     try {
-      const base = rest === "new" ? { ...provider, name: "", model: provider.model } : provider;
-      const next = await editProvider(rl, base);
+      const next = await promptProviderForm(rl, rest, provider);
       console.log(`\n已保存 Provider: ${next.name}\n`);
       return next;
     } catch (error) {
@@ -380,9 +485,134 @@ async function handleProvider(
     return next;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.log(`\n${message}\n`);
+    console.log(`\n${message}`);
+    console.log("用法: /provider    /provider list    /provider new    /provider edit    /provider <name>\n");
     return provider;
   }
+}
+
+async function handleEffort(provider: Provider, arg: string): Promise<Provider> {
+  const rest = arg.trim().toLowerCase();
+  if (rest) {
+    if (!isThinkingEffort(rest)) {
+      console.log("\n未知思考强度。用 none | minimal | low | medium | high | xhigh，或直接 /effort 用方向键选。\n");
+      return provider;
+    }
+    if (rest === provider.thinkingEffort) {
+      console.log(`\n思考强度已经是 ${rest}\n`);
+      return provider;
+    }
+    const next = saveProvider({ ...provider, thinkingEffort: rest });
+    console.log(`\n思考强度: ${next.thinkingEffort}\n`);
+    return next;
+  }
+  console.log("\n正在从 API 读取思考强度…");
+  const catalog = await fetchModelCatalog(provider);
+  const efforts = catalog.efforts.length ? catalog.efforts : [...THINKING_EFFORTS];
+  const hint =
+    catalog.source === "api" && catalog.apiEffort
+      ? `API: ${catalog.apiEffort}`
+      : catalog.source === "api"
+        ? "已从 API 读取可用档位"
+        : "API 未返回，使用本地档位";
+  const current =
+    catalog.apiEffort && efforts.includes(catalog.apiEffort) ? catalog.apiEffort : provider.thinkingEffort;
+  const start = defaultEffortIndex(efforts, current);
+  if (!input.isTTY || !output.isTTY) {
+    console.log(`当前思考强度: ${provider.thinkingEffort}  ${hint}`);
+    console.log(`档位: ${efforts.join(" | ")}`);
+    console.log("非 TTY 请用 /effort medium 这类写法。\n");
+    return provider;
+  }
+  const picked = await pickEffort({
+    efforts: [...efforts],
+    selected: start,
+    hint,
+  });
+  if (!picked) {
+    console.log("  → 已取消\n");
+    return provider;
+  }
+  if (picked === provider.thinkingEffort) {
+    console.log(`  → ${picked}\n`);
+    return provider;
+  }
+  const next = saveProvider({ ...provider, thinkingEffort: picked });
+  console.log(`  → ${next.thinkingEffort}\n`);
+  return next;
+}
+
+async function handleModel(provider: Provider, arg: string): Promise<Provider> {
+  const rest = arg.trim();
+  const rows = listProviders(provider);
+  if (rest) {
+    try {
+      if (rest === provider.name && rest === provider.model) {
+        console.log(`\n已经是 ${provider.name} / ${provider.model}\n`);
+        return provider;
+      }
+      if (rows.some((item) => item.name === rest) && rest !== provider.name) {
+        const next = switchProvider(rest);
+        console.log(`\n已切换到 ${next.name} (${next.model})\n`);
+        return next;
+      }
+      const named = rows.find((item) => item.model === rest || `${item.name}/${item.model}` === rest);
+      if (named) {
+        if (named.name === provider.name && named.model === provider.model) {
+          console.log(`\n已经是 ${named.name} / ${named.model}\n`);
+          return provider;
+        }
+        const next = named.name === provider.name ? saveProvider({ ...provider, model: named.model }) : switchProvider(named.name);
+        console.log(`\n已切换到 ${next.name} (${next.model})\n`);
+        return next;
+      }
+      console.log("\n只能选已保存的 Provider 或模型。用法: /model    /model <provider>    /model <model>\n");
+      return provider;
+    } catch (error) {
+      printErr(error);
+      return provider;
+    }
+  }
+  if (!input.isTTY || !output.isTTY) {
+    console.log("\n--- 已保存的 Provider / 模型 ---");
+    for (const item of rows) {
+      const mark = item.name === provider.name ? "*" : " ";
+      console.log(`${mark} ${item.name}  ${item.model}`);
+    }
+    console.log("非 TTY 请用 /model <provider>\n");
+    return provider;
+  }
+  const picked = await pickProviderModel(createModelPickState(rows, provider));
+  if (!picked) {
+    console.log("  → 已取消\n");
+    return provider;
+  }
+  try {
+    const next = applyPickedModel(provider, rows, picked.providerName, picked.model);
+    if (next.name === provider.name && next.model === provider.model && next.thinkingEffort === provider.thinkingEffort) {
+      console.log(`  → ${next.name} / ${next.model}\n`);
+      return provider;
+    }
+    console.log(`  → ${next.name} / ${next.model}\n`);
+    return next;
+  } catch (error) {
+    printErr(error);
+    return provider;
+  }
+}
+
+function applyPickedModel(current: Provider, all: Provider[], providerName: string, model: string) {
+  const named = all.find((item) => item.name === providerName);
+  const match =
+    all.find((item) => item.name === providerName && item.model === model) ??
+    all.find((item) => item.url === (named?.url ?? current.url) && item.model === model);
+  if (match) {
+    if (match.name === current.name && match.model === current.model) return current;
+    return match.name === current.name ? saveProvider({ ...current, model }) : switchProvider(match.name);
+  }
+  const base = named ?? current;
+  if (base.name === current.name && base.model === model) return current;
+  return saveProvider({ ...base, model });
 }
 
 async function pickSession(
@@ -631,7 +861,7 @@ async function main() {
   const conversationFlag = flags.id;
   let mode = loadMode(flags.mode);
 
-  if (!provider.url || !provider.api || !provider.model) {
+  if (!providerReady(provider)) {
     if (oneShot !== undefined || !process.stdin.isTTY) {
       console.error(usage());
       console.error("缺少 Provider：需要 API url、API、model name。");
@@ -665,7 +895,7 @@ async function main() {
     plans,
   });
   const subagentUi = createSubagentUi();
-  const childPrint = new Map<number, { replied: boolean }>();
+  const childPrint = new Map<number, PrintState>();
   const printChild = (id: number) => {
     let state = childPrint.get(id);
     if (!state) {
@@ -842,8 +1072,8 @@ async function main() {
     return true;
   };
 
-  const printContextUsage = (history: Message[]) => {
-    const report = measureContext({
+  const currentContextReport = (history: Message[] = session.messages) =>
+    measureContext({
       history,
       systemPrompt: currentSystem(),
       toolsTokens: currentToolsTokens(),
@@ -852,6 +1082,9 @@ async function main() {
       maxOutput: provider.maxOutput,
       mode,
     });
+
+  const printContextUsage = (history: Message[]) => {
+    const report = currentContextReport(history);
     const cols = process.stdout.columns ?? 40;
     const width = Math.max(16, Math.min(48, cols - 2));
     console.log(`\n${formatContextReport(report, width, Boolean(process.stdout.isTTY))}`);
@@ -898,15 +1131,7 @@ async function main() {
 
   const maybeAutoCompress = async (history: Message[]) => {
     if (mode !== "long") return history;
-    const report = measureContext({
-      history,
-      systemPrompt: currentSystem(),
-      toolsTokens: currentToolsTokens(),
-      maxMessages,
-      contextWindow: provider.contextWindow,
-      maxOutput: provider.maxOutput,
-      mode,
-    });
+    const report = currentContextReport(history);
     if (!shouldAutoCompress({ history, report })) return history;
     console.log("\n长程模式：上下文接近上限，自动压缩…");
     return await runCompress(history);
@@ -1006,8 +1231,8 @@ async function main() {
 
     const sessionRl = readline.createInterface({ input, output });
     rl = sessionRl;
-    if (!provider.url || !provider.api || !provider.model) {
-      provider = await editProvider(sessionRl, provider);
+    if (!providerReady(provider)) {
+      provider = await promptProviderForm(sessionRl, "setup", provider);
       console.log("");
     }
     printBanner(session, extra());
@@ -1017,7 +1242,16 @@ async function main() {
 
     while (true) {
       sessionRl.pause();
-      const prompt = (await promptYou(userPrefix(mode), { hint: workareaPlaceholder(workspace) })).trim();
+      const report = currentContextReport();
+      const prompt = (
+        await promptYou(userPrefix(mode), {
+          hint: workareaPlaceholder(workspace),
+          status: promptStatusLine(provider.model, provider.thinkingEffort, {
+            context: formatContextMeter(report.used, report.window),
+            columns: process.stdout.columns ?? 80,
+          }),
+        })
+      ).trim();
       if (!prompt) continue;
       if (prompt === "/exit" || prompt === "/quit") {
         if (takeForcedQuit()) forceExit(130);
@@ -1096,6 +1330,14 @@ async function main() {
           sessionRl.resume();
           const arg = prompt.slice("/provider".length).trim();
           provider = await handleProvider(sessionRl, provider, arg);
+          continue;
+        }
+        if (prompt === "/effort" || prompt.startsWith("/effort ")) {
+          provider = await handleEffort(provider, prompt.slice("/effort".length).trim());
+          continue;
+        }
+        if (prompt === "/model" || prompt.startsWith("/model ")) {
+          provider = await handleModel(provider, prompt.slice("/model".length).trim());
           continue;
         }
         const restore = parseSlash(prompt);
