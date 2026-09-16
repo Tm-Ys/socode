@@ -183,4 +183,17 @@ describe("createPolicy", () => {
       /只读/,
     );
   });
+
+  it("lets verify subagents run tests but not write", async () => {
+    const policy = createPolicy(ws, () => "long", undefined, { nested: true, role: "verify" });
+    assert.match(
+      (await policy.authorize("write", { path: `${ws}/src/mode.ts`, content: "x" })) ?? "",
+      /只读/,
+    );
+    assert.equal(await policy.authorize("bash", { cwd: ws, command: "npm test" }), null);
+    assert.match(
+      (await policy.authorize("bash", { cwd: ws, command: "curl https://example.test" })) ?? "",
+      /测试\/类型检查|只读/,
+    );
+  });
 });

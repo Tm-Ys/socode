@@ -1,8 +1,9 @@
-export const SUBAGENT_KINDS = ["explorer", "worker"] as const;
+export const SUBAGENT_KINDS = ["explorer", "worker", "localize", "edit", "verify"] as const;
 export type SubagentKind = (typeof SUBAGENT_KINDS)[number];
 
 export const MAX_SUBAGENTS = 6;
 export const MAX_SUBAGENT_REPLY = 6_000;
+export const PARENT_SUBAGENT_REPLY = 2_000;
 
 const KIND_ALIASES: Record<string, SubagentKind> = {
   explorer: "explorer",
@@ -10,12 +11,33 @@ const KIND_ALIASES: Record<string, SubagentKind> = {
   探索: "explorer",
   readonly: "explorer",
   read: "explorer",
+  localize: "localize",
+  loc: "localize",
+  定位: "localize",
   worker: "worker",
   default: "worker",
   general: "worker",
   执行: "worker",
   implement: "worker",
+  edit: "edit",
+  编辑: "edit",
+  patch: "edit",
+  verify: "verify",
+  test: "verify",
+  验证: "verify",
 };
+
+export function isReadonlyKind(kind?: string) {
+  return kind === "explorer" || kind === "localize";
+}
+
+export function isWriteKind(kind?: string) {
+  return kind === "worker" || kind === "edit";
+}
+
+export function isVerifyKind(kind?: string) {
+  return kind === "verify";
+}
 
 export type SubagentJob = {
   id: number;
@@ -70,7 +92,7 @@ export function parseSubagentPlan(args: Record<string, unknown>, max = MAX_SUBAG
 export function formatSubagentPlan(plan: SubagentPlan) {
   const lines = [
     `[subagent_plan] ${plan.jobs.length} 个任务${plan.goal ? `  goal: ${plan.goal}` : ""}`,
-    "下一步调用 subagent（不传参数则跑完全部 pending：explorer 并行，worker 彼此串行以免抢同一文件）。可用 index 只跑其中一个。",
+    "下一步调用 subagent（不传参数则跑完全部 pending：localize/explorer 并行，edit/worker 串行，verify 等写入完成后再跑）。可用 index 只跑其中一个。",
   ];
   for (const job of plan.jobs) {
     lines.push(`${job.id}. ${job.status}  ${job.kind}  ${job.label}`);

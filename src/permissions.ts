@@ -7,11 +7,19 @@ import {
   type LongApproveRequest,
   type LongApprover,
 } from "./long-approve.js";
+import type { LongBudgetPlan } from "./long-budget.js";
+import type { LongRubric } from "./long-rubric.js";
 import type { McpHub } from "./mcp.js";
 import { isMcpTool } from "./mcp.js";
-import type { SubagentStore } from "./subagent-plan.js";
+import {
+  isReadonlyKind,
+  isVerifyKind,
+  type SubagentKind,
+  type SubagentStore,
+} from "./subagent-plan.js";
 import type { TaskStore } from "./task-state.js";
 import type { PlanStore } from "./plan.js";
+import { verifyCommandDenied } from "./verify.js";
 import {
   bashAlwaysAsk,
   bashEscapesWorkspace,
@@ -34,22 +42,26 @@ export type Policy = {
   tasks?: TaskStore;
   plans?: PlanStore;
   nested?: boolean;
-  role?: "explorer" | "worker";
+  role?: SubagentKind;
   subagents?: SubagentStore;
   spawnSubagent?: (args: Record<string, unknown>, signal?: AbortSignal) => Promise<string>;
   mcp?: McpHub;
   longApprove?: LongApprover;
+  longBudget?: LongBudgetPlan;
+  longRubric?: LongRubric;
   authorize: (name: string, args: Record<string, unknown>) => Promise<string | null>;
 };
 
 export type PolicyHooks = {
   longApprove?: LongApprover;
   nested?: boolean;
-  role?: "explorer" | "worker";
+  role?: SubagentKind;
   subagents?: SubagentStore;
   spawnSubagent?: (args: Record<string, unknown>, signal?: AbortSignal) => Promise<string>;
   mcp?: McpHub;
   plans?: PlanStore;
+  longBudget?: LongBudgetPlan;
+  longRubric?: LongRubric;
 };
 
 export function createPolicy(
@@ -76,6 +88,8 @@ export function createPolicy(
     spawnSubagent: hooks?.spawnSubagent,
     mcp: hooks?.mcp,
     longApprove: hooks?.longApprove,
+    longBudget: hooks?.longBudget,
+    longRubric: hooks?.longRubric,
     async authorize(name, args) {
       const current = mode();
       const currentWorkspace = getWorkspace();
@@ -104,7 +118,7 @@ async function authorizeInner(
   tasks?: TaskStore,
   hooks?: PolicyHooks,
 ): Promise<string | null> {
-  if (name === "get_current_time" || name === "calculate" || name === "task_state" || name === "plan") return null;
+  if (name === "get_current_time" || name === "calculate" || name === "task_state" || name === "plan" || name === "context_compress") return null;
 
   if (name === "subagent_plan" || name === "subagent") {
     if (current === "plan") {
@@ -114,8 +128,8 @@ async function authorizeInner(
     return null;
   }
 
-  if (hooks?.role === "explorer" && (name === "write" || name === "edit" || name === "delete")) {
-    return "explorer 子代理是只读的，不能写或删文件";
+  if ((isReadonlyKind(hooks?.role) || isVerifyKind(hooks?.role)) && (name === "write" || name === "edit" || name === "delete")) {
+    return `${hooks?.role} 子代理是只读的，不能写或删文件`;
   }
 
   if (name === "read" || name === "search") {
@@ -170,8 +184,12 @@ async function authorizeInner(
     const escaped = bashEscapesWorkspace(current, workspace, cwd, command);
     if (escaped) return escaped;
     const kind = classifyBash(command);
-    if (hooks?.role === "explorer" && !kind.readonly) {
-      return "explorer 子代理是只读的，不能执行有副作用的命令";
+    if (isReadonlyKind(hooks?.role) && !kind.readonly) {
+      return `${hooks?.role} 子代理是只读的，不能执行有副作用的命令`;
+    }
+    if (isVerifyKind(hooks?.role) && !kind.readonly) {
+      if (verifyCommandDenied(command) === null) return null;
+      return "verify 子代理只能跑测试/类型检查或只读命令";
     }
     if (kind.readonly) return null;
     return await decide(
@@ -197,8 +215,8 @@ async function authorizeInner(
     if (current === "plan" && !readOnly) {
       return "Plan 模式不能调用有副作用的 MCP 工具。只读 MCP 可用，或让用户 /mode ask、/mode long 或 /mode full。";
     }
-    if (hooks.role === "explorer" && !readOnly) {
-      return "explorer 子代理是只读的，不能调用有副作用的 MCP 工具";
+    if ((isReadonlyKind(hooks.role) || isVerifyKind(hooks.role)) && !readOnly) {
+      return `${hooks.role} 子代理是只读的，不能调用有副作用的 MCP 工具`;
     }
     if (readOnly || current === "full") return null;
     return await decide(

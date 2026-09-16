@@ -29,7 +29,7 @@ function basePrompt(workspace: string, mode: AgentMode, mcpTools: string[] = [])
     mode === "plan"
       ? "`read`、`search`、`calculate`、`get_current_time`、`plan`"
       : mode === "long"
-        ? "`read`、`write`、`edit`、`delete`、`bash`、`search`、`calculate`、`get_current_time`、`task_state`、`plan`、`subagent_plan`、`subagent`"
+        ? "`read`、`write`、`edit`、`delete`、`bash`、`search`、`calculate`、`get_current_time`、`task_state`、`plan`、`subagent_plan`、`subagent`、`context_compress`"
         : "`read`、`write`、`edit`、`delete`、`bash`、`search`、`calculate`、`get_current_time`、`plan`、`subagent_plan`、`subagent`";
   const editRule =
     mode === "plan"
@@ -49,7 +49,7 @@ ${editRule}
 ${mode === "plan" ? "" : `
 # 子代理
 
-多块互不依赖的调研或改动时：先 \`subagent_plan\` 列出 1–6 个 agents（\`explorer\` 只读调研，\`worker\` 可改文件），每人 \`prompt\` 必须自洽（他们看不到本对话）。worker 的文件范围不要重叠。再调用 \`subagent\`：explorer **并行**，多个 worker **串行**（共享工作区，不隔离）。不传参数就跑完全部 pending。综合他们的摘要回复用户，不要把子代理内部轨迹贴出去。子代理不能再开子代理。
+多块互不依赖的调研或改动时：先 \`subagent_plan\` 列出 1–6 个 agents。Long 推荐 \`localize\`（只读定位）/ \`edit\`（小补丁）/ \`verify\`（跑测试）；Ask/Full 仍可用 \`explorer\` / \`worker\`。每人 \`prompt\` 必须自洽。再调用 \`subagent\`：localize/explorer **并行**（Long 最多同时 2 个），edit/worker **串行**，verify 等写入完成后再跑。不传参数就跑完全部 pending。只信 verify 的退出码，不要把子代理内部轨迹贴出去。子代理不能再开子代理。
 `}
 ${mcpTools.length ? `# MCP\n\n外部 MCP 工具：${mcpTools.map((name) => `\`${name}\``).join("、")}。按各工具自己的描述调用。只读 MCP 在 Plan 里也可用；有副作用的 MCP 遵循当前权限模式。\n` : ""}
 
@@ -128,10 +128,10 @@ ${state}
 
 按 计划 → 执行 → 验证 推进，不要一次改一大片：
 
-- 先 \`search\` 定位，再 \`read\` 少量文件，再小范围 \`edit\` 或 \`write\`。
-- 每个里程碑写入 done 时，运行时会强制跑 \`verifyCommands\`（只允许 \`npm test\` / \`npx tsc\` 这类检查，不是任意 bash）。失败则撤回这次 done、写入 failures，你必须停手改，不要假装过了。没有 verifyCommands 会警告未验证。
+- 先 \`search\` 定位，再 \`read\` 少量文件，再小范围 \`edit\` 或 \`write\`。需要分头做事时用 \`localize\` → \`edit\` → \`verify\`。
+- 每个里程碑写入 done 时，运行时会强制跑 \`verifyCommands\`（只允许 \`npm test\` / \`npx tsc\` 这类检查）。失败则撤回这次 done。若挂了评分器，还要通过仓库接地的 rubric。verify 子代理的 \`ok\` 由退出码覆盖，不能嘴炮。
 - 用 \`task_state\` 保持 goal / milestones / done / keyFiles / notes 最新。不要把整份 JSON 贴进对用户的回复。
 - 禁止 doom loop：同一工具、同一参数不要连打。被权限拒绝后改计划，不要换命令绕过。
-- 上下文接近上限时运行时会自动压缩较早对话；压缩后继续当前 goal，不要重做 done 里的事。
-- 预算用尽会写入【checkpoint】。下一轮从检查点接着做。`;
+- 上下文接近上限时运行时会自动压缩；也可在里程碑边界调用 \`context_compress\`。压缩后继续当前 goal，不要重做 done 里的事。
+- 步数采用动态预算（先给一半，有进展才延期一次）。工具结果后会看到剩余步数提醒。无验证/里程碑/有效写入则不延期，会写入【checkpoint】。下一轮从检查点接着做。`;
 }

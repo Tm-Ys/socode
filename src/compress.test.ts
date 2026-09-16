@@ -5,6 +5,11 @@ import { harnessModeMessage } from "./mode.js";
 import type { Message } from "./db.js";
 import { applyTaskPatch, emptyTaskState, isTaskStateMessage, lastTaskState, taskStateMessage } from "./task-state.js";
 import { applyPlanPatch, emptyPlan, isPlanMessage, lastPlan, planMessage } from "./plan.js";
+import { TURN_BUDGET_PREFIX } from "./long-budget.js";
+import { harnessModeMessage } from "./mode.js";
+import type { Message } from "./db.js";
+import { applyTaskPatch, emptyTaskState, isTaskStateMessage, lastTaskState, taskStateMessage } from "./task-state.js";
+import { applyPlanPatch, emptyPlan, isPlanMessage, lastPlan, planMessage } from "./plan.js";
 
 function user(content: string): Message {
   return { role: "user", content };
@@ -52,6 +57,31 @@ describe("splitForCompress", () => {
     assert.equal(lastPlan(keep)?.goal, "plan-me");
     assert.equal(keep.filter(isPlanMessage).length, 1);
     assert.equal(stale.some(isPlanMessage), false);
+  });
+
+  it("drops turn-budget reminders and can split by ReAct steps", () => {
+    const filler = "token ".repeat(400);
+    const steps: Message[] = [];
+    for (let i = 0; i < 6; i += 1) {
+      steps.push({
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: String(i), name: "read", arguments: "{}" }],
+      });
+      steps.push({ role: "tool", content: filler, toolCallId: String(i) });
+    }
+    steps.push({ role: "system", content: `${TURN_BUDGET_PREFIX}You have 1 turns left` });
+    const history: Message[] = [user("go"), ...steps];
+    const { stale, keep } = splitForCompress(history, { unit: "react", keepTurns: 2 });
+    assert.ok(stale.length > 0);
+    assert.equal(
+      keep.filter((message) => message.role === "assistant" && message.toolCalls?.length).length,
+      2,
+    );
+    assert.equal(
+      [...stale, ...keep].some((message) => message.content.startsWith(TURN_BUDGET_PREFIX)),
+      false,
+    );
   });
 });
 

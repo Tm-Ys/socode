@@ -6,6 +6,39 @@ export const CHECKPOINT_PREFIX = "【checkpoint】";
 const MAX_LIST = 40;
 const MAX_TEXT = 2000;
 
+export type RubricAxis = "file_change" | "spec_alignment" | "integrity" | "runtime";
+
+export type RubricItem = {
+  id: string;
+  axis: RubricAxis;
+  text: string;
+  weight: 1 | 2 | 3;
+};
+
+export type VerifyRubric = {
+  version: 1;
+  goalHash: string;
+  items: RubricItem[];
+  createdAt: string;
+};
+
+export type RubricScore = {
+  at: string;
+  milestone: string;
+  score: number;
+  pass: boolean;
+  items: { id: string; s: 0 | 1; note: string }[];
+  failClosedReason?: string;
+};
+
+export type LastVerify = {
+  ok: boolean;
+  at: string;
+  source: "harness" | "subagent";
+  command?: string;
+  logTail?: string;
+};
+
 export type TaskState = {
   goal: string;
   milestones: string[];
@@ -15,6 +48,9 @@ export type TaskState = {
   verifyCommands: string[];
   notes: string;
   updatedAt: string;
+  lastVerify?: LastVerify;
+  verifyRubric?: VerifyRubric;
+  lastRubricScore?: RubricScore;
 };
 
 export type TaskPatch = {
@@ -30,6 +66,9 @@ export type TaskPatch = {
   addFailure?: string;
   addKeyFile?: string;
   addVerifyCommand?: string;
+  lastVerify?: LastVerify | null;
+  verifyRubric?: VerifyRubric | null;
+  lastRubricScore?: RubricScore | null;
 };
 
 export type TaskStore = {
@@ -63,6 +102,9 @@ export function cloneTaskState(state: TaskState): TaskState {
     verifyCommands: [...state.verifyCommands],
     notes: state.notes,
     updatedAt: state.updatedAt,
+    lastVerify: state.lastVerify ? { ...state.lastVerify } : undefined,
+    verifyRubric: state.verifyRubric ? cloneRubric(state.verifyRubric) : undefined,
+    lastRubricScore: state.lastRubricScore ? cloneScore(state.lastRubricScore) : undefined,
   };
 }
 
@@ -86,7 +128,10 @@ export function taskStateEqual(a: TaskState, b: TaskState) {
     sameList(a.done, b.done) &&
     sameList(a.failures, b.failures) &&
     sameList(a.keyFiles, b.keyFiles) &&
-    sameList(a.verifyCommands, b.verifyCommands)
+    sameList(a.verifyCommands, b.verifyCommands) &&
+    JSON.stringify(a.lastVerify ?? null) === JSON.stringify(b.lastVerify ?? null) &&
+    JSON.stringify(a.verifyRubric ?? null) === JSON.stringify(b.verifyRubric ?? null) &&
+    JSON.stringify(a.lastRubricScore ?? null) === JSON.stringify(b.lastRubricScore ?? null)
   );
 }
 
@@ -102,6 +147,9 @@ export function normalizeTaskState(input: Partial<TaskState> | null | undefined,
     verifyCommands: cleanList(input.verifyCommands),
     notes: clipText(str(input.notes), MAX_TEXT),
     updatedAt: typeof input.updatedAt === "string" && input.updatedAt.trim() ? input.updatedAt : now.toISOString(),
+    lastVerify: normalizeLastVerify(input.lastVerify),
+    verifyRubric: normalizeRubric(input.verifyRubric),
+    lastRubricScore: normalizeScore(input.lastRubricScore),
   };
 }
 
@@ -119,6 +167,12 @@ export function applyTaskPatch(state: TaskState, patch: TaskPatch, now = new Dat
   pushUnique(next.failures, patch.addFailure);
   pushUnique(next.keyFiles, patch.addKeyFile);
   pushUnique(next.verifyCommands, patch.addVerifyCommand);
+  if (patch.lastVerify === null) next.lastVerify = undefined;
+  else if (patch.lastVerify) next.lastVerify = patch.lastVerify;
+  if (patch.verifyRubric === null) next.verifyRubric = undefined;
+  else if (patch.verifyRubric) next.verifyRubric = patch.verifyRubric;
+  if (patch.lastRubricScore === null) next.lastRubricScore = undefined;
+  else if (patch.lastRubricScore) next.lastRubricScore = patch.lastRubricScore;
   next.updatedAt = now.toISOString();
   return next;
 }
@@ -221,6 +275,11 @@ export function formatTaskStateForPrompt(state: TaskState) {
     "verifyCommands: " + jsonList(state.verifyCommands),
     "notes: " + (state.notes.trim() || "(empty)"),
     "updatedAt: " + state.updatedAt,
+    "lastVerify: " + (state.lastVerify ? `${state.lastVerify.ok ? "ok" : "fail"} ${state.lastVerify.source}` : "(none)"),
+    "rubric: " +
+      (state.verifyRubric
+        ? `${state.verifyRubric.items.length} items, last ${state.lastRubricScore ? (state.lastRubricScore.pass ? "pass" : "fail") : "unscored"}`
+        : "(none)"),
   ].join("\n");
 }
 
@@ -297,4 +356,81 @@ function listOrDash(items: string[]) {
 
 function jsonList(items: string[]) {
   return items.length ? JSON.stringify(items) : "[]";
+}
+
+function cloneRubric(rubric: VerifyRubric): VerifyRubric {
+  return {
+    version: 1,
+    goalHash: rubric.goalHash,
+    createdAt: rubric.createdAt,
+    items: rubric.items.map((item) => ({ ...item })),
+  };
+}
+
+function cloneScore(score: RubricScore): RubricScore {
+  return {
+    ...score,
+    items: score.items.map((item) => ({ ...item })),
+  };
+}
+
+function normalizeLastVerify(value: unknown): LastVerify | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const rec = value as Record<string, unknown>;
+  const source = rec.source === "subagent" ? "subagent" : rec.source === "harness" ? "harness" : undefined;
+  if (!source || typeof rec.ok !== "boolean") return undefined;
+  return {
+    ok: rec.ok,
+    at: typeof rec.at === "string" && rec.at.trim() ? rec.at : new Date().toISOString(),
+    source,
+    command: typeof rec.command === "string" ? rec.command.slice(0, 240) : undefined,
+    logTail: typeof rec.logTail === "string" ? rec.logTail.slice(0, 800) : undefined,
+  };
+}
+
+function normalizeRubric(value: unknown): VerifyRubric | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const rec = value as Record<string, unknown>;
+  if (!Array.isArray(rec.items)) return undefined;
+  const items: RubricItem[] = [];
+  for (const row of rec.items) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+    const item = row as Record<string, unknown>;
+    const axis = item.axis;
+    const weight = Number(item.weight);
+    if (axis !== "file_change" && axis !== "spec_alignment" && axis !== "integrity" && axis !== "runtime") continue;
+    if (![1, 2, 3].includes(weight)) continue;
+    const id = typeof item.id === "string" ? item.id.trim().slice(0, 24) : "";
+    const text = typeof item.text === "string" ? item.text.trim().slice(0, 200) : "";
+    if (!id || !text) continue;
+    items.push({ id, axis, text, weight: weight as 1 | 2 | 3 });
+  }
+  if (!items.length) return undefined;
+  return {
+    version: 1,
+    goalHash: typeof rec.goalHash === "string" ? rec.goalHash : "",
+    items,
+    createdAt: typeof rec.createdAt === "string" ? rec.createdAt : new Date().toISOString(),
+  };
+}
+
+function normalizeScore(value: unknown): RubricScore | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const rec = value as Record<string, unknown>;
+  if (typeof rec.score !== "number" || typeof rec.pass !== "boolean") return undefined;
+  return {
+    at: typeof rec.at === "string" ? rec.at : new Date().toISOString(),
+    milestone: typeof rec.milestone === "string" ? rec.milestone : "",
+    score: rec.score,
+    pass: rec.pass,
+    items: Array.isArray(rec.items)
+      ? rec.items.flatMap((row) => {
+          if (!row || typeof row !== "object" || Array.isArray(row)) return [];
+          const item = row as Record<string, unknown>;
+          if (typeof item.id !== "string") return [];
+          return [{ id: item.id, s: item.s === 1 ? 1 : 0, note: typeof item.note === "string" ? item.note : "" }];
+        })
+      : [],
+    failClosedReason: typeof rec.failClosedReason === "string" ? rec.failClosedReason : undefined,
+  };
 }

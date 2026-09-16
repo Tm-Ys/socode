@@ -1,12 +1,23 @@
 import { isTurnAborted, throwIfAborted, TurnAborted, TurnFailed } from "./abort.js";
-import { compressAgentMessages, LONG_COMPRESS_RATIO } from "./compress.js";
-import { completeChat, type TokenUsage } from "./chat.js";
+import { compressAgentMessages, LONG_COMPRESS_RATIO, splitLiveToolTurn } from "./compress.js";
+import { completeChat, type ChatResult, type TokenUsage } from "./chat.js";
 import { messageTokens } from "./context.js";
 import type { Policy } from "./permissions.js";
-import { checkpointReply } from "./task-state.js";
+import {
+  dropTurnBudgetMessages,
+  emptyBudgetSegment,
+  extendReminder,
+  noteBudgetTool,
+  resolveLongBudget,
+  shouldExtend,
+  turnsLeftReminder,
+  type LongBudgetPlan,
+} from "./long-budget.js";
+import { checkpointReply, cloneTaskState, emptyTaskState } from "./task-state.js";
 import { PLAN_REVIEW_NUDGE, SETPLAN_NUDGE, shouldHoldForPlanReview, shouldHoldForSetplan } from "./plan.js";
 import { isToolError } from "./tool-ui.js";
-import { executeTool, toolSpecs } from "./tools.js";
+import { executeTool, toolSpecs, type ToolSpec } from "./tools.js";
+import { writeAudit } from "./audit.js";
 import type { Message } from "./db.js";
 import type { Provider } from "./provider.js";
 
@@ -104,6 +115,14 @@ export async function runAgent(params: {
   policy?: Policy;
   onEvent?: (event: AgentEvent) => void;
   requirePlan?: boolean;
+  complete?: (params: {
+    provider: Provider;
+    messages: Message[];
+    tools?: ToolSpec[];
+    stream?: boolean;
+    signal?: AbortSignal;
+    onDelta?: (text: string) => void;
+  }) => Promise<Pick<ChatResult, "content" | "toolCalls" | "usage">>;
 }): Promise<AgentOutcome> {
   const maxSteps = Math.max(1, params.maxSteps ?? DEFAULT_MAX_AGENT_STEPS);
   const messages = [...params.messages];
@@ -115,10 +134,19 @@ export async function runAgent(params: {
   });
   const usage: TokenUsage = { promptTokens: 0, completionTokens: 0 };
   const longHorizon = params.policy?.mode === "long";
+  const parentLong = longHorizon && !params.policy?.nested;
+  const budget: LongBudgetPlan = params.policy?.longBudget ?? resolveLongBudget(maxSteps);
+  const loopLimit = parentLong ? budget.y : maxSteps;
+  let currentCap = parentLong ? budget.x : maxSteps;
+  let extensionsUsed = 0;
+  const segment = emptyBudgetSegment();
+  const startState = params.policy?.tasks ? cloneTaskState(params.policy.tasks.get()) : emptyTaskState();
+  let lastCompressStep = -8;
   let lastSig = "";
   let sameCount = 0;
   let failName = "";
   let failCount = 0;
+  const chat = params.complete ?? completeChat;
 
   const fail = (error: unknown): never => {
     if (error instanceof TurnFailed) throw error;
@@ -131,9 +159,44 @@ export async function runAgent(params: {
   };
 
   try {
-    for (let step = 0; step < maxSteps; step += 1) {
+    for (let step = 0; step < loopLimit; step += 1) {
       throwIfAborted(params.signal);
-      if (longHorizon && params.maxContextTokens) {
+      if (parentLong && step >= currentCap) {
+        const now = params.policy?.tasks?.get() ?? startState;
+        const verdict = shouldExtend({
+          policy: budget.policy,
+          extensionsUsed,
+          segment,
+          start: startState,
+          now,
+        });
+        if (verdict.allow) {
+          const from = currentCap;
+          currentCap = budget.y;
+          extensionsUsed += 1;
+          const delta = Math.max(1, currentCap - from);
+          replaceTurnReminder(messages, extendReminder(delta, currentCap));
+          params.onEvent?.({ type: "notice", text: `步数预算延期 ${from}→${currentCap}：${verdict.reason}` });
+          params.policy?.tasks?.patch({
+            notes: [now.notes, `budget-extend: ${from}→${currentCap} because ${verdict.reason}`]
+              .filter(Boolean)
+              .join("\n")
+              .slice(-2000),
+          });
+          if (params.policy?.workspace) {
+            writeAudit({
+              workspace: params.policy.workspace,
+              mode: "long",
+              tool: "turn_budget",
+              decision: "allow",
+              detail: `${from}->${currentCap} ${verdict.reason}`,
+            });
+          }
+        } else {
+          return stopForBudget("steps", trace, usage, params.policy);
+        }
+      }
+      if (parentLong && params.maxContextTokens) {
         const used = messages.reduce((sum, message) => sum + messageTokens(message), 0);
         if (used >= params.maxContextTokens * LONG_COMPRESS_RATIO) {
           const compressed = await compressAgentMessages({
@@ -144,6 +207,7 @@ export async function runAgent(params: {
           if (compressed) {
             messages.length = 0;
             messages.push(...compressed.messages);
+            lastCompressStep = step;
             params.onEvent?.({ type: "compress", saved: compressed.saved });
           }
           const still =
@@ -153,8 +217,8 @@ export async function runAgent(params: {
           }
         }
       }
-      const allowTools = tools.length > 0 && step < maxSteps - 1;
-      const result = await completeChat({
+      const allowTools = tools.length > 0 && step < loopLimit - 1;
+      const result = await chat({
         provider: params.provider,
         messages,
         tools: allowTools ? tools : undefined,
@@ -168,7 +232,7 @@ export async function runAgent(params: {
       if (result.toolCalls.length === 0) {
         const reply = result.content.trim();
         if (!reply) return fail(new Error("模型没有给出最终回复"));
-        const canStillTool = tools.length > 0 && step < maxSteps - 1;
+        const canStillTool = tools.length > 0 && step < loopLimit - 1;
         if (shouldHoldForSetplan(trace, Boolean(params.requirePlan), canStillTool)) {
           messages.push({ role: "assistant", content: reply });
           messages.push({ role: "user", content: SETPLAN_NUDGE });
@@ -202,12 +266,29 @@ export async function runAgent(params: {
         sameCount = sig === lastSig ? sameCount + 1 : 1;
         lastSig = sig;
         let output: string;
+        let args: Record<string, unknown> = {};
+        try {
+          args = call.arguments.trim() ? (JSON.parse(call.arguments) as Record<string, unknown>) : {};
+        } catch {
+          args = {};
+        }
         if (sameCount >= REPEAT_LIMIT) {
           output = `权限拒绝: 同一工具连续调用 ${REPEAT_LIMIT} 次，已停止以免空转。请换一种做法或直接回复用户。`;
           doom = true;
+        } else if (call.name === "context_compress" && parentLong) {
+          output = await runContextCompress({
+            provider: params.provider,
+            messages,
+            args,
+            signal: params.signal,
+            step,
+            lastCompressStep,
+          });
+          if (!output.startsWith("工具执行失败") && !output.startsWith("权限拒绝")) lastCompressStep = step;
         } else {
           output = await executeTool(call.name, call.arguments, params.signal, params.policy).catch(fail);
         }
+        noteBudgetTool(segment, call.name, args, output, params.policy?.tasks?.get().verifyCommands ?? []);
         if (isToolError(output)) {
           failCount = call.name === failName ? failCount + 1 : 1;
           failName = call.name;
@@ -234,6 +315,7 @@ export async function runAgent(params: {
       }
 
       if (doom) {
+        segment.doomTriggered = true;
         const done = new Set(
           trace.filter((message) => message.role === "tool").map((message) => message.toolCallId),
         );
@@ -252,10 +334,13 @@ export async function runAgent(params: {
         return { reply, trace: closed, usage: nonemptyUsage(usage) };
       }
 
-      if (longHorizon) {
+      if (parentLong) {
+        if (budget.reminder) {
+          replaceTurnReminder(messages, turnsLeftReminder(currentCap - step - 1, currentCap, step + 1, budget.policy));
+        }
         const reason = budgetStopReason({
           step: step + 1,
-          maxSteps: maxSteps + 1,
+          maxSteps: loopLimit + 1,
           usage,
           maxTokens: params.maxTokens,
           contextTokens: messages.reduce((sum, message) => sum + messageTokens(message), 0),
@@ -268,20 +353,60 @@ export async function runAgent(params: {
     }
 
     const over = budgetStopReason({
-      step: maxSteps,
-      maxSteps,
+      step: loopLimit,
+      maxSteps: loopLimit,
       usage,
       maxTokens: params.maxTokens,
       contextTokens: messages.reduce((sum, message) => sum + messageTokens(message), 0),
       maxContextTokens: params.maxContextTokens,
     });
-    if (longHorizon) {
+    if (parentLong) {
       return stopForBudget(over ?? "steps", trace, usage, params.policy);
     }
     return fail(new Error(`超过最大工具步数 ${maxSteps}`));
   } catch (error) {
     return fail(error);
   }
+}
+
+function replaceTurnReminder(messages: Message[], next: Message) {
+  const kept = dropTurnBudgetMessages(messages);
+  messages.length = 0;
+  messages.push(...kept, next);
+}
+
+async function runContextCompress(params: {
+  provider: Provider;
+  messages: Message[];
+  args: Record<string, unknown>;
+  signal?: AbortSignal;
+  step: number;
+  lastCompressStep: number;
+}) {
+  if (params.step - params.lastCompressStep < 2) {
+    return "工具执行失败: 刚刚压缩过，先继续做事再压";
+  }
+  const keepTurns = clampKeepTurns(params.args.keep_turns);
+  const note = typeof params.args.note === "string" ? params.args.note : undefined;
+  const reason = typeof params.args.reason === "string" ? params.args.reason : "context_pressure";
+  const { rest, live } = splitLiveToolTurn(params.messages);
+  const compressed = await compressAgentMessages({
+    provider: params.provider,
+    messages: rest,
+    signal: params.signal,
+    keepTurns,
+    note,
+  });
+  if (!compressed) return "工具执行失败: 对话还不够长，无需压缩";
+  params.messages.length = 0;
+  params.messages.push(...compressed.messages, ...live);
+  return `[context_compress] ok  reason=${reason}  saved≈${compressed.saved} tokens  keep=${keepTurns}\n摘要已写入会话（【会话摘要】）。TaskState 与 harness mode 仍钉在原文。继续当前 goal，不要重做 done。`;
+}
+
+function clampKeepTurns(value: unknown) {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return 4;
+  return Math.min(8, Math.max(2, Math.floor(n)));
 }
 
 function stopForBudget(

@@ -14,6 +14,9 @@ const ws = process.cwd();
 describe("task_state tool", () => {
   it("is advertised only in Long", () => {
     assert.equal(toolSpecs("long").some((tool) => tool.name === "task_state"), true);
+    assert.equal(toolSpecs("long").some((tool) => tool.name === "context_compress"), true);
+    assert.equal(toolSpecs("ask").some((tool) => tool.name === "context_compress"), false);
+    assert.equal(toolSpecs("long", { nested: true }).some((tool) => tool.name === "context_compress"), false);
     assert.equal(toolSpecs("ask").some((tool) => tool.name === "task_state"), false);
     assert.equal(toolSpecs("full").some((tool) => tool.name === "task_state"), false);
     assert.equal(toolSpecs("plan").some((tool) => tool.name === "task_state"), false);
@@ -66,6 +69,27 @@ describe("task_state tool", () => {
     assert.deepEqual(tasks.get().done, []);
   });
 
+  it("blocks add_done when rubric fails closed", async () => {
+    const tasks = createTaskStore();
+    tasks.patch({ addVerifyCommand: "true" });
+    const policy = createPolicy(ws, () => "long", tasks, {
+      longRubric: {
+        ensure: async () => ({ error: "准则太少（0）" }),
+        score: async () => ({
+          at: new Date().toISOString(),
+          milestone: "ship",
+          score: 0,
+          pass: false,
+          items: [],
+          failClosedReason: "还没有 rubric",
+        }),
+      },
+    });
+    const out = await executeTool("task_state", JSON.stringify({ add_done: "ship" }), undefined, policy);
+    assert.match(out, /评分失败|未过/);
+    assert.deepEqual(tasks.get().done, []);
+  });
+
   it("refuses task_state outside Long", async () => {
     const policy = createPolicy(ws, () => "ask");
     const out = await executeTool("task_state", JSON.stringify({ goal: "x" }), undefined, policy);
@@ -84,6 +108,9 @@ describe("subagent tools", () => {
     assert.equal(toolSpecs("ask", { nested: true }).some((tool) => tool.name === "subagent"), false);
     const explorer = toolSpecs("ask", { nested: true, role: "explorer" }).map((tool) => tool.name);
     assert.deepEqual(explorer.sort(), ["calculate", "get_current_time", "read", "search"]);
+    const verify = toolSpecs("long", { nested: true, role: "verify" }).map((tool) => tool.name);
+    assert.equal(verify.includes("bash"), true);
+    assert.equal(verify.includes("write"), false);
   });
 
   it("stores a plan then requires the runner to execute", async () => {

@@ -1,6 +1,7 @@
 import { completeChat } from "./chat.js";
 import { COMPRESSED_PREFIX, messageTokens, normalizeHistory, type ContextReport } from "./context.js";
 import type { Message } from "./db.js";
+import { isTurnBudgetMessage } from "./long-budget.js";
 import { harnessModeMessage, isHarnessModeMessage, lastHarnessMode } from "./mode.js";
 import type { Provider } from "./provider.js";
 import { isTaskStateMessage, lastTaskState, taskStateMessage } from "./task-state.js";
@@ -10,8 +11,16 @@ const KEEP_USER_TURNS = 2;
 const MIN_STALE_TOKENS = 1200;
 const TRANSCRIPT_MAX_CHARS = 80_000;
 
-export function splitForCompress(history: Message[]) {
-  const normalized = normalizeHistory(history);
+export function splitForCompress(
+  history: Message[],
+  opts?: { unit?: "user" | "react"; keepTurns?: number },
+) {
+  const normalized = normalizeHistory(history).filter((message) => !isTurnBudgetMessage(message));
+  if (opts?.unit === "react") return splitReact(normalized, opts.keepTurns ?? 4);
+  return splitUserTurns(normalized);
+}
+
+function splitUserTurns(normalized: Message[]) {
   const userAt = normalized
     .map((message, index) => (message.role === "user" ? index : -1))
     .filter((index) => index >= 0);
@@ -19,18 +28,36 @@ export function splitForCompress(history: Message[]) {
     return { stale: [] as Message[], keep: normalized };
   }
   const cut = userAt[userAt.length - KEEP_USER_TURNS];
-  let stale = normalized.slice(0, cut);
-  let keep = normalized.slice(cut);
-  stale = stale.filter((message) => !isPinnedControl(message));
-  keep = keep.filter((message) => !isPinnedControl(message));
+  return cutHistory(normalized, cut);
+}
+
+function splitReact(normalized: Message[], keepTurns: number) {
+  const k = Math.min(8, Math.max(2, Math.floor(keepTurns)));
+  const starts: number[] = [];
+  for (let i = 0; i < normalized.length; i += 1) {
+    if (normalized[i].role === "assistant" && normalized[i].toolCalls?.length) starts.push(i);
+  }
+  if (starts.length <= k) {
+    return { stale: [] as Message[], keep: normalized };
+  }
+  return cutHistory(normalized, starts[starts.length - k]);
+}
+
+function cutHistory(normalized: Message[], cut: number) {
+  let stale = normalized.slice(0, cut).filter((message) => !isPinnedControl(message));
+  let keep = normalized.slice(cut).filter((message) => !isPinnedControl(message));
+  return { stale, keep: pinControls(normalized, keep) };
+}
+
+function pinControls(source: Message[], keep: Message[]) {
   const head: Message[] = [];
-  const mode = lastHarnessMode(normalized);
+  const mode = lastHarnessMode(source);
   if (mode) head.push(harnessModeMessage(mode));
-  const task = lastTaskState(normalized);
+  const task = lastTaskState(source);
   if (task) head.push(taskStateMessage(task));
-  const plan = lastPlan(normalized);
+  const plan = lastPlan(source);
   if (plan) head.push(planMessage(plan));
-  return { stale, keep: [...head, ...keep] };
+  return [...head, ...keep];
 }
 
 function isPinnedControl(message: Message) {
@@ -53,10 +80,19 @@ export function shouldAutoCompress(params: {
   return pressure >= ratio || report.free < Math.min(4000, Math.max(512, report.maxOutput / 2));
 }
 
-export function canCompress(history: Message[]) {
-  const { stale } = splitForCompress(history);
+export function canCompress(history: Message[], opts?: { unit?: "user" | "react"; keepTurns?: number }) {
+  const { stale } = splitForCompress(history, opts);
   const tokens = stale.reduce((sum, message) => sum + messageTokens(message), 0);
   return stale.length > 0 && tokens >= MIN_STALE_TOKENS;
+}
+
+export function splitLiveToolTurn(messages: Message[]) {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "assistant" && messages[i].toolCalls?.length) {
+      return { rest: messages.slice(0, i), live: messages.slice(i) };
+    }
+  }
+  return { rest: messages, live: [] as Message[] };
 }
 
 export function peelAgentPrefix(messages: Message[]) {
@@ -79,15 +115,22 @@ export async function compressAgentMessages(params: {
   provider: Provider;
   messages: Message[];
   signal?: AbortSignal;
+  keepTurns?: number;
+  note?: string;
 }): Promise<{ messages: Message[]; saved: number } | null> {
   const { head, rest } = peelAgentPrefix(params.messages);
-  if (!canCompress(rest)) return null;
+  const react = { unit: "react" as const, keepTurns: params.keepTurns };
+  const opts = canCompress(rest, react) ? react : undefined;
+  if (!canCompress(rest, opts)) return null;
   try {
     const result = await compressHistory({
       provider: params.provider,
       history: rest,
       signal: params.signal,
       stream: false,
+      unit: opts?.unit,
+      keepTurns: params.keepTurns,
+      note: params.note,
     });
     if (result.saved < 200) return null;
     return { messages: [...head, ...result.messages], saved: result.saved };
@@ -102,12 +145,21 @@ export async function compressHistory(params: {
   signal?: AbortSignal;
   stream?: boolean;
   onDelta?: (text: string) => void;
+  unit?: "user" | "react";
+  keepTurns?: number;
+  note?: string;
 }): Promise<{ messages: Message[]; saved: number; summaryTokens: number }> {
-  const { stale, keep } = splitForCompress(params.history);
+  const { stale, keep } = splitForCompress(params.history, { unit: params.unit, keepTurns: params.keepTurns });
   const staleTokens = stale.reduce((sum, message) => sum + messageTokens(message), 0);
   if (stale.length === 0 || staleTokens < MIN_STALE_TOKENS) {
     throw new Error("对话还不够长，无需压缩");
   }
+
+  const extra = params.note?.trim() ? `\n请特别保留：${params.note.trim()}` : "";
+  const longHint =
+    params.unit === "react"
+      ? "这是 Long 轨迹。保留 goal、done、failures、keyFiles、verifyCommands 和未验证的改动路径；丢掉重复 search 输出。"
+      : "";
 
   const result = await completeChat({
     provider: {
@@ -121,11 +173,11 @@ export async function compressHistory(params: {
       {
         role: "system",
         content:
-          "你是会话压缩器。把对话压成一份中文摘要，供后续继续工作使用。保留：目标、已做决策、改过的文件与路径、关键结论、未完成事项、用户偏好。丢掉：客套、重复工具输出、大段代码（只留路径和要点）。不要 markdown 标题堆砌，直接输出摘要正文。",
+          `你是会话压缩器。把对话压成一份中文摘要，供后续继续工作使用。保留：目标、已做决策、改过的文件与路径、关键结论、未完成事项、用户偏好。丢掉：客套、重复工具输出、大段代码（只留路径和要点）。不要 markdown 标题堆砌，直接输出摘要正文。${longHint}`,
       },
       {
         role: "user",
-        content: `请压缩以下对话：\n\n${toTranscript(stale)}`,
+        content: `请压缩以下对话：\n\n${toTranscript(stale)}${extra}`,
       },
     ],
   });

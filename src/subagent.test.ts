@@ -63,6 +63,8 @@ describe("subagent plan", () => {
   it("defaults unknown kinds to worker", () => {
     assert.equal(parseSubagentKind("nope"), "worker");
     assert.equal(parseSubagentKind("explore"), "explorer");
+    assert.equal(parseSubagentKind("定位"), "localize");
+    assert.equal(parseSubagentKind("verify"), "verify");
   });
 
   it("refuses to run before a plan exists", async () => {
@@ -100,6 +102,22 @@ describe("subagent plan", () => {
     assert.equal(peak(), 1);
     assert.match(out, /ok-a/);
     assert.match(out, /ok-b/);
+  });
+
+  it("serializes edit then verify, and keeps localizes parallel", async () => {
+    const serial = timedRunner([
+      { kind: "edit", prompt: "a" },
+      { kind: "verify", prompt: "b" },
+    ]);
+    await serial.run({});
+    assert.equal(serial.peak(), 1);
+
+    const locs = timedRunner([
+      { kind: "localize", prompt: "a" },
+      { kind: "localize", prompt: "b" },
+    ]);
+    await locs.run({});
+    assert.equal(locs.peak(), 2);
   });
 
   it("notifies the UI when a batch starts", async () => {

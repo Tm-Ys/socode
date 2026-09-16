@@ -31,7 +31,7 @@ export type McpServerStatus = {
 };
 
 export type McpHub = {
-  specs: (opts?: { mode?: AgentMode; role?: "explorer" | "worker" }) => McpToolSpec[];
+  specs: (opts?: { mode?: AgentMode; role?: string }) => McpToolSpec[];
   isReadOnly: (name: string) => boolean;
   has: (name: string) => boolean;
   call: (name: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<string>;
@@ -118,7 +118,7 @@ export async function openMcpHub(workspace: string): Promise<McpHub> {
   return {
     specs: (opts) => {
       let list = [...tools.values()].map(({ info }) => toSpec(info));
-      if (opts?.mode === "plan" || opts?.role === "explorer") {
+      if (opts?.mode === "plan" || opts?.role === "explorer" || opts?.role === "localize" || opts?.role === "verify") {
         list = list.filter((spec) => tools.get(spec.name)?.info.readOnly);
       }
       return list;

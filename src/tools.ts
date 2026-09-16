@@ -11,7 +11,7 @@ import {
 import type { AgentMode } from "./mode.js";
 import { isMcpTool } from "./mcp.js";
 import type { Policy } from "./permissions.js";
-import { formatSubagentPlan, parseSubagentPlan } from "./subagent-plan.js";
+import { formatSubagentPlan, isReadonlyKind, isVerifyKind, parseSubagentPlan, type SubagentKind } from "./subagent-plan.js";
 import { formatTaskStateCli, patchFromToolArgs } from "./task-state.js";
 import { formatPlanCli, patchFromPlanArgs, planNeedsReview } from "./plan.js";
 import { newDoneItems, runVerifyCommands } from "./verify.js";
@@ -212,7 +212,7 @@ const tools: Tool[] = [
   {
     name: "subagent_plan",
     description:
-      "规划要派出的子代理。先调用本工具，再调用 subagent 执行。agents 为 1–6 项，每项 kind=explorer（只读调研）或 worker（可改文件），prompt 必须自洽（子代理看不到父对话）。",
+      "规划要派出的子代理。先调用本工具，再调用 subagent 执行。agents 为 1–6 项；Long 推荐 kind=localize / edit / verify，Ask/Full 仍可用 explorer / worker。prompt 必须自洽（子代理看不到父对话）。",
     parameters: {
       type: "object",
       properties: {
@@ -224,7 +224,7 @@ const tools: Tool[] = [
           items: {
             type: "object",
             properties: {
-              kind: { type: "string", description: "explorer 或 worker" },
+              kind: { type: "string", description: "localize / edit / verify（Long）或 explorer / worker" },
               label: { type: "string", description: "短名，便于对照结果" },
               prompt: { type: "string", description: "给该子代理的完整任务说明" },
             },
@@ -241,7 +241,7 @@ const tools: Tool[] = [
   {
     name: "subagent",
     description:
-      "按最近一次 subagent_plan 执行子代理。不传参数则跑完全部 pending：explorer 并行，worker 彼此串行。传 index 只跑其中一个。每个子代理独立上下文，只把摘要返回给你。",
+      "按最近一次 subagent_plan 执行子代理。不传参数则跑完全部 pending：localize/explorer 并行，edit/worker 串行，verify 等写入完成后再跑。传 index 只跑其中一个。每个子代理独立上下文，只把摘要返回给你。",
     parameters: {
       type: "object",
       properties: {
@@ -253,21 +253,52 @@ const tools: Tool[] = [
       throw new Error("subagent 需要会话上下文");
     },
   },
+  {
+    name: "context_compress",
+    description:
+      "把当前 Long 会话里较早的工具轨迹折成摘要。系统提示、【harness mode】、【task state】和最近若干 ReAct 步保留原文。只在里程碑边界、策略转向、或上下文变挤时调用，不要连着压。",
+    parameters: {
+      type: "object",
+      properties: {
+        reason: {
+          type: "string",
+          description: "为何现在压：milestone | strategy_switch | context_pressure | error_correction",
+        },
+        keep_turns: {
+          type: "integer",
+          description: "保留最近多少个 ReAct 步。默认 4，范围 2–8。",
+        },
+        note: { type: "string", description: "希望摘要特别保留的要点" },
+      },
+      required: ["reason"],
+    },
+    execute: () => {
+      throw new Error("context_compress 需要会话上下文");
+    },
+  },
 ];
 
 const READ_TOOLS = new Set(["read", "search", "calculate", "get_current_time"]);
 
 export function toolSpecs(
   mode?: AgentMode,
-  opts?: { nested?: boolean; role?: "explorer" | "worker"; extra?: ToolSpec[] },
+  opts?: { nested?: boolean; role?: SubagentKind; extra?: ToolSpec[] },
 ): ToolSpec[] {
   const builtin = tools
     .filter((tool) => {
-      if (opts?.nested && (tool.name === "subagent_plan" || tool.name === "subagent" || tool.name === "plan")) {
+      if (
+        opts?.nested &&
+        (tool.name === "subagent_plan" ||
+          tool.name === "subagent" ||
+          tool.name === "plan" ||
+          tool.name === "task_state" ||
+          tool.name === "context_compress")
+      ) {
         return false;
       }
-      if (tool.name === "task_state") return mode === "long" && !opts?.nested;
-      if (opts?.role === "explorer") return READ_TOOLS.has(tool.name);
+      if (tool.name === "task_state" || tool.name === "context_compress") return mode === "long" && !opts?.nested;
+      if (isReadonlyKind(opts?.role)) return READ_TOOLS.has(tool.name);
+      if (isVerifyKind(opts?.role)) return READ_TOOLS.has(tool.name) || tool.name === "bash";
       if (mode === "plan") return READ_TOOLS.has(tool.name) || tool.name === "plan";
       return true;
     })
@@ -302,10 +333,15 @@ export async function executeTool(
     if (name === "task_state" && policy?.mode !== "long") {
       return "权限拒绝: task_state 只在 Long 模式下可用。请先 /mode long。";
     }
-    if ((name === "subagent_plan" || name === "subagent" || name === "plan") && policy?.nested) {
+    if ((name === "subagent_plan" || name === "subagent" || name === "plan" || name === "context_compress") && policy?.nested) {
       return name === "plan"
         ? "权限拒绝: 子代理不能改父计划"
-        : "权限拒绝: 子代理不能再派生子代理（max_depth=1）";
+        : name === "context_compress"
+          ? "权限拒绝: 子代理不能压缩父上下文"
+          : "权限拒绝: 子代理不能再派生子代理（max_depth=1）";
+    }
+    if (name === "context_compress" && policy?.mode !== "long") {
+      return "权限拒绝: context_compress 只在 Long 模式下可用。";
     }
     if (policy) {
       const denied = await policy.authorize(name, args);
@@ -318,26 +354,72 @@ export async function executeTool(
       let next = policy.tasks.patch(patchFromToolArgs(args));
       const finished = newDoneItems(before.done, next.done);
       if (finished.length) {
-        const cmds = next.verifyCommands;
-        if (!cmds.length) {
-          return `${formatTaskStateCli(next)}\n\n未设置 verifyCommands，该里程碑未自动验证。`;
-        }
-        const report = await runVerifyCommands({
-          workspace: policy.workspace,
-          commands: cmds,
-          signal,
-        });
-        const log = report.lines.join("\n\n");
-        if (!report.ok) {
+        if (before.lastVerify?.source === "subagent" && before.lastVerify.ok === false) {
           next = policy.tasks.patch({
             done: before.done,
-            addFailure: `verify 失败: ${finished.join("、")}`,
+            addFailure: `verify 子代理未通过: ${finished.join("、")}`,
           });
-          return `验证失败，已停手。done 未更新。\n${formatTaskStateCli(next)}\n\n${log}`;
+          return `验证失败，已停手。done 未更新。verify 子代理 ok=false。\n${formatTaskStateCli(next)}`;
         }
-        return `${formatTaskStateCli(next)}\n\n验证通过\n${log}`;
+        const cmds = next.verifyCommands;
+        if (!cmds.length && !next.lastVerify?.ok) {
+          return `${formatTaskStateCli(next)}\n\n未设置 verifyCommands，该里程碑未自动验证。`;
+        }
+        if (cmds.length) {
+          const report = await runVerifyCommands({
+            workspace: policy.workspace,
+            commands: cmds,
+            signal,
+          });
+          const log = report.lines.join("\n\n");
+          next = policy.tasks.patch({
+            lastVerify: {
+              ok: report.ok,
+              at: new Date().toISOString(),
+              source: "harness",
+              command: cmds[0],
+              logTail: log.slice(0, 800),
+            },
+          });
+          if (!report.ok) {
+            next = policy.tasks.patch({
+              done: before.done,
+              addFailure: `verify 失败: ${finished.join("、")}`,
+            });
+            return `验证失败，已停手。done 未更新。\n${formatTaskStateCli(next)}\n\n${log}`;
+          }
+        }
+        if (policy.longRubric) {
+          const ensured = await policy.longRubric.ensure(next, { workspace: policy.workspace, force: true });
+          if ("error" in ensured) {
+            next = policy.tasks.patch({
+              done: before.done,
+              addFailure: `rubric 失败: ${ensured.error}`,
+            });
+            return `里程碑评分失败，已停手。done 未更新。${ensured.error}\n${formatTaskStateCli(next)}`;
+          }
+          next = policy.tasks.patch({ verifyRubric: ensured });
+          const scored = await policy.longRubric.score({
+            state: next,
+            milestone: finished.join("、"),
+            verify: next.lastVerify,
+          });
+          next = policy.tasks.patch({ lastRubricScore: scored });
+          if (!scored.pass) {
+            next = policy.tasks.patch({
+              done: before.done,
+              addFailure: `rubric 未过: ${scored.failClosedReason ?? "fail"}`,
+            });
+            return `里程碑评分未过，已停手。done 未更新。${scored.failClosedReason ?? ""}\n${formatTaskStateCli(next)}`;
+          }
+        }
+        const log = next.lastVerify?.logTail ? `\n\n验证通过\n${next.lastVerify.logTail}` : "";
+        return `${formatTaskStateCli(next)}${log}`;
       }
       return formatTaskStateCli(next);
+    }
+    if (name === "context_compress") {
+      return "工具执行失败: context_compress 只能由 Long 循环调用";
     }
     if (name === "plan") {
       if (!policy?.plans) return "工具执行失败: 当前会话没有计划状态";

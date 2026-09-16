@@ -42,6 +42,8 @@ import { formatConversationList, generateTitle, isDefaultTitle } from "./title.j
 import { assistantPrefix, harnessModeMessage, lastHarnessMode, loadMode, modeHint, modeLabel, paintMode, parseMode, userPrefix, type AgentMode } from "./mode.js";
 import { createPolicy } from "./permissions.js";
 import { createLongApprover } from "./long-approve.js";
+import { createLongRubric } from "./long-rubric.js";
+import { resolveLongBudgetFromEnv } from "./long-budget.js";
 import { openMcpHub } from "./mcp.js";
 import { formatSkillsCli, loadSkillBundle } from "./skills.js";
 import { activateBaseSkills, logSkillActivate } from "./skill-activate.js";
@@ -652,7 +654,16 @@ async function main() {
   let workspace = process.cwd();
   let mcp = await openMcpHub(workspace);
   const longApprove = createLongApprover(() => provider);
-  const policy = createPolicy(() => workspace, () => mode, tasks, { longApprove, subagents, mcp, plans });
+  const longRubric = createLongRubric(() => provider);
+  const longBudget = resolveLongBudgetFromEnv(maxSteps);
+  const policy = createPolicy(() => workspace, () => mode, tasks, {
+    longApprove,
+    longRubric,
+    longBudget,
+    subagents,
+    mcp,
+    plans,
+  });
   const subagentUi = createSubagentUi();
   const childPrint = new Map<number, { replied: boolean }>();
   const printChild = (id: number) => {

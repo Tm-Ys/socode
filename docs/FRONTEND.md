@@ -44,7 +44,7 @@ Mini Markdown 支持：`#` 标题、``` 代码块（暗青色）、`>` 引用、
 
 ## 权限审批
 
-Ask/Plan/Long 模式下，写文件或跑命令前弹一行提问，等一个按键：
+Ask 模式下，写文件或跑命令前弹一行提问，等一个按键：
 
 - `y` 允许
 - `n` 拒绝
@@ -59,7 +59,7 @@ Ask/Plan/Long 模式下，写文件或跑命令前弹一行提问，等一个按
 
 ## 子代理
 
-`subagent` 不把子代理的内部轨迹打出来，而是原地刷新一块进度区（`src/subagent-ui.ts`），显示每个 agent 的状态（pending/running/done）和当前活跃数，结束后只留摘要。
+`subagent` 默认**不**把内部轨迹打出来：先打一行「N 个子代理在跑」，过程藏起来，右下角 HUD 显示 `子代理 n/m 在跑`（`src/subagent-ui.ts`）。`/seesubagent` 列出，`/seesubagent [序号]` 看某一个的过程，`/seesubagent off` 取消盯着。explorer 并行、worker 串行。结束后 HUD 消失，父代理只拿到摘要。
 
 ## 其它内联提示
 

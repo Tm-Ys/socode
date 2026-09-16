@@ -36,7 +36,7 @@ CLI --mode long / /mode long / /mode 长程
               （不新增表；和【harness mode】一样活在对话里）
 ```
 
-会话切换、`/compress`、`replaceMessages` 都能带上最新 TaskState：压缩时会把最新 harness mode 和 TaskState **钉在 keep 区**，不让摘要把目标吃掉。
+会话切换、`/compress`、`replaceMessages` 都能带上最新 TaskState：压缩时会把最新 harness mode、TaskState 和 plan **钉在 keep 区**，不让摘要把目标吃掉。
 
 ## TaskState
 
@@ -133,10 +133,16 @@ Long **不会**：
 
 ## 压缩 / 预算 / 检查点
 
-- 压缩器：`src/compress.ts` 的 LLM 摘要，保留最近两轮用户对话。系统提示钉在前缀里不参与摘要。
-- 触发：Long 每轮开始前看 `measureContext`；**工具步之间**上下文到约 82% 预算时也会压，压完再继续。压不动或仍超限才停并留检查点。
-- 预算停：`budgetStopReason`（累计 API usage、估算上下文、步数）。token 预算满仍立刻停（压缩省不了已花掉的 usage）。
+- 压缩器：`src/compress.ts` 的 LLM 摘要。用户手动 `/compress` 仍按用户轮切；Long 循环内和 `context_compress` 按 **ReAct 步**切，钉住 harness mode / TaskState / Plan，丢掉 `【turn budget】` 瞬时提醒。
+- 触发：Long 每轮开始前看 `measureContext`；**工具步之间**上下文到约 82% 预算时也会压；模型也可调用 `context_compress`（节流：刚压过不能连着压）。压不动或仍超限才停并留检查点。
+- 步数预算（More with Less）：默认 **Dynamic P50→P75**（`--steps` 80 → 先 40，有进展才一次加到 60）。每步工具后注入 `【turn budget】You have X turns left`（不入库用户回复）。延期门比论文严：本段要有成功写入 / 里程碑前进 / 验证命令通过，且非 doom、非纯 read。Token / 上下文预算仍硬停。`LONG_BUDGET_POLICY=fixed|unlimited` 可关延期。
 - 检查点消息前缀：`【checkpoint】`。TaskState 本身才是可恢复的机器状态。
+
+## Long 子代理与里程碑门
+
+Long 推荐 `localize` / `edit` / `verify`（Ask/Full 仍可用 explorer/worker）。localize 并行上限 2；edit/worker 串行；verify 等写入完成后再跑。子代理最终应回 JSON；verify 的 `ok` 由 bash 退出码覆盖。`add_done` 仍强制跑 `verifyCommands`；若会话挂了评分器（`src/long-rubric.ts`），还要通过 fail-closed 的仓库接地 rubric（四轴、权重 3 必须全过、加权 ≥ 0.7）。
+
+设计以本文件的已实现行为为准。
 
 ## 怎么试
 
@@ -147,14 +153,15 @@ npm start -- --mode long
 # /task goal 把 Ask/Full/Plan 的模式体系补上 Long
 ```
 
-环境变量：`MODE=long`。可选 `MAX_AGENT_TOKENS`、`--budget`、已有的 `--steps`、`LONG_APPROVE_MODEL` / `JUDGE_MODEL`。
+环境变量：`MODE=long`。可选 `MAX_AGENT_TOKENS`、`--budget`、已有的 `--steps`、`LONG_APPROVE_MODEL` / `JUDGE_MODEL`、`LONG_BUDGET_POLICY`（`dynamic` / `fixed` / `unlimited`）、`LONG_BUDGET_DYNAMIC`（`50-75` 或 `25-50`）。
 
 ## 阶段
 
 1. **本 PR（MVP）** 模式注册、TaskState、只读预授权、Long 独有 LLM 审批副作用、自动压缩钩子、预算停、`/task`、文档与测试。
 2. **更强本地检测** 继续收紧 symlink / bash 只读误判等 P0，减少审批器需要看见的危险请求。
-3. **循环内压缩** 已做：工具步之间调用现有 compress，压不动再停。
-4. **更强验证** 已做：里程碑写入 done 时强制跑 `verifyCommands`（测试/类型检查白名单 + 沙箱 + 硬拒绝，不经审批器），失败则撤回 done、写入 failures 并停手。
+3. **循环内压缩** 已做：工具步之间调用 compress（Long 按 ReAct 步）；另有 `context_compress` 工具。
+4. **更强验证** 已做：里程碑 `add_done` 强制 `verifyCommands`；可选 Agentic Rubric 合取；verify 子代理退出码覆盖 `ok`。
+5. **动态步数预算** 已做：默认 Dynamic P50→P75 + reminder + 严 `shouldExtend`。
 
 ## 非目标
 
