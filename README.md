@@ -35,6 +35,8 @@ Long 的审批器拿一份干净上下文、只输出 JSON；解析失败、超�
 
 **小到能审。** 大约 50 个 TypeScript 文件、运行时依赖只有 `pg`。权限、沙箱、Long 审批、MCP、Skills、压缩、验证、子代理、计划、recap 都有测试（`npm test`）。策略写在代码里，不藏在框架配置后面。
 
+要达到「敢当日常主力」还缺什么、90 天建议先做什么，见 [`docs/PRODUCT-ROADMAP.md`](docs/PRODUCT-ROADMAP.md)。那份文档只写差距与验收，不改产品代码。
+
 ## 安装
 
 需要 Node 22+ 和 PostgreSQL。
