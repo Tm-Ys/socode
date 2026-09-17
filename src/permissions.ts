@@ -146,7 +146,7 @@ async function authorizeInner(
     return `${hooks?.role} 子代理是只读的，不能写或删文件`;
   }
 
-  if (name === "read" || name === "search") {
+  if (name === "read" || name === "search" || name === "glob") {
     const path = realExistingPath(str(args, name === "read" ? "path" : "directory"));
     const blocked = denyReason(path);
     if (blocked) return blocked;
@@ -161,7 +161,7 @@ async function authorizeInner(
     return await decide(current, workspace, grants, {
       op: writeKind(path),
       path,
-      detail: displayPath(workspace, path),
+      detail: name === "edit" ? editPreview(workspace, path, args) : displayPath(workspace, path),
       tool: name,
       args,
       tasks,
@@ -339,6 +339,14 @@ function str(args: Record<string, unknown>, key: string) {
 
 function clip(text: string, max: number) {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+function editPreview(workspace: string, path: string, args: Record<string, unknown>) {
+  const where = displayPath(workspace, path);
+  const oldText = typeof args.old_string === "string" ? args.old_string.replace(/\s+/g, " ").trim() : "";
+  const newText = typeof args.new_string === "string" ? args.new_string.replace(/\s+/g, " ").trim() : "";
+  if (!oldText) return where;
+  return `${where}  ${clip(oldText, 40)} → ${clip(newText, 40)}`;
 }
 
 function summarize(name: string, args: Record<string, unknown>) {

@@ -20,19 +20,38 @@ describe("slash menu layout", () => {
 describe("prompt status", () => {
   it("joins model and thinking effort", () => {
     assert.equal(promptStatusLine("deepseek-flash", "medium"), "deepseek-flash · medium");
+    assert.equal(
+      promptStatusLine("deepseek-flash", "medium", { session: "new" }),
+      "deepseek-flash · medium · new",
+    );
+    assert.equal(
+      promptStatusLine("deepseek-flash", "medium", { session: "初次问候与询问需求" }),
+      "deepseek-flash · medium · 初次问候与询问需求",
+    );
     assert.match(paintPromptStatus("deepseek-flash · medium", true), /\x1b\[38;5;208mdeepseek-flash · medium\x1b\[0m/);
     assert.equal(paintPromptStatus("deepseek-flash · medium", false), "deepseek-flash · medium");
   });
 
   it("right-aligns context occupancy on the model line", () => {
     const line = promptStatusLine("deepseek-flash", "medium", {
+      session: "new",
       context: "context 5%(6.4K / 128K)",
       columns: 60,
     });
-    assert.equal(line.length, 60);
-    assert.ok(line.startsWith("deepseek-flash · medium"));
+    assert.ok(line.length < 60);
+    assert.ok(line.startsWith("deepseek-flash · medium · new"));
     assert.ok(line.endsWith("context 5%(6.4K / 128K)"));
-    assert.match(line, /medium {2,}context/);
+    assert.match(line, /new {2,}context/);
+  });
+
+  it("leaves a margin so the terminal does not wrap the status row", () => {
+    const line = promptStatusLine("deepseek-flash", "medium", {
+      context: "context 0%(4.5K / 1M)",
+      columns: 80,
+    });
+    assert.ok(line.length <= 78);
+    assert.ok(line.startsWith("deepseek-flash · medium"));
+    assert.ok(line.endsWith("context 0%(4.5K / 1M)"));
   });
 });
 

@@ -89,7 +89,7 @@ export function modeHint(mode: AgentMode) {
 
 export function modeRules(mode: AgentMode) {
   if (mode === "plan") {
-    return "你只能阅读代码、拟定计划和向用户提问，不能改文件、不能创建/删除文件、不能运行有副作用的命令。可用 `read` / `search` / `calculate` / `get_current_time` / `plan` / `question`。把步骤写成计划，等用户 `/mode ask`、`/mode long` 或 `/mode full` 后再动手。";
+    return "你只能阅读代码、拟定计划和向用户提问，不能改文件、不能创建/删除文件、不能运行有副作用的命令。可用 `read` / `search` / `glob` / `calculate` / `get_current_time` / `plan` / `question`。把步骤写成计划，等用户 `/mode ask`、`/mode long` 或 `/mode full` 后再动手。";
   }
   if (mode === "full") {
     return "可以直接在工作区写文件和执行命令。不要碰系统目录和密钥文件。破坏性操作前仍要确认用户意图。";
@@ -97,8 +97,8 @@ export function modeRules(mode: AgentMode) {
   if (mode === "long") {
     return [
       "当前是 Long（长程）模式：面向多步骤、跨压缩的长任务。",
-      "权限与 Ask 同类边界，不是 Full：工作区内 `read` / `search` 自动允许。创建/修改/删除、git、网络、解释器由独立的 Long 审批 LLM 决定（干净上下文、只输出 JSON），不是对用户 y/n，也不是盲目放行。密钥、工作区外、sudo 仍本地硬拒绝。被拒绝后不要换一种方式硬做。",
-      "先 search 再 read，再做小范围编辑。每完成一个里程碑，harness 会强制跑已记录的 verifyCommands（仅测试/类型检查，不是任意 bash）；失败则撤回 done 并写入 failures，必须停手。",
+      "权限与 Ask 同类边界，不是 Full：工作区内 `read` / `search` / `glob` 自动允许。创建/修改/删除、git、网络、解释器由独立的 Long 审批 LLM 决定（干净上下文、只输出 JSON），不是对用户 y/n，也不是盲目放行。密钥、工作区外、sudo 仍本地硬拒绝。被拒绝后不要换一种方式硬做。",
+      "先 glob/search 再 read，再做小范围编辑。每完成一个里程碑，harness 会强制跑已记录的 verifyCommands（仅测试/类型检查，不是任意 bash）；失败则撤回 done 并写入 failures，必须停手。",
       "不要空转：同一工具连续失败就停下来改方法。上下文变挤时系统会自动 /compress；你只需在摘要后继续当前目标，不要重做已完成项。",
       "步数或 token 预算用尽时会保存检查点。用户下一轮同一会话即可接着做，不要假装任务已经全部完成。",
     ].join("");

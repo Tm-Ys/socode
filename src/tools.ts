@@ -2,6 +2,7 @@ import { isTurnAborted, throwIfAborted, TurnAborted } from "./abort.js";
 import {
   deleteAbsoluteFile,
   editAbsoluteFile,
+  globAbsoluteDir,
   readAbsoluteFile,
   requireAbsolutePath,
   runBash,
@@ -143,12 +144,12 @@ const tools: Tool[] = [
   {
     name: "edit",
     description:
-      "在已有文件里替换一段精确文本。old_string 必须在文件中唯一（或设 replace_all）。改已有文件优先用 edit，不要整文件 write。",
+      "在已有文件里替换一段文本。优先精确匹配；缩进或换行不一致时会再试一次。old_string 必须唯一（或设 replace_all）。改已有文件用 edit，不要整文件 write。结果含实际 diff。",
     parameters: {
       type: "object",
       properties: {
         path: { type: "string", description: "绝对文件路径" },
-        old_string: { type: "string", description: "文件中要被替换的原文，必须精确匹配" },
+        old_string: { type: "string", description: "文件中要被替换的原文" },
         new_string: { type: "string", description: "替换后的文本，可为 empty 表示删除该段" },
         replace_all: { type: "boolean", description: "为 true 时替换全部出现处" },
       },
@@ -206,6 +207,22 @@ const tools: Tool[] = [
     execute: async (args, signal) => {
       const glob = typeof args.glob === "string" && args.glob.trim() ? args.glob.trim() : undefined;
       return await searchAbsoluteDir(str(args, "directory"), str(args, "pattern"), glob, signal);
+    },
+  },
+  {
+    name: "glob",
+    description: "按文件名模式列出工作区内的文件。directory 必须是已存在的绝对目录。pattern 例如 *.ts 或 src*.json。",
+    parameters: {
+      type: "object",
+      properties: {
+        directory: { type: "string", description: "绝对目录路径" },
+        pattern: { type: "string", description: "可选文件名 glob，例如 *.ts。省略则列出全部文件。" },
+      },
+      required: ["directory"],
+    },
+    execute: async (args, signal) => {
+      const pattern = typeof args.pattern === "string" && args.pattern.trim() ? args.pattern.trim() : undefined;
+      return await globAbsoluteDir(str(args, "directory"), pattern, signal);
     },
   },
   {
@@ -323,7 +340,7 @@ const tools: Tool[] = [
   },
 ];
 
-const READ_TOOLS = new Set(["read", "search", "calculate", "get_current_time"]);
+const READ_TOOLS = new Set(["read", "search", "glob", "calculate", "get_current_time"]);
 
 export function toolSpecs(
   mode?: AgentMode,

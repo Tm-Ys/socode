@@ -9,6 +9,10 @@ export function isDefaultTitle(title: string) {
   return !text || text === DEFAULT_TITLE;
 }
 
+export function statusSessionLabel(title: string) {
+  return isDefaultTitle(title) ? "new" : title.trim();
+}
+
 export function displayTitle(row: { title: string; first_user?: string | null }) {
   if (!isDefaultTitle(row.title)) return row.title.trim();
   const first = row.first_user?.replace(/\s+/g, " ").trim() ?? "";

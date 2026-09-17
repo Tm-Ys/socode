@@ -42,7 +42,7 @@ export function buildSubagentPrompt(workspace: string, kind: SubagentKind) {
 
 # 约束
 
-- 可用工具：\`read\`、\`search\`、\`calculate\`、\`get_current_time\`。path / directory 必须是绝对路径，以 \`${workspace}/\` 为前缀。
+- 可用工具：\`read\`、\`search\`、\`glob\`、\`calculate\`、\`get_current_time\`。path / directory 必须是绝对路径，以 \`${workspace}/\` 为前缀。
 - 没有父对话。缺的信息自己查。不能调用 \`subagent_plan\` / \`subagent\` / \`task_state\` / \`context_compress\`。
 - 最终只输出一个 JSON 对象，不要前后文：
 ${json}`;
@@ -52,7 +52,7 @@ ${json}`;
 
 # 约束
 
-- 可用工具：\`read\`、\`search\`、\`bash\`（仅测试命令，如 npm test / npx tsc）。cwd 必须是 \`${workspace}\`。
+- 可用工具：\`read\`、\`search\`、\`glob\`、\`bash\`（仅测试命令，如 npm test / npx tsc）。cwd 必须是 \`${workspace}\`。
 - 没有父对话。不能再开子代理，不能标里程碑 done。
 - 最终只输出一个 JSON 对象：
 ${json}
@@ -62,7 +62,7 @@ ok 必须与命令退出码一致，你不能嘴炮通过。`;
 
 # 约束
 
-- 可用工具：\`read\`、\`write\`、\`edit\`、\`delete\`、\`bash\`、\`search\`、\`calculate\`、\`get_current_time\`。path / cwd 必须是绝对路径，以 \`${workspace}/\` 为前缀。
+- 可用工具：\`read\`、\`write\`、\`edit\`、\`delete\`、\`bash\`、\`search\`、\`glob\`、\`calculate\`、\`get_current_time\`。path / cwd 必须是绝对路径，以 \`${workspace}/\` 为前缀。
 - 没有父对话。不能再开子代理。写入仍走父级 Long 审批（若在 Long）。
 - 最终只输出一个 JSON 对象：
 ${json}`;

@@ -1,0 +1,72 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { formatBanner, pickWelcome, WELCOME_LINES } from "./banner.js";
+
+describe("welcome lines", () => {
+  it("has a large pool and always picks one of them", () => {
+    assert.ok(WELCOME_LINES.length >= 40);
+    assert.equal(pickWelcome(() => 0), WELCOME_LINES[0]);
+    assert.equal(pickWelcome(() => 0.999), WELCOME_LINES[WELCOME_LINES.length - 1]);
+    for (let i = 0; i < 20; i += 1) {
+      assert.ok(WELCOME_LINES.includes(pickWelcome(() => (i + 0.5) / 20)));
+    }
+  });
+});
+
+describe("formatBanner", () => {
+  it("shows a boxed welcome without dumping every command", () => {
+    const text = formatBanner({
+      workspace: "/Users/me/projects/socode",
+      title: "新会话",
+      mode: "ask",
+      welcome: "先读再改。猜出来的补丁最贵。",
+      width: 56,
+      color: false,
+    });
+    assert.match(text, /╭─ socode/);
+    assert.match(text, /先读再改/);
+    assert.match(text, /Ask · 新会话/);
+    assert.match(text, /\/ 看命令/);
+    assert.doesNotMatch(text, /\/provider/);
+    assert.doesNotMatch(text, /工具步数/);
+    assert.doesNotMatch(text, /MCP/);
+  });
+
+  it("keeps the box edges aligned", () => {
+    const text = formatBanner({
+      workspace: "/tmp/demo",
+      title: "新会话",
+      mode: "ask",
+      welcome: "Ask 一声，总比 Full 后悔轻。",
+      width: 56,
+      color: false,
+    });
+    const rows = text.split("\n").filter((line) => line.startsWith("╭") || line.startsWith("│") || line.startsWith("╰"));
+    const widths = rows.map((line) => displayWidth(line));
+    assert.ok(widths.length > 2);
+    assert.ok(widths.every((width) => width === widths[0]), String(widths));
+  });
+
+  it("only mentions MCP when tools are loaded", () => {
+    const text = formatBanner({
+      workspace: "/tmp/demo",
+      mode: "plan",
+      welcome: "hi",
+      mcpCount: 3,
+      width: 48,
+      color: false,
+    });
+    assert.match(text, /MCP 3 个工具/);
+    assert.match(text, /Plan · 新会话/);
+  });
+});
+
+function displayWidth(text: string) {
+  let width = 0;
+  for (const char of text) {
+    const cp = char.codePointAt(0) ?? 0;
+    if (char === "·" || char === "…" || cp <= 127 || (cp >= 0x2500 && cp <= 0x259f)) width += 1;
+    else width += 2;
+  }
+  return width;
+}

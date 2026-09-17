@@ -113,6 +113,26 @@ export function applyModelPickKey(state: ModelPickState, raw: string) {
   return { type: "state" as const, state };
 }
 
+export function applyProviderListKey(selected: number, total: number, raw: string) {
+  const key = raw === "\r\n" || raw === "\n" ? "\r" : raw;
+  if (key === "\x1b" || key === "\x1b\x1b") return { type: "cancel" as const };
+  if (key === "\r") return { type: "switch" as const };
+  if (key === "e" || key === "E") return { type: "edit" as const };
+  if (key === "n" || key === "N") return { type: "new" as const };
+  if (key === "\x1b[B" || key === "j" || key === "\x1b[C" || key === "l") {
+    return { type: "index" as const, index: wrapIndex(selected + 1, Math.max(1, total)) };
+  }
+  if (key === "\x1b[A" || key === "k" || key === "\x1b[D" || key === "h") {
+    return { type: "index" as const, index: wrapIndex(selected - 1, Math.max(1, total)) };
+  }
+  const digit = /^[1-9]$/.exec(key);
+  if (digit) {
+    const index = Number(digit[0]) - 1;
+    if (index < total) return { type: "index" as const, index };
+  }
+  return { type: "index" as const, index: selected };
+}
+
 export function applyEffortKey(selected: number, total: number, raw: string) {
   const key = raw === "\r\n" || raw === "\n" ? "\r" : raw;
   if (key === "\x1b" || key === "\x1b\x1b") return { type: "cancel" as const };

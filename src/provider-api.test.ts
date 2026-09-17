@@ -3,13 +3,14 @@ import { describe, it } from "node:test";
 import {
   applyEffortKey,
   applyModelPickKey,
+  applyProviderListKey,
   createModelPickState,
   currentModelPick,
   defaultEffortIndex,
   modelsUrl,
   parseModelCatalog,
 } from "./provider-api.js";
-import { formatEffortFrame, formatModelFrame } from "./select-ui.js";
+import { formatEffortFrame, formatModelFrame, formatProviderListFrame } from "./select-ui.js";
 import type { Provider } from "./provider.js";
 
 const deepseek: Provider = {
@@ -101,6 +102,22 @@ describe("model pick", () => {
     const frame = formatModelFrame(state);
     assert.match(frame, /\[deepseek\]/);
     assert.match(frame, /\[deepseek-flash\]/);
+    const list = formatProviderListFrame([deepseek, other], 1, "deepseek");
+    assert.match(list, /\* deepseek/);
+    assert.match(list, /> {2}deepseek-reasoner/);
+    assert.match(list, /enter 切换/);
+  });
+});
+
+describe("provider list keys", () => {
+  it("switches, edits, or creates from the saved list", () => {
+    assert.equal(applyProviderListKey(0, 2, "\r").type, "switch");
+    assert.equal(applyProviderListKey(0, 2, "e").type, "edit");
+    assert.equal(applyProviderListKey(0, 2, "n").type, "new");
+    assert.equal(applyProviderListKey(0, 2, "\x1b").type, "cancel");
+    assert.deepEqual(applyProviderListKey(0, 2, "\x1b[B"), { type: "index", index: 1 });
+    assert.deepEqual(applyProviderListKey(0, 2, "\x1b[A"), { type: "index", index: 1 });
+    assert.deepEqual(applyProviderListKey(0, 2, "2"), { type: "index", index: 1 });
   });
 });
 

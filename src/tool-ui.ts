@@ -24,6 +24,11 @@ export function summarizeTool(name: string, rawArgs: string) {
       const dir = shortPath(str(args.directory));
       return dir ? `${pattern}  ${dir}` : pattern;
     }
+    case "glob": {
+      const pattern = str(args.pattern) || "*";
+      const dir = shortPath(str(args.directory));
+      return dir ? `${pattern}  ${dir}` : pattern;
+    }
     case "calculate":
       return str(args.expression);
     case "get_current_time":

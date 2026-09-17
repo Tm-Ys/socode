@@ -4,10 +4,11 @@ import { displayRows, rewindLive, useColor } from "./markdown.js";
 import {
   applyEffortKey,
   applyModelPickKey,
+  applyProviderListKey,
   currentModelPick,
   type ModelPickState,
 } from "./provider-api.js";
-import type { ThinkingEffort } from "./provider.js";
+import type { Provider, ThinkingEffort } from "./provider.js";
 
 const HIDE_CURSOR = "\x1b[?25l";
 const SHOW_CURSOR = "\x1b[?25h";
@@ -55,6 +56,37 @@ export async function pickProviderModel(state: ModelPickState): Promise<{ provid
   return { providerName: picked.provider.name, model: picked.model };
 }
 
+export async function pickSavedProvider(params: {
+  providers: Provider[];
+  selected: number;
+  activeName?: string;
+}): Promise<{ action: "switch" | "edit" | "new"; index: number } | undefined> {
+  let selected = params.providers.length
+    ? Math.max(0, Math.min(params.selected, params.providers.length - 1))
+    : 0;
+  let action: "switch" | "edit" | "new" = "switch";
+  const ok = await runSelectLoop({
+    render: (color) => formatProviderListFrame(params.providers, selected, params.activeName, color),
+    onKey: (key) => {
+      const result = applyProviderListKey(selected, params.providers.length, key);
+      if (result.type === "cancel") return "cancel";
+      if (result.type === "new") {
+        action = "new";
+        return "submit";
+      }
+      if (result.type === "switch" || result.type === "edit") {
+        if (!params.providers.length) return "redraw";
+        action = result.type;
+        return "submit";
+      }
+      selected = result.index;
+      return "redraw";
+    },
+  });
+  if (!ok) return undefined;
+  return { action, index: selected };
+}
+
 export function formatEffortFrame(efforts: ThinkingEffort[], selected: number, hint = "", color = false) {
   const yellow = color ? YELLOW : "";
   const bold = color ? BOLD : "";
@@ -96,6 +128,37 @@ export function formatModelFrame(state: ModelPickState, color = false) {
     "",
     `  ${dim}←→ 切换提供商   ↑↓ 切换模型   enter 确认   esc 取消${reset}`,
   ];
+  return lines.join("\n");
+}
+
+export function formatProviderListFrame(
+  providers: Provider[],
+  selected: number,
+  activeName = "",
+  color = false,
+) {
+  const yellow = color ? YELLOW : "";
+  const bold = color ? BOLD : "";
+  const dim = color ? DIM : "";
+  const cyan = color ? CYAN : "";
+  const reset = color ? RESET : "";
+  const lines = [
+    `${yellow}? Provider${reset}  ${dim}已保存的适配${reset}`,
+    "",
+  ];
+  if (!providers.length) {
+    lines.push(`  ${dim}（还没有保存的 Provider）${reset}`);
+  } else {
+    const nameWidth = Math.max(...providers.map((item) => item.name.length), 8);
+    for (const [index, item] of providers.entries()) {
+      const arrow = index === selected ? ">" : " ";
+      const current = item.name === activeName ? "*" : " ";
+      const label = `${arrow}${current} ${item.name.padEnd(nameWidth)}  ${item.model}`;
+      lines.push(index === selected ? `  ${bold}${cyan}${label}${reset}` : `  ${dim}${label}${reset}`);
+    }
+  }
+  lines.push("");
+  lines.push(`  ${dim}↑↓ 选择   enter 切换   e 编辑   n 新增   esc 取消${reset}`);
   return lines.join("\n");
 }
 

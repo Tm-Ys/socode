@@ -28,6 +28,8 @@ describe("task_state tool", () => {
     assert.equal(names.includes("edit"), false);
     assert.equal(names.includes("bash"), false);
     assert.equal(names.includes("read"), true);
+    assert.equal(names.includes("search"), true);
+    assert.equal(names.includes("glob"), true);
     assert.equal(names.includes("plan"), true);
     assert.equal(names.includes("question"), true);
   });
@@ -108,7 +110,7 @@ describe("subagent tools", () => {
     assert.equal(toolSpecs("plan").some((tool) => tool.name === "subagent"), false);
     assert.equal(toolSpecs("ask", { nested: true }).some((tool) => tool.name === "subagent"), false);
     const explorer = toolSpecs("ask", { nested: true, role: "explorer" }).map((tool) => tool.name);
-    assert.deepEqual(explorer.sort(), ["calculate", "get_current_time", "read", "search"]);
+    assert.deepEqual(explorer.sort(), ["calculate", "get_current_time", "glob", "read", "search"]);
     const verify = toolSpecs("long", { nested: true, role: "verify" }).map((tool) => tool.name);
     assert.equal(verify.includes("bash"), true);
     assert.equal(verify.includes("write"), false);

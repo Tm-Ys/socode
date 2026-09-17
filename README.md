@@ -37,6 +37,8 @@ Long 的审批器拿一份干净上下文、只输出 JSON；解析失败、超�
 
 **小到能审。** 大约 50 个 TypeScript 文件、运行时依赖只有 `pg`。权限、沙箱、Long 审批、预算、rubric、MCP、Skills、压缩、验证、子代理、计划、问卷、recap 都有测试（`npm test`）。策略写在代码里，不藏在框架配置后面。
 
+要达到「敢当日常主力」还缺什么、90 天建议先做什么，见 [`docs/PRODUCT-ROADMAP.md`](docs/PRODUCT-ROADMAP.md)。
+
 ## 安装
 
 需要 Node 22+ 和 PostgreSQL。
@@ -103,7 +105,7 @@ Long **不会**在沙箱起不来时 fallback 裸跑，也**不会**把本地已
 
 输入 `/` 后会按前缀提示，Tab 补全。
 
-- `/provider` 查看当前适配；`/provider edit` 按字段编辑；`/provider list` 列出；`/provider <name>` 切换；`/provider new` 按字段新增（不套用当前值）
+- `/provider` 列出已保存的适配，enter 切换、`e` 编辑、`n` 新增；`/provider show` 查看当前；`/provider edit [name]` 按字段编辑（回车保留当前值）；`/provider list` 列出；`/provider <name>` 切换；`/provider new` 按字段新增
 - `/model` 在已保存的 Provider 和模型之间切换（←→ 提供商，↑↓ 模型）
 - `/effort` 先从 API 读取思考强度，再用方向键调整（默认 medium）
 - `/new` 开新会话（空的不入库）
@@ -126,8 +128,9 @@ Long **不会**在沙箱起不来时 fallback 裸跑，也**不会**把本地已
 
 | 工具 | 作用 |
 | --- | --- |
-| `read` / `write` / `edit` / `delete` | 绝对路径读写删（delete 只删文件；write 覆盖整文件；edit 替换一段） |
-| `search` | 目录内正则搜索，可 glob |
+| `read` / `write` / `edit` / `delete` | 绝对路径读写删（delete 只删文件；write 原子覆盖整文件；edit 替换一段，容忍行尾空白/换行，结果带回 diff） |
+| `search` | 目录内正则搜索，可按文件名 glob |
+| `glob` | 按文件名模式列出文件；跳过 `node_modules` / `.git` 等 |
 | `bash` | 绝对 cwd 下执行，30s 超时，Ask/Long 套 OS 沙箱 |
 | `calculate` / `get_current_time` | 纯本地，不走权限询问 |
 | `task_state` | 仅 Long：更新 goal / milestones / done / keyFiles / verifyCommands；写入 done 时强制跑验证，并可再过 rubric |
@@ -137,7 +140,7 @@ Long **不会**在沙箱起不来时 fallback 裸跑，也**不会**把本地已
 | `context_compress` | 仅 Long：把较早 ReAct 步折成摘要（节流，不能连着压） |
 | `mcp__…` | 来自 `.mcp.json` 的外部 MCP 工具 |
 
-路径、`cwd`、`search` 的 `directory` 必须是绝对路径。
+路径、`cwd`、`search` / `glob` 的 `directory` 必须是绝对路径。
 
 MCP 配置（`~/.socode/mcp.json` 先加载，项目 `.socode/mcp.json` / `.mcp.json` 覆盖同名）：
 
@@ -193,7 +196,8 @@ Skills 来自各目录下的 `<name>/SKILL.md`（YAML frontmatter 的 `name` / `
 | `src/mcp.ts` | stdio MCP hub |
 | `src/skills.ts` / `src/skill-activate.ts` | 说明文件、Skills、按轮激活 |
 | `src/chat.ts` / `src/provider.ts` | OpenAI 兼容流式、多 Provider |
-| `src/provider-api.ts` / `src/select-ui.ts` | `/effort` `/model`：读 `/models`、方向键选择 |
+| `src/provider-api.ts` / `src/select-ui.ts` | `/effort` `/model` `/provider`：读 `/models`、方向键选择 |
+| `src/banner.ts` | 启动欢迎框与随机欢迎语 |
 | `src/think.ts` / `src/markdown.ts` | 思考块拆分、轻量 Markdown → TUI ANSI |
 | `src/recap.ts` | 长轮次灰色回顾；触发后历史只留 recap |
 | `src/db.ts` | PostgreSQL 自动建库与迁移；空会话不入库 |

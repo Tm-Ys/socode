@@ -5,7 +5,7 @@ export const TURN_BUDGET_PREFIX = "【turn budget】";
 
 export const LONG_BUDGET_FAIL_RATIO = 0.5;
 export const LONG_BUDGET_MAX_EXTEND = 1;
-const READ_TOOLS = new Set(["read", "search", "get_current_time", "calculate", "context_compress"]);
+const READ_TOOLS = new Set(["read", "search", "glob", "get_current_time", "calculate", "context_compress"]);
 
 export type LongBudgetPolicyName = "unlimited" | "fixed" | "dynamic";
 

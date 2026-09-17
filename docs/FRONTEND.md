@@ -2,29 +2,29 @@
 
 socode 没有 web 界面。所谓前端就是终端里的这一层 TUI：全是拼 ANSI 转义序列手写出来的，没有 React/Ink 之类的框架。
 
-对照实现：`src/index.ts`（主循环、启动横幅、事件渲染）、`src/markdown.ts`（流式 Markdown）、`src/think.ts`（思考块拆分）、`src/tool-ui.ts`（工具调用/结果行）、`src/prompt.ts`（输入行与补全）、`src/mode.ts`（模式着色）、`src/subagent-ui.ts`（子代理进度条）、`src/question.ts` / `src/question-ui.ts`（问卷）、`src/select-ui.ts`（`/effort` `/model` 方向键选择）。
+对照实现：`src/index.ts`（主循环、启动横幅、事件渲染）、`src/banner.ts`（欢迎框）、`src/markdown.ts`（流式 Markdown）、`src/think.ts`（思考块拆分）、`src/tool-ui.ts`（工具调用/结果行）、`src/prompt.ts`（输入行与补全）、`src/mode.ts`（模式着色）、`src/subagent-ui.ts`（子代理进度条）、`src/question.ts` / `src/question-ui.ts`（问卷）、`src/select-ui.ts`（`/effort` `/model` `/provider` 方向键选择）。
 
 ## 启动
 
-`npm start` 后先打一段横幅：
+`npm start` 后先打一块欢迎框，每次从一池欢迎语里抽一句：
 
 ```
-工作目录: /Users/lively/projects/socode
-会话: 新会话
-编号: 尚未保存
-Provider: <name>  模型: <model>
-上下文: 128000  最大输出: 8192  思考: medium
-流式: 开  Agent: 开  工具步数: 12
-模式: socoding on ask mode  <模式说明>
-/new 新会话  /session 恢复  ...  /quit 退出
-输入 / 后会按前缀提示命令，Tab 补全。生成中 Esc 中止当前轮，Ctrl+C 按两次退出。
+╭─ socode ──────────────────────────────────────╮
+│                                               │
+│  先读再改。猜出来的补丁最贵。                   │
+│                                               │
+│  ~/projects/socode                            │
+│  Ask · 新会话                                 │
+│                                               │
+╰───────────────────────────────────────────────╯
+  / 看命令 · Esc 中止 · Ctrl+C 两次退出
 ```
 
-模式名按权限模式着色（`src/mode.ts`）。
+模型、思考强度、会话名、上下文占用在输入行下面，不在启动页重复。没对话时是 `deepseek-flash · medium · new`，有标题后变成 `deepseek-flash · medium · 标题`，右边对齐 `context 5%(6.4K / 128K)`。命令清单改成输入 `/` 再补全。模式名按权限模式着色（`src/mode.ts`）。实现：`src/banner.ts`。
 
 ## 一轮对话
 
-用户输入提示符是 `ask mode>`（随权限模式着色），空输入时同一行暗色占位 `on ~/path`。下一行橙色：左边 `deepseek-flash · medium`，右边对齐 `context 5%(6.4K / 128K)`，数字和 `/context` 同一套计量。助手回复有前缀 `socoding on <mode> mode `，前缀颜色随模式变。
+用户输入提示符是 `ask mode>`（随权限模式着色），空输入时同一行暗色占位 `on ~/path`。下一行橙色：左边 `deepseek-flash · medium · new`（有对话名则换成标题），右边对齐 `context 5%(6.4K / 128K)`，数字和 `/context` 同一套计量。发出消息后、模型还没吐字时，当前行画 npm 式加载：绿色 braille 转圈 + 来回滑动的 `█` 条 + 暗色 `socoding`（`src/load-ui.ts`）。首个思考 / 正文 / 工具调用到来时擦掉；工具结果之后再等模型会重新转。助手回复有前缀 `socoding on <mode> mode `，前缀颜色随模式变。不会再单独打一行 `会话: …`。
 
 流式输出走 `paintMarkdownDelta`：每收到一个正文 delta，把已累积的原文重新渲染成带色 Markdown，用 `\r` + `\x1b[<n>A` + `\x1b[J` 把上一帧擦掉再重画。行数与宽度按 `displayRows`/`visibleWidth` 算，中日韩字符按 2 列宽。非 TTY（管道、重定向）时退化成纯文本直接追加，不重绘。
 
@@ -40,7 +40,7 @@ Mini Markdown 支持：`#` 标题、``` 代码块（暗青色）、`>` 引用、
   ● bash  rg -n "foo" src
 ```
 
-`●` 青色加粗，工具名加粗，参数是暗色的摘要——`read/write/edit/delete` 只显示短路径（相对 cwd 或 `~`），`bash` 显示截断到 72 列的命令，`search` 显示 pattern + 目录（`src/tool-ui.ts`）。
+`●` 青色加粗，工具名加粗，参数是暗色的摘要——`read/write/edit/delete` 只显示短路径（相对 cwd 或 `~`），`bash` 显示截断到 72 列的命令，`search` / `glob` 显示 pattern + 目录（`src/tool-ui.ts`）。Ask 审批 `edit` 时详情里带一小段 `原文 → 替换`。
 
 结果最多回显 3 行、缩进 4 空格、暗色；超出的折叠成 `… +N 行`。判定为失败的（`工具执行失败`/`权限拒绝`/非零 `exit=` 等）整段转红。`plan` 例外：完整框起来的进度板直接打出来，不截三行。
 
@@ -126,6 +126,19 @@ Ask 模式下，写文件或跑命令前弹一行提问，等一个按键：
 
 `/model` 只在已保存的 Provider 和模型之间选：←→ 换提供商，↑↓ 换同一 API 下已确认过的模型。
 
+`/provider` 弹出已保存列表（对标 OpenCode 的 `/connect`）：
+
+```
+? Provider  已保存的适配
+
+  >* deepseek          deepseek-flash
+     openai            gpt-5
+
+  ↑↓ 选择   enter 切换   e 编辑   n 新增   esc 取消
+```
+
+`e` 或 `/provider edit [name]` 按字段改，回车保留方括号里的当前值，不会把空输入当成清空。`n` 或 `/provider new` 是空表。多个 Provider 存在 `providers.json`。非 TTY 用 `/provider show` / `/provider list` / `/provider <name>`。
+
 ## 子代理
 
 `subagent` 默认**不**把内部轨迹打出来：先打一行「N 个子代理在跑」，过程藏起来，右下角 HUD 显示 `子代理 n/m 在跑`（`src/subagent-ui.ts`）。`/seesubagent` 列出，`/seesubagent [序号]` 看某一个的过程，`/seesubagent off` 取消盯着。explorer 并行、worker 串行。结束后 HUD 消失，父代理只拿到摘要。
@@ -135,7 +148,6 @@ Ask 模式下，写文件或跑命令前弹一行提问，等一个按键：
 - 压缩上下文时打：`压缩上下文，大约省下 N tokens`
 - 错误统一走 `err> <message>` 到 stderr
 - `/context` 打色块占用（system / tools / 对话 / 预留输出 / 空闲）；recap 过的轮次按短 recap 计 token，报告里会标 `recap N 轮`
-- 启动预览打印最近若干条，超出的折叠成 `... 更早 N 条`
 
 ## 一句话总结
 

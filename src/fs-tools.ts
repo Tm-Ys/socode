@@ -1,12 +1,14 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, open, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join } from "node:path";
 import { throwIfAborted, TurnAborted } from "./abort.js";
 import { bashSpawn, denyReason, realExistingPath, scrubEnv, shouldFallbackSandbox, type BashSandbox } from "./sandbox.js";
+import { applySnippetEdit, formatEditDiff } from "./patch.js";
 
 const MAX_READ_BYTES = 200_000;
 const MAX_OUTPUT_CHARS = 32_000;
 const MAX_SEARCH_HITS = 80;
+const MAX_GLOB = 200;
 const SKIP_DIRS = new Set([".git", "node_modules", "dist", ".next", "coverage"]);
 
 export function requireAbsolutePath(input: string, label: string) {
@@ -60,12 +62,11 @@ export async function readAbsoluteFile(path: string, offset?: number, limit?: nu
 export async function writeAbsoluteFile(path: string, content: string) {
   const file = requireAbsolutePath(path, "path");
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, content, "utf8");
+  await atomicWrite(file, content);
   return `已写入 ${file} (${Buffer.byteLength(content, "utf8")} bytes)`;
 }
 
 export async function editAbsoluteFile(path: string, oldText: string, newText: string, replaceAll = false) {
-  if (!oldText) throw new Error("old_string 不能为空");
   const file = requireAbsolutePath(path, "path");
   let info;
   try {
@@ -75,21 +76,11 @@ export async function editAbsoluteFile(path: string, oldText: string, newText: s
   }
   if (!info.isFile()) throw new Error(`path 必须是文件: ${file}`);
   const text = await readFile(file, "utf8");
-  let count = 0;
-  let from = 0;
-  while (from <= text.length) {
-    const at = text.indexOf(oldText, from);
-    if (at < 0) break;
-    count += 1;
-    from = at + Math.max(1, oldText.length);
-  }
-  if (count === 0) throw new Error("未找到要替换的文本。先 read，再提供文件里的精确片段。");
-  if (!replaceAll && count > 1) {
-    throw new Error(`找到 ${count} 处相同文本。把 old_string 写得更独特，或设 replace_all=true。`);
-  }
-  const next = replaceAll ? text.split(oldText).join(newText) : text.replace(oldText, newText);
-  await writeFile(file, next, "utf8");
-  return `已编辑 ${file}（${replaceAll ? count : 1} 处，${Buffer.byteLength(text)} → ${Buffer.byteLength(next)} bytes）`;
+  const result = applySnippetEdit(text, oldText, newText, replaceAll);
+  await atomicWrite(file, result.next);
+  const diff = formatEditDiff(file, text, result.next);
+  const note = result.strategy === "exact" ? "" : `，匹配=${result.strategy}`;
+  return `已编辑 ${file}（${result.count} 处${note}，${Buffer.byteLength(text)} → ${Buffer.byteLength(result.next)} bytes）\n${diff}`;
 }
 
 export async function deleteAbsoluteFile(path: string) {
@@ -103,6 +94,30 @@ export async function deleteAbsoluteFile(path: string) {
   if (!info.isFile()) throw new Error(`delete 只能删文件，不是目录: ${file}`);
   await unlink(file);
   return `已删除 ${file}`;
+}
+
+async function atomicWrite(file: string, content: string) {
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmp, content, "utf8");
+  try {
+    await rename(tmp, file);
+  } catch (error) {
+    await unlink(tmp).catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function globAbsoluteDir(directory: string, glob?: string, signal?: AbortSignal) {
+  const dir = await requireAbsoluteDir(directory, "directory");
+  throwIfAborted(signal);
+  const files: string[] = [];
+  await walkFiles(dir, files, 0, glob, signal);
+  files.sort();
+  const shown = files.slice(0, MAX_GLOB);
+  const extra = files.length - shown.length;
+  const body = shown.join("\n");
+  const tail = extra > 0 ? `\n... +${extra} files` : "";
+  return clip(`${body}${tail}\n(${files.length} files)`);
 }
 
 export async function runBash(
@@ -326,6 +341,7 @@ async function walkFiles(
     if (SKIP_DIRS.has(entry.name)) continue;
     const full = join(dir, entry.name);
     if (entry.isDirectory()) {
+      if (entry.name.startsWith(".")) continue;
       await walkFiles(full, files, depth + 1, glob, signal);
       continue;
     }

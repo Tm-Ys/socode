@@ -7,6 +7,7 @@ import {
   resolveCommand,
   type SlashCommand,
 } from "./commands.js";
+import { stopLoadUi } from "./load-ui.js";
 import { inputPlaceholder } from "./workarea.js";
 
 const DIM = "\x1b[2m";
@@ -48,6 +49,7 @@ export function takeForcedQuit() {
 }
 
 export function restoreTerminal() {
+  stopLoadUi();
   try {
     if (stdin.isTTY) stdin.setRawMode(false);
   } catch {
@@ -69,16 +71,18 @@ export function restoreTerminal() {
 export function promptStatusLine(
   model: string,
   effort: string,
-  opts?: { context?: string; columns?: number },
+  opts?: { context?: string; columns?: number; session?: string },
 ) {
-  const left = `${model} · ${effort}`;
+  const session = opts?.session?.trim();
+  const left = session ? `${model} · ${effort} · ${session}` : `${model} · ${effort}`;
   const right = opts?.context?.trim() ?? "";
   if (!right) return left;
   const cols = Math.max(20, opts?.columns ?? 80);
+  const width = Math.max(1, cols - 2);
   const minGap = 2;
-  const budget = cols - visibleWidth(right) - minGap;
+  const budget = width - visibleWidth(right) - minGap;
   const shownLeft = visibleWidth(left) > budget ? clipToWidth(left, Math.max(8, budget)) : left;
-  const gap = Math.max(minGap, cols - visibleWidth(shownLeft) - visibleWidth(right));
+  const gap = Math.max(minGap, width - visibleWidth(shownLeft) - visibleWidth(right));
   return `${shownLeft}${" ".repeat(gap)}${right}`;
 }
 
@@ -95,6 +99,7 @@ export async function promptYou(label = USER_PROMPT, opts?: { hint?: string; sta
   return await new Promise<string>((resolve, reject) => {
     let buffer = "";
     let inputRows = 1;
+    let extraRows = 0;
     stdin.setRawMode(true);
     stdin.resume();
 
@@ -113,11 +118,14 @@ export async function promptYou(label = USER_PROMPT, opts?: { hint?: string; sta
       disarmQuit();
       const menuOpen = buffer.startsWith("/") && matchCommands(buffer).length > 0;
       const hintShowing = Boolean(opts?.hint && !buffer);
-      const statusShowing = Boolean(opts?.status);
-      if (menuOpen || value !== buffer || hintShowing || statusShowing) {
-        inputRows = redraw(label, value, [], "", inputRows);
+      stdout.write(HIDE_CURSOR);
+      if (extraRows > 0) stdout.write(`\x1b[1B\r\x1b[2K${CLEAR_DOWN}`);
+      if (value !== buffer || hintShowing || menuOpen) {
+        stdout.write(`\x1b[1A\r${label}${value}${CLEAR_DOWN}\n`);
+      } else if (extraRows === 0) {
+        stdout.write("\n");
       }
-      stdout.write("\n");
+      stdout.write(SHOW_CURSOR);
       cleanup();
       resolve(value);
     };
@@ -168,7 +176,9 @@ export async function promptYou(label = USER_PROMPT, opts?: { hint?: string; sta
       const matches = matchCommands(buffer);
       const ghost = ghostText(buffer, matches);
       const hint = ghost ? "" : inputPlaceholder(buffer, opts?.hint);
-      inputRows = redraw(label, buffer, matches, ghost, inputRows, hint, opts?.status);
+      const frame = redraw(label, buffer, matches, ghost, inputRows, hint, opts?.status);
+      inputRows = frame.inputRows;
+      extraRows = frame.extraRows;
     };
 
     stdin.on("data", onData);
@@ -208,6 +218,7 @@ function redraw(
   status = "",
 ) {
   const cols = Math.max(20, stdout.columns ?? 80);
+  const rowWidth = Math.max(1, cols - 2);
   const color = stdout.isTTY && !process.env.NO_COLOR;
   stdout.write(HIDE_CURSOR);
   if (prevInputRows > 1) stdout.write(`\x1b[${prevInputRows - 1}A`);
@@ -215,23 +226,26 @@ function redraw(
   if (ghost) stdout.write(`${DIM}${ghost}${RESET}`);
   else if (hint) stdout.write(`${DIM}${hint}${RESET}`);
   const shown = buffer.startsWith("/") ? matches.slice(0, 6) : [];
-  const statusLine = status ? clipToWidth(status, cols) : "";
+  const statusLine = status ? clipToWidth(status, rowWidth) : "";
+  const menuLines = shown.map((command) =>
+    clipToWidth(`  ${command.name.padEnd(18)} ${command.hint}`, rowWidth),
+  );
   if (statusLine) stdout.write(`\n${paintPromptStatus(statusLine, color)}`);
-  if (shown.length > 0) {
-    const lines = shown.map((command) =>
-      clipToWidth(`  ${command.name.padEnd(18)} ${command.hint}`, cols),
-    );
-    stdout.write(`\n${lines.map((line) => `${DIM}${line}${RESET}`).join("\n")}`);
+  if (menuLines.length > 0) {
+    stdout.write(`\n${menuLines.map((line) => `${DIM}${line}${RESET}`).join("\n")}`);
   }
-  const extra = (statusLine ? 1 : 0) + shown.length;
-  if (extra > 0) {
-    stdout.write(`\x1b[${extra}A`);
-    stdout.write(`\r\x1b[${cursorColumn(visibleWidth(label + buffer), cols)}G`);
-  } else if (ghost || hint) {
+  const extra =
+    (statusLine ? visualRows(visibleWidth(statusLine), cols) : 0) +
+    menuLines.reduce((sum, line) => sum + visualRows(visibleWidth(line), cols), 0);
+  if (extra > 0) stdout.write(`\x1b[${extra}A`);
+  if (extra > 0 || ghost || hint) {
     stdout.write(`\r\x1b[${cursorColumn(visibleWidth(label + buffer), cols)}G`);
   }
   stdout.write(SHOW_CURSOR);
-  return visualRows(visibleWidth(label + buffer + ghost + hint), cols);
+  return {
+    inputRows: visualRows(visibleWidth(label + buffer + ghost + hint), cols),
+    extraRows: extra,
+  };
 }
 
 function cursorColumn(width: number, cols: number) {
@@ -249,7 +263,7 @@ function visibleWidth(text: string) {
 }
 
 function charWidth(char: string) {
-  if (char === "…" || char === "·") return 1;
+  if (char === "…") return 1;
   return (char.codePointAt(0) ?? 0) > 127 ? 2 : 1;
 }
 
@@ -330,6 +344,7 @@ export async function withPermissionLock<T>(run: () => Promise<T>): Promise<T> {
   await previous;
   permissionGate?.pause();
   try {
+    stopLoadUi();
     return await run();
   } finally {
     permissionGate?.resume();

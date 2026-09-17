@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { isTurnAborted, TurnAborted, TurnFailed } from "./abort.js";
+import { formatBanner, pickWelcome } from "./banner.js";
 import { closeIncompleteTrace, DEFAULT_MAX_AGENT_STEPS, runAgent, type AgentEvent } from "./agent.js";
 import type { TokenUsage } from "./chat.js";
 import { canCompress, compressHistory, shouldAutoCompress } from "./compress.js";
@@ -10,9 +10,7 @@ import {
   buildApiMessages,
   formatContextMeter,
   formatContextReport,
-  formatPreviewLine,
   measureContext,
-  previewMessages,
   toolsTokensFromSpecs,
 } from "./context.js";
 import {
@@ -37,6 +35,7 @@ import {
   DEFAULT_MAX_OUTPUT,
   DEFAULT_THINKING_EFFORT,
   emptyProvider,
+  findProvider,
   formatProvider,
   hasSavedProvider,
   isThinkingEffort,
@@ -44,14 +43,15 @@ import {
   loadProvider,
   maskApiKey,
   providerReady,
+  resolveFieldInput,
   saveProvider,
   switchProvider,
   THINKING_EFFORTS,
   type Provider,
 } from "./provider.js";
 import { createModelPickState, defaultEffortIndex, fetchModelCatalog } from "./provider-api.js";
-import { pickEffort, pickProviderModel } from "./select-ui.js";
-import { formatConversationList, generateTitle, isDefaultTitle } from "./title.js";
+import { pickEffort, pickProviderModel, pickSavedProvider } from "./select-ui.js";
+import { formatConversationList, generateTitle, isDefaultTitle, statusSessionLabel } from "./title.js";
 import { assistantPrefix, harnessModeMessage, lastHarnessMode, loadMode, modeHint, modeLabel, paintMode, parseMode, userPrefix, type AgentMode } from "./mode.js";
 import { createPolicy } from "./permissions.js";
 import { createLongApprover } from "./long-approve.js";
@@ -60,6 +60,7 @@ import { resolveLongBudgetFromEnv } from "./long-budget.js";
 import { openMcpHub } from "./mcp.js";
 import { formatSkillsCli, loadSkillBundle } from "./skills.js";
 import { activateBaseSkills, logSkillActivate } from "./skill-activate.js";
+import { createLoadUi } from "./load-ui.js";
 import { promptYou, promptStatusLine, restoreTerminal, confirmQuit, takeForcedQuit, watchTurnAbort, setPermissionGate } from "./prompt.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { createSubagentRunner, createSubagentStore, DEFAULT_SUBAGENT_STEPS } from "./subagent.js";
@@ -179,30 +180,19 @@ OpenAI 兼容 Provider：name / url / api / model / context window / max output 
 权限模式：--mode full | ask | plan | long（也可用 /mode 切换，长程可用 长程）。Esc 中止当前轮，/quit 退出。`;
 }
 
-function printBanner(session: Session, extra: { provider: Provider; stream: boolean; agent: boolean; steps: number; mode: AgentMode; mcp?: string; workspace: string }) {
-  console.log(`工作目录: ${extra.workspace}`);
-  console.log(`会话: ${session.title || "新会话"}`);
-  console.log(`编号: ${session.id || "尚未保存"}`);
-  console.log(`Provider: ${extra.provider.name}  模型: ${extra.provider.model}`);
+function printBanner(session: Session, extra: { mode: AgentMode; workspace: string; mcpCount?: number }) {
   console.log(
-    `上下文: ${extra.provider.contextWindow}  最大输出: ${extra.provider.maxOutput}  思考: ${extra.provider.thinkingEffort}`,
+    formatBanner({
+      workspace: extra.workspace,
+      title: session.title,
+      mode: extra.mode,
+      mcpCount: extra.mcpCount,
+      welcome: pickWelcome(),
+      width: process.stdout.columns ?? 60,
+      color: useColor(),
+    }),
   );
-  console.log(`流式: ${extra.stream ? "开" : "关"}  Agent: ${extra.agent ? "开" : "关"}  工具步数: ${extra.steps}`);
-  console.log(`模式: ${paintMode(extra.mode, modeLabel(extra.mode))}  ${modeHint(extra.mode)}`);
-  if (extra.mcp) console.log(extra.mcp);
-  console.log("/new 新会话  /session 恢复  /provider 适配  /model 模型  /effort 思考  /context 上下文  /compress 压缩  /mode 权限  /task 长程  /mcp  MCP  /skills 技能  /seesubagent 子代理  /seeplan 计划  /setplan 强制计划  /setworkarea 工作区  /quit 退出");
-  console.log("输入 / 后会按前缀提示命令，Tab 补全。生成中 Esc 中止当前轮，Ctrl+C 按两次退出。\n");
-}
-
-function printContext(history: Message[], mode: AgentMode) {
-  if (history.length === 0) return;
-  const { recent, skipped } = previewMessages(history);
-  console.log("--- 上下文 ---");
-  if (skipped > 0) console.log(`... 更早 ${skipped} 条`);
-  for (const message of recent) {
-    console.log(formatPreviewLine(message, mode));
-  }
-  console.log("--------------\n");
+  console.log("");
 }
 
 type PrintState = {
@@ -385,9 +375,9 @@ async function askField(
   const parts = [shown && `[${shown}]`, opts?.hint && `(${opts.hint})`].filter(Boolean);
   const suffix = parts.length ? ` ${parts.join(" ")}` : "";
   while (true) {
-    const value = (await rl.question(`${label}${suffix}: `)).trim();
-    if (value) return value;
-    if (!opts?.required) return current;
+    const raw = await rl.question(`${label}${suffix}: `);
+    const resolved = resolveFieldInput(raw, current, Boolean(opts?.required));
+    if (resolved.ok) return resolved.value;
     console.log(`  ${label} 不能为空`);
   }
 }
@@ -446,7 +436,43 @@ async function promptProviderForm(
     },
     creating ? emptyProvider() : current,
   );
-  return creating ? addProvider(next) : saveProvider(next);
+  return creating ? addProvider(next) : saveProvider(next, { replaceName: current.name });
+}
+
+function printProviderList(provider: Provider) {
+  const rows = listProviders(provider);
+  console.log("\n--- Provider ---");
+  for (const item of rows) {
+    const mark = item.name === provider.name ? "*" : " ";
+    console.log(`${mark} ${item.name}  ${item.model}  ctx=${item.contextWindow}  max=${item.maxOutput}  think=${item.thinkingEffort}`);
+  }
+  console.log("");
+}
+
+async function runProviderForm(
+  rl: readline.Interface,
+  mode: "new" | "edit" | "setup",
+  current: Provider,
+  fallback: Provider,
+): Promise<Provider> {
+  try {
+    const next = await promptProviderForm(rl, mode, current);
+    console.log(`\n已保存 Provider: ${next.name}\n`);
+    return next;
+  } catch (error) {
+    printErr(error);
+    return fallback;
+  }
+}
+
+async function switchToProvider(provider: Provider, name: string): Promise<Provider> {
+  if (name === provider.name) {
+    console.log(`\n已经是 ${provider.name}\n`);
+    return provider;
+  }
+  const next = switchProvider(name);
+  console.log(`\n已切换到 ${next.name} (${next.model})\n`);
+  return next;
 }
 
 async function handleProvider(
@@ -455,38 +481,61 @@ async function handleProvider(
   arg: string,
 ): Promise<Provider> {
   const rest = arg.trim();
-  if (!rest || rest === "show") {
+  if (rest === "show") {
     console.log(`\n${formatProvider(provider)}\n`);
     return provider;
   }
   if (rest === "list") {
-    const rows = listProviders(provider);
-    console.log("\n--- Provider ---");
-    for (const item of rows) {
-      const mark = item.name === provider.name ? "*" : " ";
-      console.log(`${mark} ${item.name}  ${item.model}  ctx=${item.contextWindow}  max=${item.maxOutput}  think=${item.thinkingEffort}`);
-    }
-    console.log("");
+    printProviderList(provider);
     return provider;
   }
-  if (rest === "edit" || rest === "new") {
-    try {
-      const next = await promptProviderForm(rl, rest, provider);
-      console.log(`\n已保存 Provider: ${next.name}\n`);
-      return next;
-    } catch (error) {
-      printErr(error);
+  const editMatch = /^edit(?:\s+(\S+))?$/.exec(rest);
+  if (editMatch) {
+    const wanted = editMatch[1];
+    if (!wanted) return await runProviderForm(rl, "edit", provider, provider);
+    const target = findProvider(wanted, provider);
+    if (!target) {
+      console.log(`\n找不到 Provider: ${wanted}\n`);
       return provider;
     }
+    return await runProviderForm(rl, "edit", target, provider);
+  }
+  if (rest === "new") {
+    return await runProviderForm(rl, "new", provider, provider);
+  }
+  if (!rest) {
+    const rows = listProviders(provider);
+    if (input.isTTY && output.isTTY) {
+      const selected = Math.max(0, rows.findIndex((item) => item.name === provider.name));
+      const picked = await pickSavedProvider({
+        providers: rows,
+        selected,
+        activeName: provider.name,
+      });
+      if (!picked) {
+        console.log("  → 已取消\n");
+        return provider;
+      }
+      if (picked.action === "new") return await runProviderForm(rl, "new", provider, provider);
+      const target = rows[picked.index];
+      if (!target) return provider;
+      if (picked.action === "edit") return await runProviderForm(rl, "edit", target, provider);
+      try {
+        return await switchToProvider(provider, target.name);
+      } catch (error) {
+        printErr(error);
+        return provider;
+      }
+    }
+    console.log(`\n${formatProvider(provider)}\n`);
+    return provider;
   }
   try {
-    const next = switchProvider(rest);
-    console.log(`\n已切换到 ${next.name} (${next.model})\n`);
-    return next;
+    return await switchToProvider(provider, rest);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.log(`\n${message}`);
-    console.log("用法: /provider    /provider list    /provider new    /provider edit    /provider <name>\n");
+    console.log("用法: /provider    /provider list    /provider new    /provider edit [name]    /provider <name>\n");
     return provider;
   }
 }
@@ -820,7 +869,6 @@ async function maybeNameSession(params: {
   });
   await updateConversationTitle(params.pool, params.session.id, title);
   params.session.title = title;
-  console.log(`会话: ${title}`);
 }
 
 async function main() {
@@ -964,6 +1012,8 @@ async function main() {
       },
     });
     setPermissionGate(abort);
+    const load = createLoadUi();
+    load.start();
     try {
       let activated: string[] = [];
       if (agentEnabled) {
@@ -998,9 +1048,16 @@ async function main() {
           toolsTokens: currentToolsTokens(),
           mode,
         }),
-        onEvent: (event) => printAgentEvent(event, state, mode, undefined, subagentUi),
+        onEvent: (event) => {
+          load.stop();
+          printAgentEvent(event, state, mode, undefined, subagentUi);
+          if (event.type === "tool_result" || event.type === "notice" || event.type === "compress") {
+            load.start();
+          }
+        },
       });
     } finally {
+      load.stop();
       setPermissionGate(undefined);
       abort.dispose();
     }
@@ -1012,7 +1069,7 @@ async function main() {
     agent: agentEnabled,
     steps: maxSteps,
     mode,
-    mcp: `MCP: ${mcp.toolNames().length} 个工具`,
+    mcpCount: mcp.toolNames().length,
     workspace,
   });
 
@@ -1236,7 +1293,6 @@ async function main() {
       console.log("");
     }
     printBanner(session, extra());
-    printContext(session.messages, mode);
     showLongTask();
     showPlan();
 
@@ -1247,6 +1303,7 @@ async function main() {
         await promptYou(userPrefix(mode), {
           hint: workareaPlaceholder(workspace),
           status: promptStatusLine(provider.model, provider.thinkingEffort, {
+            session: statusSessionLabel(session.title),
             context: formatContextMeter(report.used, report.window),
             columns: process.stdout.columns ?? 80,
           }),
@@ -1351,7 +1408,6 @@ async function main() {
             await rememberMode(pool, session, mode);
             console.log("");
             printBanner(session, extra());
-            printContext(session.messages, mode);
             showLongTask();
             showPlan();
           }

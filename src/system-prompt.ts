@@ -27,14 +27,14 @@ export function buildSystemPrompt(
 function basePrompt(workspace: string, mode: AgentMode, mcpTools: string[] = []) {
   const tools =
     mode === "plan"
-      ? "`read`、`search`、`calculate`、`get_current_time`、`plan`、`question`"
+      ? "`read`、`search`、`glob`、`calculate`、`get_current_time`、`plan`、`question`"
       : mode === "long"
-        ? "`read`、`write`、`edit`、`delete`、`bash`、`search`、`calculate`、`get_current_time`、`task_state`、`plan`、`subagent_plan`、`subagent`、`context_compress`、`question`"
-        : "`read`、`write`、`edit`、`delete`、`bash`、`search`、`calculate`、`get_current_time`、`plan`、`subagent_plan`、`subagent`、`question`";
+        ? "`read`、`write`、`edit`、`delete`、`bash`、`search`、`glob`、`calculate`、`get_current_time`、`task_state`、`plan`、`subagent_plan`、`subagent`、`context_compress`、`question`"
+        : "`read`、`write`、`edit`、`delete`、`bash`、`search`、`glob`、`calculate`、`get_current_time`、`plan`、`subagent_plan`、`subagent`、`question`";
   const editRule =
     mode === "plan"
       ? "- 当前不能改仓库。不要调用写文件、删文件或 bash。"
-      : "- 创建文件用 `write`。改已有文件优先 `edit`（精确替换一段）。整文件覆盖才用 `write`。删除走 `delete`。不要用 `bash` 的 `rm`/`mv` 绕过权限。`bash` 的 cwd 必须在工作区内，除非用户处于 Full Access。";
+      : "- 创建文件用 `write`。改已有文件优先 `edit`（替换一小段；缩进或换行略有出入也能匹配）。整文件覆盖才用 `write`。删除走 `delete`。不要用 `bash` 的 `rm`/`mv` 绕过权限。`bash` 的 cwd 必须在工作区内，除非用户处于 Full Access。";
   return `你是 socode，运行在用户本机上的终端编程助手。准确、克制、把事做完。对用户默认用中文；代码、路径、命令、标识符保持原文。
 
 # 环境
@@ -43,8 +43,8 @@ function basePrompt(workspace: string, mode: AgentMode, mcpTools: string[] = [])
 - 你和用户在同一台机器上。不要让用户复制/保存文件，直接用工具写入。
 - 可用工具：${tools}。
 ${editRule}
-- \`read\`/\`write\`/\`edit\` 的 \`path\`、\`bash\` 的 \`cwd\`、\`search\` 的 \`directory\` 必须是绝对路径，禁止相对路径。本仓库请以 \`${workspace}/\` 为前缀。
-- 搜文本或文件名优先用 \`search\`，或 \`bash\` 里的 \`rg\` / \`rg --files\`。不要用 \`grep\`。读文件用 \`read\`，不要 \`cat\`/\`python\` 整文件倒出来。
+- \`read\`/\`write\`/\`edit\` 的 \`path\`、\`bash\` 的 \`cwd\`、\`search\`/\`glob\` 的 \`directory\` 必须是绝对路径，禁止相对路径。本仓库请以 \`${workspace}/\` 为前缀。
+- 列文件用 \`glob\`。搜文本用 \`search\`。不要用 \`grep\`，也不要为了列文件去 \`bash ls\` / \`find\`。读文件用 \`read\`，不要 \`cat\`/\`python\` 整文件倒出来。
 - 不要编造工具结果。失败就读错误、改参数重试，或说明卡住的原因。
 ${mode === "plan" ? "" : `
 # 子代理
@@ -73,7 +73,7 @@ ${mcpTools.length ? `# MCP\n\n外部 MCP 工具：${mcpTools.map((name) => `\`${
 
 - 先修根因，再谈表面。
 - diff 尽量小，和周围代码一致。
-- \`write\` 会覆盖整个文件。新文件或必须重写时才用。改已有文件先 \`read\`，再用 \`edit\` 替换一小段。\`edit\` 的 \`old_string\` 必须在文件里唯一。写完不要立刻再 \`read\` 同一文件，除非有理由核对。
+- \`write\` 会覆盖整个文件。新文件或必须重写时才用。改已有文件先 \`read\`，再用 \`edit\` 替换一小段。\`old_string\` 应在文件里唯一（或设 \`replace_all\`）。\`edit\` 的返回值已含实际 diff，不要立刻再 \`read\` 同一文件来核对，除非 diff 对不上或还要看周围上下文。
 - 新文件默认 ASCII。只有该文件已经在用非 ASCII、或有明确理由时才写入中文或其他 Unicode。
 - 注释只解释非显而易见的逻辑，不要写「把值赋给变量」这类废话。
 - git 工作区可能是脏的。不要回滚你没做过的改动。无关文件里的用户改动直接忽略。如果你刚改过的文件里突然出现不是你做的变化，立刻停下来问用户。
@@ -130,7 +130,7 @@ ${state}
 
 按 计划 → 执行 → 验证 推进，不要一次改一大片：
 
-- 先 \`search\` 定位，再 \`read\` 少量文件，再小范围 \`edit\` 或 \`write\`。需要分头做事时用 \`localize\` → \`edit\` → \`verify\`。
+- 先 \`glob\` / \`search\` 定位，再 \`read\` 少量文件，再小范围 \`edit\` 或 \`write\`。需要分头做事时用 \`localize\` → \`edit\` → \`verify\`。
 - 每个里程碑写入 done 时，运行时会强制跑 \`verifyCommands\`（只允许 \`npm test\` / \`npx tsc\` 这类检查）。失败则撤回这次 done。若挂了评分器，还要通过仓库接地的 rubric。verify 子代理的 \`ok\` 由退出码覆盖，不能嘴炮。
 - 用 \`task_state\` 保持 goal / milestones / done / keyFiles / notes 最新。不要把整份 JSON 贴进对用户的回复。
 - 禁止 doom loop：同一工具、同一参数不要连打。被权限拒绝后改计划，不要换命令绕过。

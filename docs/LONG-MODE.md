@@ -24,7 +24,7 @@ CLI --mode long / /mode long / /mode 长程
         │
         ├─ system-prompt.ts   长程循环说明 + 当前 TaskState
         ├─ tools.ts           多一个 task_state；bash 仍 confineWrites
-        ├─ permissions.ts     与 Ask 同沙箱；read/search 预授权
+        ├─ permissions.ts     与 Ask 同沙箱；read/search/glob 预授权
         ├─ long-approve.ts    Long 独有：干净上下文 JSON 审批器
         ├─ compress.ts        接近窗口或已经在丢历史时自动压缩
         ├─ agent.ts           步数 / token / 上下文预算用尽则优雅停；context_compress
@@ -79,7 +79,7 @@ type TaskState = {
 
 | 操作 | Long | Ask | Full | Plan |
 | --- | --- | --- | --- | --- |
-| 工作区 `read` / `search` | 本地预授权 | 预授权 | 允许 | 允许 |
+| 工作区 `read` / `search` / `glob` | 本地预授权 | 预授权 | 允许 | 允许 |
 | 工作区外读 | 本地拒绝 | 拒绝 | 允许（denylist 除外） | 拒绝 |
 | 工作区 `write` / `edit` / `delete` | **LLM 审批** | y/n/a | 允许 | 拒绝 |
 | 只读短 bash（`ls`/`pwd`…） | 本地预授权 | 预授权 | 允许 | 拒绝 |

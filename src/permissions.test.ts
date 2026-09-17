@@ -74,6 +74,7 @@ describe("createPolicy", () => {
     const policy = createPolicy(ws, () => "long");
     assert.equal(await policy.authorize("read", { path: `${ws}/src/mode.ts` }), null);
     assert.equal(await policy.authorize("search", { directory: `${ws}/src`, pattern: "AGENT_MODES" }), null);
+    assert.equal(await policy.authorize("glob", { directory: `${ws}/src`, pattern: "*.ts" }), null);
     const denied = await policy.authorize("write", { path: `${ws}/src/mode.ts`, content: "x" });
     assert.match(denied ?? "", /审批器未配置|审批拒绝/);
   });
@@ -174,6 +175,12 @@ describe("createPolicy", () => {
     assert.match((await child.authorize("question", { questions: [] })) ?? "", /不能向用户提问/);
   });
 
+  it("denies Ask glob outside the workspace", async () => {
+    const policy = createPolicy(ws, () => "ask");
+    const denied = await policy.authorize("glob", { directory: "/tmp", pattern: "*" });
+    assert.match(denied ?? "", /工作区内/);
+  });
+
   it("keeps explorer subagents read-only", async () => {
     const policy = createPolicy(ws, () => "ask", undefined, { nested: true, role: "explorer" });
     assert.match(
@@ -185,6 +192,7 @@ describe("createPolicy", () => {
       /只读/,
     );
     assert.equal(await policy.authorize("read", { path: `${ws}/src/mode.ts` }), null);
+    assert.equal(await policy.authorize("glob", { directory: `${ws}/src`, pattern: "*.ts" }), null);
     assert.match(
       (await policy.authorize("bash", { cwd: ws, command: "rm file" })) ?? "",
       /只读/,

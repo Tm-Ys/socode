@@ -94,6 +94,19 @@ export function providerReady(provider: Provider) {
   return Boolean(provider.url && provider.api && provider.model);
 }
 
+export function resolveFieldInput(raw: string, current = "", required = false) {
+  const value = raw.trim();
+  if (value) return { ok: true as const, value };
+  if (current || !required) return { ok: true as const, value: current };
+  return { ok: false as const };
+}
+
+export function findProvider(name: string, current?: Provider) {
+  const key = name.trim();
+  if (!key) return undefined;
+  return listProviders(current).find((item) => item.name === key);
+}
+
 export function hasSavedProvider(name: string) {
   const key = name.trim();
   if (!key) return false;
@@ -124,9 +137,16 @@ export function applyProviderDraft(draft: ProviderDraft, fallback?: Provider): P
   });
 }
 
-export function saveProvider(provider: Provider) {
+export function saveProvider(provider: Provider, opts?: { replaceName?: string }) {
   const normalized = requireComplete(normalizeProvider(provider));
   const store = readStore() ?? { active: normalized.name, providers: [] };
+  const from = opts?.replaceName?.trim();
+  if (from && from !== normalized.name) {
+    if (store.providers.some((item) => item.name === normalized.name)) {
+      throw new Error(`已有同名 Provider: ${normalized.name}。换个名字，或先 /provider ${normalized.name} 再 /provider edit`);
+    }
+    store.providers = store.providers.filter((item) => item.name !== from);
+  }
   const index = store.providers.findIndex((item) => item.name === normalized.name);
   if (index >= 0) store.providers[index] = normalized;
   else store.providers.push(normalized);

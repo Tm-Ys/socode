@@ -3,7 +3,9 @@ import { describe, it } from "node:test";
 import {
   applyProviderDraft,
   emptyProvider,
+  findProvider,
   providerReady,
+  resolveFieldInput,
 } from "./provider.js";
 
 describe("provider draft", () => {
@@ -37,6 +39,30 @@ describe("provider draft", () => {
     assert.equal(provider.maxOutput, 8192);
     assert.equal(provider.thinkingEffort, "medium");
     assert.equal(providerReady(provider), true);
+  });
+
+  it("keeps the current value when the field is left empty", () => {
+    assert.deepEqual(resolveFieldInput("", "deepseek", true), { ok: true, value: "deepseek" });
+    assert.deepEqual(resolveFieldInput("  ", "https://api.example.test", true), { ok: true, value: "https://api.example.test" });
+    assert.deepEqual(resolveFieldInput("openai", "deepseek", true), { ok: true, value: "openai" });
+    assert.deepEqual(resolveFieldInput("", "", true), { ok: false });
+    assert.deepEqual(resolveFieldInput("", "", false), { ok: true, value: "" });
+  });
+
+  it("finds a named provider from the current list", () => {
+    const current = applyProviderDraft({
+      name: "deepseek",
+      url: "https://api.deepseek.com/v1",
+      api: "sk-test",
+      model: "deepseek-flash",
+      contextWindow: "",
+      maxOutput: "",
+      thinkingEffort: "",
+    });
+    assert.equal(findProvider("deepseek", current)?.name, "deepseek");
+    assert.equal(findProvider("  deepseek  ", current)?.model, "deepseek-flash");
+    assert.equal(findProvider("", current), undefined);
+    assert.equal(findProvider("definitely-not-a-saved-provider-xyzzy", current), undefined);
   });
 
   it("rejects invalid optional fields", () => {
