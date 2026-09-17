@@ -1,18 +1,34 @@
 {
   "name": "socode",
   "version": "0.1.0",
+  "description": "本机终端里的编程 Agent",
   "type": "module",
+  "bin": {
+    "socode": "bin/socode.mjs"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "skills",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Tm-Ys/socode.git"
+  },
   "scripts": {
     "start": "tsx src/index.ts",
     "chat": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "pack:release": "bash scripts/pack-release.sh",
     "test": "tsx --test src/*.test.ts"
-  },
-  "dependencies": {
-    "pg": "^8.16.3"
   },
   "devDependencies": {
     "@types/node": "^22.18.1",
-    "@types/pg": "^8.15.5",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2"
   }

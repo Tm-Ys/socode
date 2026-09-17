@@ -1,6 +1,9 @@
 node_modules/
+dist/
+release/
 
 .env
 providers.json
 .socode-audit.jsonl
+.socode/sessions/
 .DS_Store

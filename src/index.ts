@@ -1,9 +1,9 @@
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { isTurnAborted, TurnAborted, TurnFailed } from "./abort.js";
 import { formatBanner, pickWelcome } from "./banner.js";
-import { closeIncompleteTrace, DEFAULT_MAX_AGENT_STEPS, runAgent, type AgentEvent } from "./agent.js";
+import { closeIncompleteTrace, runAgent, type AgentEvent } from "./agent.js";
+import { loadConfig, longBudgetFromConfig, migrateLegacyDotenv } from "./config.js";
 import type { TokenUsage } from "./chat.js";
 import { canCompress, compressHistory, shouldAutoCompress } from "./compress.js";
 import {
@@ -14,11 +14,11 @@ import {
   toolsTokensFromSpecs,
 } from "./context.js";
 import {
-  connectDb,
   emptySession,
   listConversations,
   loadSession,
   openConversation,
+  openSessionStore,
   persistSession,
   discardEmptySession,
   replaceMessages,
@@ -56,14 +56,13 @@ import { assistantPrefix, harnessModeMessage, lastHarnessMode, loadMode, modeHin
 import { createPolicy } from "./permissions.js";
 import { createLongApprover } from "./long-approve.js";
 import { createLongRubric } from "./long-rubric.js";
-import { resolveLongBudgetFromEnv } from "./long-budget.js";
 import { openMcpHub } from "./mcp.js";
 import { formatSkillsCli, loadSkillBundle } from "./skills.js";
 import { activateBaseSkills, logSkillActivate } from "./skill-activate.js";
 import { createLoadUi } from "./load-ui.js";
 import { promptYou, promptStatusLine, restoreTerminal, confirmQuit, takeForcedQuit, watchTurnAbort, setPermissionGate } from "./prompt.js";
 import { buildSystemPrompt } from "./system-prompt.js";
-import { createSubagentRunner, createSubagentStore, DEFAULT_SUBAGENT_STEPS } from "./subagent.js";
+import { createSubagentRunner, createSubagentStore } from "./subagent.js";
 import { createSubagentUi, parseSeesubagent } from "./subagent-ui.js";
 import {
   createTaskStore,
@@ -112,25 +111,6 @@ import {
 const BOOLEAN_FLAGS = new Set(["resume", "new", "no-stream", "no-agent"]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function loadEnv(path: string) {
-  if (!existsSync(path)) return;
-  for (const raw of readFileSync(path, "utf8").split("\n")) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq < 0) continue;
-    const key = line.slice(0, eq).trim();
-    let value = line.slice(eq + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-    if (process.env[key] === undefined) process.env[key] = value;
-  }
-}
-
 function parseArgs(argv: string[]) {
   const flags: Record<string, string> = {};
 
@@ -160,23 +140,18 @@ function parsePositiveInt(label: string, raw: string | undefined) {
   return Math.floor(n);
 }
 
-function envPositiveInt(raw: string | undefined, fallback: number) {
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
-}
-
 function flagOn(value: string | undefined) {
   return value === "true" || value === "";
 }
 
 function usage() {
   return `用法:
-  npm start [-- --input <文本>]          默认新会话，空对话不入库
-  npm start -- --resume
-  npm start -- --id <conversation-uuid>
-  npm start -- --url/--api/--model/--name/--context/--output/--effort/--steps/--max/--mode/--budget
+  socode [--input <文本>]          默认新会话，空对话不落盘
+  socode --resume
+  socode --id <conversation-uuid>
+  socode --url/--api/--model/--name/--context/--output/--effort/--steps/--max/--mode/--budget
 
-OpenAI 兼容 Provider：name / url / api / model / context window / max output / thinking effort
+OpenAI 兼容 Provider 存在 ~/.socode/providers.json；默认值在 ~/.socode/config.json
 权限模式：--mode full | ask | plan | long（也可用 /mode 切换，长程可用 长程）。Esc 中止当前轮，/quit 退出。`;
 }
 
@@ -338,7 +313,7 @@ function failedTurnTrace(error: unknown): Message[] {
 }
 
 async function saveFailedTurn(
-  pool: Parameters<typeof saveMessages>[0],
+  store: Parameters<typeof saveMessages>[0],
   session: Session,
   user: Message,
   error: unknown,
@@ -354,8 +329,8 @@ async function saveFailedTurn(
         },
       ];
   const batch = historyAfterTurn(user, [...trace, ...extra]);
-  await persistSession(pool, session, model);
-  await saveMessages(pool, session.id, batch);
+  await persistSession(store, session, model);
+  await saveMessages(store, session.id, batch);
   session.messages.push(...batch);
 }
 
@@ -666,11 +641,11 @@ function applyPickedModel(current: Provider, all: Provider[], providerName: stri
 
 async function pickSession(
   rl: readline.Interface,
-  pool: Parameters<typeof listConversations>[0],
+  store: Parameters<typeof listConversations>[0],
   session: Session,
   arg: string,
 ): Promise<Session | null> {
-  const rows = await listConversations(pool);
+  const rows = await listConversations(store);
   if (rows.length === 0) {
     console.log("没有可恢复的会话。\n");
     return null;
@@ -683,14 +658,14 @@ async function pickSession(
         console.log("找不到这个会话编号。\n");
         return null;
       }
-      return await loadSession(pool, picked.id);
+      return await loadSession(store, picked.id);
     }
     const index = Number(arg);
     if (!Number.isInteger(index) || index < 1 || index > rows.length) {
       console.log("序号无效。\n");
       return null;
     }
-    return await loadSession(pool, rows[index - 1].id);
+    return await loadSession(store, rows[index - 1].id);
   }
 
   console.log("\n--- 会话 ---");
@@ -700,7 +675,7 @@ async function pickSession(
     console.log("");
     return null;
   }
-  return await pickSession(rl, pool, session, answer);
+  return await pickSession(rl, store, session, answer);
 }
 
 function handleMode(mode: AgentMode, arg: string): { mode: AgentMode; changed: boolean } {
@@ -730,31 +705,31 @@ function handleMode(mode: AgentMode, arg: string): { mode: AgentMode; changed: b
 }
 
 async function rememberTaskState(
-  pool: Parameters<typeof saveMessages>[0],
+  store: Parameters<typeof saveMessages>[0],
   session: Session,
-  store: TaskStore,
+  tasks: TaskStore,
 ) {
-  const current = store.get();
+  const current = tasks.get();
   const last = lastTaskState(session.messages);
   if (last && taskStateEqual(last, current)) return;
   if (!last && isEmptyTaskState(current)) return;
   const notice = taskStateMessage(current);
   session.messages.push(notice);
-  if (session.persisted && session.id) await saveMessages(pool, session.id, [notice]);
+  if (session.persisted && session.id) await saveMessages(store, session.id, [notice]);
 }
 
 async function rememberPlan(
-  pool: Parameters<typeof saveMessages>[0],
+  store: Parameters<typeof saveMessages>[0],
   session: Session,
-  store: PlanStore,
+  plans: PlanStore,
 ) {
-  const current = store.get();
+  const current = plans.get();
   const last = lastPlan(session.messages);
   if (last && planEqual(last, current)) return;
   if (!last && isEmptyPlan(current)) return;
   const notice = planMessage(current);
   session.messages.push(notice);
-  if (session.persisted && session.id) await saveMessages(pool, session.id, [notice]);
+  if (session.persisted && session.id) await saveMessages(store, session.id, [notice]);
 }
 
 function handleTask(store: TaskStore, arg: string) {
@@ -844,18 +819,18 @@ function prepareUserTurn(raw: string) {
 }
 
 async function rememberMode(
-  pool: Parameters<typeof saveMessages>[0],
+  store: Parameters<typeof saveMessages>[0],
   session: Session,
   mode: AgentMode,
 ) {
   if (lastHarnessMode(session.messages) === mode) return;
   const notice = harnessModeMessage(mode);
   session.messages.push(notice);
-  if (session.persisted && session.id) await saveMessages(pool, session.id, [notice]);
+  if (session.persisted && session.id) await saveMessages(store, session.id, [notice]);
 }
 
 async function maybeNameSession(params: {
-  pool: Parameters<typeof updateConversationTitle>[0];
+  store: Parameters<typeof updateConversationTitle>[0];
   session: Session;
   provider: Provider;
   userText: string;
@@ -867,13 +842,14 @@ async function maybeNameSession(params: {
     userText: params.userText,
     assistantText: params.assistantText,
   });
-  await updateConversationTitle(params.pool, params.session.id, title);
+  await updateConversationTitle(params.store, params.session.id, title);
   params.session.title = title;
 }
 
 async function main() {
-  loadEnv(resolve(process.cwd(), ".env"));
+  migrateLegacyDotenv();
   const flags = parseArgs(process.argv.slice(2));
+  const cfg = loadConfig();
   let provider = loadProvider();
   if (flags.url) provider = { ...provider, url: flags.url };
   if (flags.api) provider = { ...provider, api: flags.api };
@@ -889,25 +865,17 @@ async function main() {
     throw new Error("--effort 必须是 none | minimal | low | medium | high | xhigh");
   }
 
-  const databaseUrl =
-    flags.database ?? process.env.DATABASE_URL ?? "postgres://localhost:5432/socode";
-  const userSystem = flags.system ?? process.env.SYSTEM_PROMPT ?? "";
+  const userSystem = flags.system ?? cfg.systemPrompt;
   const agentEnabled = !flagOn(flags["no-agent"]);
-  const maxMessages =
-    parsePositiveInt("--max", flags.max) ??
-    envPositiveInt(process.env.MAX_CONTEXT_MESSAGES, 200);
-  const maxSteps =
-    parsePositiveInt("--steps", flags.steps) ??
-    envPositiveInt(process.env.MAX_AGENT_STEPS, DEFAULT_MAX_AGENT_STEPS);
-  const maxTokens =
-    parsePositiveInt("--budget", flags.budget) ??
-    parsePositiveInt("MAX_AGENT_TOKENS", process.env.MAX_AGENT_TOKENS);
+  const maxMessages = parsePositiveInt("--max", flags.max) ?? cfg.maxContextMessages;
+  const maxSteps = parsePositiveInt("--steps", flags.steps) ?? cfg.maxAgentSteps;
+  const maxTokens = parsePositiveInt("--budget", flags.budget) ?? cfg.maxAgentTokens;
   const oneShot = flags.input;
   const resume = flagOn(flags.resume);
   const fresh = flagOn(flags.new);
   const stream = !flagOn(flags["no-stream"]);
   const conversationFlag = flags.id;
-  let mode = loadMode(flags.mode);
+  let mode = loadMode(flags.mode, cfg.mode);
 
   if (!providerReady(provider)) {
     if (oneShot !== undefined || !process.stdin.isTTY) {
@@ -917,23 +885,23 @@ async function main() {
     }
   }
 
-  const pool = await connectDb(databaseUrl);
-  let session = await openConversation(pool, {
+  let workspace = process.cwd();
+  let store = await openSessionStore(workspace);
+  let session = await openConversation(store, {
     model: provider.model,
     id: conversationFlag,
     resume,
     fresh,
   });
-  await rememberMode(pool, session, mode);
+  await rememberMode(store, session, mode);
 
   const tasks = createTaskStore(lastTaskState(session.messages));
   const plans = createPlanStore(lastPlan(session.messages));
   const subagents = createSubagentStore();
-  let workspace = process.cwd();
   let mcp = await openMcpHub(workspace);
   const longApprove = createLongApprover(() => provider);
   const longRubric = createLongRubric(() => provider);
-  const longBudget = resolveLongBudgetFromEnv(maxSteps);
+  const longBudget = longBudgetFromConfig(maxSteps);
   const policy = createPolicy(() => workspace, () => mode, tasks, {
     longApprove,
     longRubric,
@@ -956,7 +924,7 @@ async function main() {
     getProvider: () => provider,
     getPolicy: () => policy,
     workspace,
-    maxSteps: envPositiveInt(process.env.SUBAGENT_STEPS, DEFAULT_SUBAGENT_STEPS),
+    maxSteps: cfg.subagentSteps,
     stream,
     shouldStream: (job) => stream && subagentUi.watching() === job.id,
     onBatch: (jobs) => {
@@ -1081,6 +1049,7 @@ async function main() {
       return `无法进入目录: ${message}`;
     }
     workspace = path;
+    store = await openSessionStore(workspace);
     await mcp.close().catch(() => undefined);
     mcp = await openMcpHub(workspace);
     policy.mcp = mcp;
@@ -1174,8 +1143,8 @@ async function main() {
           process.stdout.write(text);
         },
       });
-      await persistSession(pool, session, provider.model);
-      await replaceMessages(pool, session.id, result.messages);
+      await persistSession(store, session, provider.model);
+      await replaceMessages(store, session.id, result.messages);
       process.stdout.write(
         `\n\n已压缩，大约省下 ${result.saved.toLocaleString("en-US")} tokens\n`,
       );
@@ -1214,12 +1183,8 @@ async function main() {
     } catch {
       // ignore
     }
-    await discardEmptySession(pool, session).catch(() => undefined);
+    await discardEmptySession(store, session).catch(() => undefined);
     await mcp.close().catch(() => undefined);
-    await Promise.race([
-      pool.end().catch(() => undefined),
-      new Promise<void>((resolve) => setTimeout(resolve, 1500)),
-    ]);
   };
   const forceExit = (code: number) => {
     restoreTerminal();
@@ -1250,31 +1215,31 @@ async function main() {
         if (mode === "long") {
           session.messages = await maybeAutoCompress(session.messages);
           tasks.replace(seedGoalFromUser(tasks.get(), prepared.titleText));
-          await rememberTaskState(pool, session, tasks);
+          await rememberTaskState(store, session, tasks);
         }
         const { reply, trace, usage } = await ask(session.messages, user, askOpts);
         lastUsage = usage;
         const stored = historyAfterTurn(user, trace);
-        await persistSession(pool, session, provider.model);
-        await saveMessages(pool, session.id, stored);
+        await persistSession(store, session, provider.model);
+        await saveMessages(store, session.id, stored);
         session.messages.push(...stored);
-        await rememberTaskState(pool, session, tasks);
-        await rememberPlan(pool, session, plans);
+        await rememberTaskState(store, session, tasks);
+        await rememberPlan(store, session, plans);
         if (!reply.endsWith("\n")) process.stdout.write("\n");
         printTurnRecap(trace);
         await maybeNameSession({
-          pool,
+          store,
           session,
           provider,
           userText: prepared.titleText,
           assistantText: reply,
         });
       } catch (error) {
-        await saveFailedTurn(pool, session, user, error, provider.model);
+        await saveFailedTurn(store, session, user, error, provider.model);
         if (mode === "long") {
-          await rememberTaskState(pool, session, tasks);
+          await rememberTaskState(store, session, tasks);
         }
-        await rememberPlan(pool, session, plans);
+        await rememberPlan(store, session, plans);
         printTurnRecap(failedTurnTrace(error));
         if (isTurnAborted(error)) {
           if (takeForcedQuit()) forceExit(130);
@@ -1321,7 +1286,7 @@ async function main() {
         }
         if (prompt === "/task" || prompt.startsWith("/task ")) {
           handleTask(tasks, prompt.slice("/task".length).trim());
-          await rememberTaskState(pool, session, tasks);
+          await rememberTaskState(store, session, tasks);
           continue;
         }
         if (prompt === "/mcp") {
@@ -1350,9 +1315,9 @@ async function main() {
         if (prompt === "/compress") {
           try {
             session.messages = await runCompress(session.messages);
-            await rememberMode(pool, session, mode);
-            await rememberTaskState(pool, session, tasks);
-            await rememberPlan(pool, session, plans);
+            await rememberMode(store, session, mode);
+            await rememberTaskState(store, session, tasks);
+            await rememberPlan(store, session, plans);
           } catch (error) {
             if (isTurnAborted(error)) {
               if (takeForcedQuit()) forceExit(130);
@@ -1367,16 +1332,16 @@ async function main() {
           const result = handleMode(mode, prompt.slice("/mode".length).trim());
           mode = result.mode;
           if (result.changed) {
-            await rememberMode(pool, session, mode);
+            await rememberMode(store, session, mode);
             if (mode === "long") showLongTask();
           }
           continue;
         }
         if (prompt === "/new") {
-          await discardEmptySession(pool, session);
+          await discardEmptySession(store, session);
           session = emptySession();
           reloadSessionState();
-          await rememberMode(pool, session, mode);
+          await rememberMode(store, session, mode);
           console.log("");
           printBanner(session, extra());
           showLongTask();
@@ -1400,12 +1365,12 @@ async function main() {
         const restore = parseSlash(prompt);
         if (restore) {
           sessionRl.resume();
-          const picked = await pickSession(sessionRl, pool, session, restore.arg);
+          const picked = await pickSession(sessionRl, store, session, restore.arg);
           if (picked) {
-            await discardEmptySession(pool, session);
+            await discardEmptySession(store, session);
             session = picked;
             reloadSessionState();
-            await rememberMode(pool, session, mode);
+            await rememberMode(store, session, mode);
             console.log("");
             printBanner(session, extra());
             showLongTask();
@@ -1427,29 +1392,29 @@ async function main() {
           if (mode === "long") {
             session.messages = await maybeAutoCompress(session.messages);
             tasks.replace(seedGoalFromUser(tasks.get(), prepared.titleText));
-            await rememberTaskState(pool, session, tasks);
+            await rememberTaskState(store, session, tasks);
           }
           const { reply, trace, usage } = await ask(session.messages, user, askOpts);
           lastUsage = usage;
           const stored = historyAfterTurn(user, trace);
-          await persistSession(pool, session, provider.model);
-          await saveMessages(pool, session.id, stored);
+          await persistSession(store, session, provider.model);
+          await saveMessages(store, session.id, stored);
           session.messages.push(...stored);
-          await rememberTaskState(pool, session, tasks);
-          await rememberPlan(pool, session, plans);
+          await rememberTaskState(store, session, tasks);
+          await rememberPlan(store, session, plans);
           process.stdout.write(reply.endsWith("\n") ? "\n" : "\n\n");
           printTurnRecap(trace);
           await maybeNameSession({
-            pool,
+            store,
             session,
             provider,
             userText: prepared.titleText,
             assistantText: reply,
           });
         } catch (error) {
-          await saveFailedTurn(pool, session, user, error, provider.model);
-          if (mode === "long") await rememberTaskState(pool, session, tasks);
-          await rememberPlan(pool, session, plans);
+          await saveFailedTurn(store, session, user, error, provider.model);
+          if (mode === "long") await rememberTaskState(store, session, tasks);
+          await rememberPlan(store, session, plans);
           printTurnRecap(failedTurnTrace(error));
           if (isTurnAborted(error)) {
             if (mode === "long") process.stdout.write(`\n${checkpointReply(tasks.get(), "abort")}\n`);

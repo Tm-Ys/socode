@@ -42,6 +42,16 @@ describe("denyReason", () => {
     assert.match(denyReason(`${ws}/.env`) ?? "", /受保护/);
     assert.match(denyReason(`${ws}/providers.json`) ?? "", /受保护/);
   });
+
+  it("blocks user ~/.socode config and providers", () => {
+    assert.match(denyReason(join(homedir(), ".socode/config.json")) ?? "", /受保护/);
+    assert.match(denyReason(join(homedir(), ".socode/providers.json")) ?? "", /受保护/);
+  });
+
+  it("blocks workspace session files", () => {
+    assert.match(denyReason(`${ws}/.socode/sessions/abc.json`) ?? "", /会话目录/);
+    assert.equal(denyReason(`${ws}/.socode/skills/review/SKILL.md`), null);
+  });
 });
 
 describe("mutationDenied", () => {

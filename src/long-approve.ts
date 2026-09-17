@@ -1,4 +1,5 @@
 import { completeChat } from "./chat.js";
+import { loadConfig } from "./config.js";
 import type { Message } from "./db.js";
 import { listProviders, type Provider } from "./provider.js";
 
@@ -61,8 +62,8 @@ export function parseJudgeReply(text: string): JudgeVerdict {
   return { allow, reason: reason.slice(0, 300) };
 }
 
-export function pickJudgeProvider(base: Provider): Provider {
-  const model = (process.env.LONG_APPROVE_MODEL ?? process.env.JUDGE_MODEL ?? "").trim();
+export function pickJudgeProvider(base: Provider, opts?: { judgeModel?: string }): Provider {
+  const model = (opts?.judgeModel ?? loadConfig().judgeModel).trim();
   const named = listProviders(base).find((item) => /^(judge|fast|cheap|mini)$/i.test(item.name));
   const source =
     named && named.url && named.api

@@ -34,8 +34,8 @@ CLI --mode long / /mode long / /mode 长程
         └─ task-state.ts      内存 TaskStore + 会话里的【task state】消息
                     │
                     ▼
-              PostgreSQL messages.payload 旁的 system 文本
-              （不新增表；和【harness mode】一样活在对话里）
+              工作区 .socode/sessions/*.json 里的 system 文本
+              （不新增库；和【harness mode】一样活在对话里）
 ```
 
 会话切换、`/compress`、`replaceMessages` 都能带上最新 TaskState：压缩时会把最新 harness mode、TaskState 和 plan **钉在 keep 区**，不让摘要把目标吃掉。
@@ -134,13 +134,13 @@ Long **不会**：
 
 ### 模型
 
-优先 `LONG_APPROVE_MODEL` 或 `JUDGE_MODEL`（同一套 URL/Key）；否则若 `providers.json` 里有名为 `judge` / `fast` / `cheap` / `mini` 的项就用它；再否则用当前 Provider，但 `thinkingEffort=none`、`maxOutput≤256`。
+优先 `~/.socode/config.json` 的 `judgeModel`；否则若 `providers.json` 里有名为 `judge` / `fast` / `cheap` / `mini` 的项就用它；再否则用当前 Provider，但 `thinkingEffort=none`、`maxOutput≤256`。
 
 ## 压缩 / 预算 / 检查点
 
 - 压缩器：`src/compress.ts` 的 LLM 摘要。用户手动 `/compress` 仍按用户轮切；Long 循环内和 `context_compress` 按 **ReAct 步**切，钉住 harness mode / TaskState / Plan，丢掉 `【turn budget】` 瞬时提醒。
 - 触发：Long 每轮开始前看 `measureContext`；**工具步之间**上下文到约 82% 预算时也会压；模型也可调用 `context_compress`（节流：刚压过不能连着压）。压不动或仍超限才停并留检查点。
-- 步数预算（More with Less）：默认 **Dynamic P50→P75**（`--steps` 80 → 先 40，有进展才一次加到 60）。每步工具后注入 `【turn budget】You have X turns left`（不入库用户回复）。延期门比论文严：本段要有成功写入 / 里程碑前进 / 验证命令通过，且非 doom、非纯 read。Token / 上下文预算仍硬停。`LONG_BUDGET_POLICY=fixed|unlimited` 可关延期。
+- 步数预算（More with Less）：默认 **Dynamic P50→P75**（`--steps` 80 → 先 40，有进展才一次加到 60）。每步工具后注入 `【turn budget】You have X turns left`（不入库用户回复）。延期门比论文严：本段要有成功写入 / 里程碑前进 / 验证命令通过，且非 doom、非纯 read。Token / 上下文预算仍硬停。`~/.socode/config.json` 的 `longBudgetPolicy=fixed|unlimited` 可关延期。
 - 检查点消息前缀：`【checkpoint】`。TaskState 本身才是可恢复的机器状态。
 
 ## Long 子代理与里程碑门
@@ -152,13 +152,13 @@ Long 推荐 `localize` / `edit` / `verify`（Ask/Full 仍可用 explorer/worker�
 ## 怎么试
 
 ```bash
-npm start -- --mode long
+socode --mode long
 # 或进入后 /mode long  /mode 长程
 # /task
 # /task goal 把 Ask/Full/Plan 的模式体系补上 Long
 ```
 
-环境变量：`MODE=long`。可选 `MAX_AGENT_TOKENS`、`--budget`、已有的 `--steps`、`LONG_APPROVE_MODEL` / `JUDGE_MODEL`、`LONG_BUDGET_POLICY`（`dynamic` / `fixed` / `unlimited`）、`LONG_BUDGET_DYNAMIC`（`50-75` 或 `25-50`）。
+默认值见 `~/.socode/config.json`：`mode`、`maxAgentTokens`、`judgeModel`、`longBudgetPolicy`（`dynamic` / `fixed` / `unlimited`）、`longBudgetDynamic`（`50-75` 或 `25-50`）。命令行 `--budget`、`--steps`、`--mode long` 覆盖本次。
 
 ## 阶段
 

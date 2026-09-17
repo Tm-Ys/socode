@@ -1,5 +1,6 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 
 export const DEFAULT_CONTEXT_WINDOW = 128000;
 export const DEFAULT_MAX_OUTPUT = 8192;
@@ -22,8 +23,18 @@ type ProviderStore = {
   providers: Provider[];
 };
 
-const STORE_PATH = resolve(process.cwd(), "providers.json");
-const ENV_PATH = resolve(process.cwd(), ".env");
+export function userSocodeDir() {
+  const override = process.env.SOCODE_HOME?.trim();
+  return override || join(homedir(), ".socode");
+}
+
+export function providerStorePath() {
+  return join(userSocodeDir(), "providers.json");
+}
+
+function legacyProviderStorePath() {
+  return resolve(process.cwd(), "providers.json");
+}
 
 export function chatCompletionsUrl(base: string) {
   const trimmed = base.replace(/\/+$/, "");
@@ -40,19 +51,16 @@ export function isThinkingEffort(value: string): value is ThinkingEffort {
 
 export function loadProvider(): Provider {
   const store = readStore();
-  const fromEnv = providerFromEnv();
-  const wanted = process.env.PROVIDER_NAME?.trim() || store?.active || fromEnv.name;
-  const saved = wanted ? store?.providers.find((item) => item.name === wanted) : undefined;
-  if (saved) return normalizeProvider(saved);
-  return normalizeProvider({
-    name: fromEnv.name || wanted || "default",
-    url: fromEnv.url || "",
-    api: fromEnv.api || "",
-    model: fromEnv.model || "",
-    contextWindow: fromEnv.contextWindow || DEFAULT_CONTEXT_WINDOW,
-    maxOutput: fromEnv.maxOutput || DEFAULT_MAX_OUTPUT,
-    thinkingEffort: fromEnv.thinkingEffort || DEFAULT_THINKING_EFFORT,
-  });
+  if (store?.providers.length) {
+    const saved =
+      store.providers.find((item) => item.name === store.active) ?? store.providers[0];
+    if (saved) {
+      const normalized = normalizeProvider(saved);
+      applyToProcessEnv(normalized);
+      return normalized;
+    }
+  }
+  return emptyProvider();
 }
 
 export function listProviders(current?: Provider): Provider[] {
@@ -151,17 +159,8 @@ export function saveProvider(provider: Provider, opts?: { replaceName?: string }
   if (index >= 0) store.providers[index] = normalized;
   else store.providers.push(normalized);
   store.active = normalized.name;
-  writeFileSync(STORE_PATH, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+  writeStore(store);
   applyToProcessEnv(normalized);
-  writeEnv({
-    PROVIDER_NAME: normalized.name,
-    BASE_URL: normalized.url.replace(/\/chat\/completions$/, ""),
-    api_key: normalized.api,
-    MODEL: normalized.model,
-    CONTEXT_WINDOW: String(normalized.contextWindow),
-    MAX_OUTPUT: String(normalized.maxOutput),
-    THINKING_EFFORT: normalized.thinkingEffort,
-  });
   return normalized;
 }
 
@@ -198,27 +197,20 @@ export function maskApiKey(api: string) {
   return `${api.slice(0, 4)}...${api.slice(-4)}`;
 }
 
-function applyToProcessEnv(provider: Provider) {
-  process.env.PROVIDER_NAME = provider.name;
-  process.env.BASE_URL = provider.url.replace(/\/chat\/completions$/, "");
-  process.env.api_key = provider.api;
-  process.env.MODEL = provider.model;
-  process.env.CONTEXT_WINDOW = String(provider.contextWindow);
-  process.env.MAX_OUTPUT = String(provider.maxOutput);
-  process.env.THINKING_EFFORT = provider.thinkingEffort;
-}
-
-function providerFromEnv(): Partial<Provider> {
-  const effort = (process.env.THINKING_EFFORT ?? "").trim().toLowerCase();
-  return {
-    name: process.env.PROVIDER_NAME?.trim() || "",
-    url: process.env.BASE_URL ?? process.env.LLM_URL ?? "",
-    api: process.env.api_key ?? process.env.LLM_API ?? "",
-    model: process.env.MODEL ?? process.env.LLM_MODEL ?? "",
-    contextWindow: numberOr(process.env.CONTEXT_WINDOW, 0),
-    maxOutput: numberOr(process.env.MAX_OUTPUT, 0),
-    thinkingEffort: isThinkingEffort(effort) ? effort : undefined,
-  };
+export function importProviderFromValues(values: Record<string, string>) {
+  if (existsSync(providerStorePath())) return loadProvider();
+  const effort = (values.THINKING_EFFORT ?? "").trim().toLowerCase();
+  const provider = normalizeProvider({
+    name: values.PROVIDER_NAME?.trim() || "",
+    url: values.BASE_URL ?? values.LLM_URL ?? "",
+    api: values.api_key ?? values.LLM_API ?? "",
+    model: values.MODEL ?? values.LLM_MODEL ?? "",
+    contextWindow: numberOr(values.CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOW),
+    maxOutput: numberOr(values.MAX_OUTPUT, DEFAULT_MAX_OUTPUT),
+    thinkingEffort: isThinkingEffort(effort) ? effort : DEFAULT_THINKING_EFFORT,
+  });
+  if (!providerReady(provider) || !provider.name) return null;
+  return saveProvider(provider);
 }
 
 function requireComplete(provider: Provider) {
@@ -259,35 +251,44 @@ function numberOr(value: string | undefined, fallback: number) {
 }
 
 function readStore(): ProviderStore | null {
-  if (!existsSync(STORE_PATH)) return null;
+  const path = providerStorePath();
+  if (existsSync(path)) return parseStoreFile(path);
+  const legacy = legacyProviderStorePath();
+  if (!existsSync(legacy)) return null;
+  const migrated = parseStoreFile(legacy);
+  if (!migrated) return null;
+  writeStore(migrated);
+  return migrated;
+}
+
+function writeStore(store: ProviderStore) {
+  mkdirSync(userSocodeDir(), { recursive: true });
+  writeFileSync(providerStorePath(), `${JSON.stringify(store, null, 2)}\n`, "utf8");
+}
+
+function parseStoreFile(path: string): ProviderStore | null {
   try {
-    return JSON.parse(readFileSync(STORE_PATH, "utf8")) as ProviderStore;
+    const data = JSON.parse(readFileSync(path, "utf8")) as ProviderStore;
+    if (!data || !Array.isArray(data.providers)) return null;
+    return {
+      active: typeof data.active === "string" ? data.active : data.providers[0]?.name ?? "",
+      providers: data.providers,
+    };
   } catch {
     return null;
   }
 }
 
-function writeEnv(updates: Record<string, string>) {
-  const existing = existsSync(ENV_PATH) ? readFileSync(ENV_PATH, "utf8") : "";
-  const lines = existing.split("\n");
-  const seen = new Set<string>();
-  const next = lines.map((line) => {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) return line;
-    const key = trimmed.slice(0, trimmed.indexOf("=")).trim();
-    if (!(key in updates)) return line;
-    seen.add(key);
-    return `${key}=${quoteEnv(updates[key])}`;
-  });
-  for (const [key, value] of Object.entries(updates)) {
-    if (seen.has(key)) continue;
-    if (next.length && next[next.length - 1] !== "") next.push("");
-    next.push(`${key}=${quoteEnv(value)}`);
-  }
-  writeFileSync(ENV_PATH, `${next.join("\n").replace(/\n+$/, "")}\n`, "utf8");
-}
-
-function quoteEnv(value: string) {
-  if (/[\s#"']/.test(value)) return `"${value.replaceAll('"', '\\"')}"`;
-  return value;
+function applyToProcessEnv(provider: Provider) {
+  process.env.PROVIDER_NAME = provider.name;
+  process.env.BASE_URL = provider.url;
+  process.env.LLM_URL = provider.url;
+  process.env.api_key = provider.api;
+  process.env.LLM_API = provider.api;
+  process.env.OPENAI_API_KEY = provider.api;
+  process.env.MODEL = provider.model;
+  process.env.LLM_MODEL = provider.model;
+  process.env.CONTEXT_WINDOW = String(provider.contextWindow);
+  process.env.MAX_OUTPUT = String(provider.maxOutput);
+  process.env.THINKING_EFFORT = provider.thinkingEffort;
 }

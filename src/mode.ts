@@ -139,11 +139,11 @@ export function insertCurrentMode(messages: Message[], mode: AgentMode): Message
   return [...messages, notice];
 }
 
-export function loadMode(raw?: string): AgentMode {
+export function loadMode(raw?: string, fallback: AgentMode = "ask"): AgentMode {
   if (raw !== undefined && raw !== "") {
     const parsed = parseMode(raw);
     if (!parsed) throw new Error(`未知模式: ${raw}（用 full / ask / plan / long）`);
     return parsed;
   }
-  return parseMode(process.env.MODE ?? "") ?? "ask";
+  return fallback;
 }

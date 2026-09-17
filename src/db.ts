@@ -1,4 +1,7 @@
-import pg from "pg";
+import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { existsSync, realpathSync } from "node:fs";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 export type Role = "system" | "user" | "assistant" | "tool";
 
@@ -15,98 +18,6 @@ export type Message = {
   toolCalls?: ToolCall[];
 };
 
-const { Pool } = pg;
-
-function quoteIdent(id: string) {
-  return `"${id.replaceAll('"', '""')}"`;
-}
-
-function adminUrl(databaseUrl: string) {
-  const url = new URL(databaseUrl);
-  url.pathname = "/postgres";
-  return url.toString();
-}
-
-function databaseName(databaseUrl: string) {
-  const name = new URL(databaseUrl).pathname.replace(/^\/+/, "");
-  if (!name) throw new Error("DATABASE_URL 缺少数据库名");
-  return name;
-}
-
-export async function connectDb(databaseUrl: string) {
-  const name = databaseName(databaseUrl);
-  const admin = new Pool({ connectionString: adminUrl(databaseUrl) });
-  try {
-    const found = await admin.query("SELECT 1 FROM pg_database WHERE datname = $1", [name]);
-    if (found.rowCount === 0) {
-      await admin.query(`CREATE DATABASE ${quoteIdent(name)}`);
-    }
-  } finally {
-    await admin.end();
-  }
-
-  const pool = new Pool({ connectionString: databaseUrl });
-  await migrate(pool);
-  return pool;
-}
-
-async function migrate(pool: pg.Pool) {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS conversations (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      model TEXT NOT NULL,
-      title TEXT NOT NULL DEFAULT '新会话',
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-
-    ALTER TABLE conversations
-      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
-    ALTER TABLE conversations
-      ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT '新会话';
-
-    CREATE TABLE IF NOT EXISTS messages (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-      role TEXT NOT NULL,
-      content TEXT NOT NULL DEFAULT '',
-      seq INTEGER NOT NULL,
-      payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
-    );
-
-    ALTER TABLE messages ADD COLUMN IF NOT EXISTS seq INTEGER;
-    ALTER TABLE messages ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb;
-    ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_role_check;
-    ALTER TABLE messages ADD CONSTRAINT messages_role_check
-      CHECK (role IN ('system', 'user', 'assistant', 'tool'));
-
-    UPDATE messages
-    SET seq = ordered.seq
-    FROM (
-      SELECT
-        id,
-        ROW_NUMBER() OVER (
-          PARTITION BY conversation_id
-          ORDER BY
-            created_at ASC,
-            CASE role WHEN 'system' THEN 0 WHEN 'user' THEN 1 WHEN 'assistant' THEN 2 ELSE 3 END,
-            id ASC
-        ) AS seq
-      FROM messages
-      WHERE seq IS NULL
-    ) ordered
-    WHERE messages.id = ordered.id AND messages.seq IS NULL;
-
-    ALTER TABLE messages ALTER COLUMN seq SET NOT NULL;
-
-    CREATE UNIQUE INDEX IF NOT EXISTS messages_conversation_seq_idx
-      ON messages (conversation_id, seq);
-    CREATE INDEX IF NOT EXISTS messages_conversation_created_at_idx
-      ON messages (conversation_id, created_at);
-  `);
-}
-
 export type Session = {
   id: string;
   title: string;
@@ -114,13 +25,10 @@ export type Session = {
   persisted: boolean;
 };
 
-export function emptySession(title = "新会话"): Session {
-  return { id: "", title, messages: [], persisted: false };
-}
-
-export function sessionHasChat(messages: Message[]) {
-  return messages.some((message) => message.role === "user" || message.role === "assistant" || message.role === "tool");
-}
+export type SessionStore = {
+  workspace: string;
+  dir: string;
+};
 
 export type ConversationRow = {
   id: string;
@@ -130,167 +38,221 @@ export type ConversationRow = {
   first_user: string | null;
 };
 
-export async function createConversation(pool: pg.Pool, model: string, title = "新会话") {
-  const result = await pool.query<{ id: string; title: string }>(
-    "INSERT INTO conversations (model, title) VALUES ($1, $2) RETURNING id, title",
-    [model, title],
-  );
-  return { id: result.rows[0].id, title: result.rows[0].title, messages: [] as Message[], persisted: true };
+type SessionFile = {
+  id: string;
+  title: string;
+  model: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: Message[];
+};
+
+const ROLES = new Set<Role>(["system", "user", "assistant", "tool"]);
+
+export function emptySession(title = "新会话"): Session {
+  return { id: "", title, messages: [], persisted: false };
 }
 
-export async function updateConversationTitle(pool: pg.Pool, conversationId: string, title: string) {
-  await pool.query("UPDATE conversations SET title = $2, updated_at = now() WHERE id = $1", [
-    conversationId,
+export function sessionHasChat(messages: Message[]) {
+  return messages.some((message) => message.role === "user" || message.role === "assistant" || message.role === "tool");
+}
+
+export function socodeDir(workspace: string) {
+  return join(workspace, ".socode");
+}
+
+export function sessionsDir(workspace: string) {
+  return join(socodeDir(workspace), "sessions");
+}
+
+export async function openSessionStore(workspace: string): Promise<SessionStore> {
+  const root = realpathSync(workspace);
+  const dir = sessionsDir(root);
+  await mkdir(dir, { recursive: true });
+  await writeIfMissing(join(socodeDir(root), ".gitignore"), "sessions/\n");
+  await writeIfMissing(join(dir, ".gitignore"), "*\n!.gitignore\n");
+  return { workspace: root, dir };
+}
+
+export async function createConversation(store: SessionStore, model: string, title = "新会话") {
+  const now = new Date().toISOString();
+  const record: SessionFile = {
+    id: randomUUID(),
     title,
-  ]);
+    model,
+    createdAt: now,
+    updatedAt: now,
+    messages: [],
+  };
+  await writeSession(store, record);
+  return { id: record.id, title: record.title, messages: [] as Message[], persisted: true };
 }
 
-export async function listConversations(pool: pg.Pool, limit = 30) {
-  const result = await pool.query<ConversationRow>(
-    `SELECT
-       c.id,
-       c.title,
-       c.model,
-       c.updated_at,
-       (
-         SELECT m.content
-         FROM messages m
-         WHERE m.conversation_id = c.id AND m.role = 'user'
-         ORDER BY m.seq ASC
-         LIMIT 1
-       ) AS first_user
-     FROM conversations c
-     ORDER BY c.updated_at DESC, c.created_at DESC
-     LIMIT $1`,
-    [limit],
-  );
-  return result.rows;
+export async function updateConversationTitle(store: SessionStore, conversationId: string, title: string) {
+  const record = await readSession(store, conversationId);
+  record.title = title;
+  record.updatedAt = new Date().toISOString();
+  await writeSession(store, record);
 }
 
-export async function latestConversationId(pool: pg.Pool) {
-  const result = await pool.query<{ id: string }>(
-    "SELECT id FROM conversations ORDER BY updated_at DESC, created_at DESC LIMIT 1",
-  );
-  return result.rows[0]?.id ?? null;
+export async function listConversations(store: SessionStore, limit = 30) {
+  const records = await readAllSessions(store);
+  records.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.createdAt.localeCompare(a.createdAt));
+  return records.slice(0, limit).map((record) => ({
+    id: record.id,
+    title: record.title,
+    model: record.model,
+    updated_at: new Date(record.updatedAt),
+    first_user: record.messages.find((message) => message.role === "user")?.content ?? null,
+  }));
 }
 
-export async function conversationExists(pool: pg.Pool, conversationId: string) {
-  const result = await pool.query("SELECT 1 FROM conversations WHERE id = $1", [conversationId]);
-  return (result.rowCount ?? 0) > 0;
+export async function latestConversationId(store: SessionStore) {
+  const rows = await listConversations(store, 1);
+  return rows[0]?.id ?? null;
 }
 
-export async function loadSession(pool: pg.Pool, conversationId: string): Promise<Session> {
-  const result = await pool.query<{ id: string; title: string }>(
-    "SELECT id, title FROM conversations WHERE id = $1",
-    [conversationId],
-  );
-  const row = result.rows[0];
-  if (!row) throw new Error(`找不到会话 ${conversationId}`);
-  return { id: row.id, title: row.title, messages: await loadMessages(pool, row.id), persisted: true };
+export async function conversationExists(store: SessionStore, conversationId: string) {
+  return existsSync(sessionPath(store, conversationId));
+}
+
+export async function loadSession(store: SessionStore, conversationId: string): Promise<Session> {
+  const record = await readSession(store, conversationId);
+  return { id: record.id, title: record.title, messages: record.messages, persisted: true };
 }
 
 export async function openConversation(
-  pool: pg.Pool,
+  store: SessionStore,
   opts: { model: string; id?: string; resume?: boolean; fresh?: boolean },
 ): Promise<Session> {
-  if (opts.id) return await loadSession(pool, opts.id);
+  if (opts.id) return await loadSession(store, opts.id);
   if (opts.resume && !opts.fresh) {
-    const latest = await latestConversationId(pool);
-    if (latest) return await loadSession(pool, latest);
+    const latest = await latestConversationId(store);
+    if (latest) return await loadSession(store, latest);
   }
   return emptySession();
 }
 
-export async function persistSession(pool: pg.Pool, session: Session, model: string) {
+export async function persistSession(store: SessionStore, session: Session, model: string) {
   if (session.persisted && session.id) return session;
-  const created = await createConversation(pool, model, session.title);
+  const created = await createConversation(store, model, session.title);
   session.id = created.id;
   session.title = created.title;
   session.persisted = true;
-  if (session.messages.length) await saveMessages(pool, session.id, session.messages);
+  if (session.messages.length) await saveMessages(store, session.id, session.messages);
   return session;
 }
 
-export async function discardEmptySession(pool: pg.Pool, session: Session) {
+export async function discardEmptySession(store: SessionStore, session: Session) {
   if (!session.persisted || !session.id || sessionHasChat(session.messages)) return;
-  await pool.query("DELETE FROM conversations WHERE id = $1", [session.id]);
+  await unlink(sessionPath(store, session.id)).catch(() => undefined);
   session.id = "";
   session.persisted = false;
 }
 
-export async function loadMessages(pool: pg.Pool, conversationId: string) {
-  const result = await pool.query<{ role: Role; content: string; payload: unknown }>(
-    "SELECT role, content, payload FROM messages WHERE conversation_id = $1 ORDER BY seq ASC, created_at ASC",
-    [conversationId],
-  );
-  return result.rows.map(rowToMessage);
+export async function loadMessages(store: SessionStore, conversationId: string) {
+  return (await readSession(store, conversationId)).messages;
 }
 
-function rowToMessage(row: { role: Role; content: string; payload: unknown }): Message {
-  const payload = (row.payload ?? {}) as { tool_call_id?: string; tool_calls?: ToolCall[] };
+export async function saveMessages(store: SessionStore, conversationId: string, messages: Message[]) {
+  if (messages.length === 0) return;
+  const record = await readSession(store, conversationId);
+  record.messages = [...record.messages, ...messages];
+  record.updatedAt = new Date().toISOString();
+  await writeSession(store, record);
+}
+
+export async function replaceMessages(store: SessionStore, conversationId: string, messages: Message[]) {
+  const record = await readSession(store, conversationId);
+  record.messages = messages;
+  record.updatedAt = new Date().toISOString();
+  await writeSession(store, record);
+}
+
+function sessionPath(store: SessionStore, id: string) {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error(`找不到会话 ${id}`);
+  return join(store.dir, `${id}.json`);
+}
+
+async function readSession(store: SessionStore, id: string) {
+  let raw: string;
+  try {
+    raw = await readFile(sessionPath(store, id), "utf8");
+  } catch {
+    throw new Error(`找不到会话 ${id}`);
+  }
+  const record = parseSessionFile(raw);
+  if (!record || record.id !== id) throw new Error(`找不到会话 ${id}`);
+  return record;
+}
+
+async function readAllSessions(store: SessionStore) {
+  let names: string[] = [];
+  try {
+    names = await readdir(store.dir);
+  } catch {
+    return [];
+  }
+  const records: SessionFile[] = [];
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    try {
+      const record = parseSessionFile(await readFile(join(store.dir, name), "utf8"));
+      if (record) records.push(record);
+    } catch {
+      // skip unreadable files
+    }
+  }
+  return records;
+}
+
+function parseSessionFile(raw: string): SessionFile | null {
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!data || typeof data !== "object") return null;
+  const rec = data as Record<string, unknown>;
+  if (typeof rec.id !== "string" || typeof rec.title !== "string" || typeof rec.model !== "string") return null;
+  if (typeof rec.createdAt !== "string" || typeof rec.updatedAt !== "string") return null;
+  if (!Array.isArray(rec.messages)) return null;
+  const messages: Message[] = [];
+  for (const item of rec.messages) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    if (!ROLES.has(row.role as Role) || typeof row.content !== "string") continue;
+    messages.push({
+      role: row.role as Role,
+      content: row.content,
+      toolCallId: typeof row.toolCallId === "string" ? row.toolCallId : undefined,
+      toolCalls: Array.isArray(row.toolCalls) ? (row.toolCalls as ToolCall[]) : undefined,
+    });
+  }
   return {
-    role: row.role,
-    content: row.content,
-    toolCallId: payload.tool_call_id,
-    toolCalls: payload.tool_calls,
+    id: rec.id,
+    title: rec.title,
+    model: rec.model,
+    createdAt: rec.createdAt,
+    updatedAt: rec.updatedAt,
+    messages,
   };
 }
 
-function messagePayload(message: Message) {
-  const payload: Record<string, unknown> = {};
-  if (message.toolCallId) payload.tool_call_id = message.toolCallId;
-  if (message.toolCalls?.length) payload.tool_calls = message.toolCalls;
-  return payload;
-}
-
-export async function saveMessages(pool: pg.Pool, conversationId: string, messages: Message[]) {
-  if (messages.length === 0) return;
-  const client = await pool.connect();
+async function writeSession(store: SessionStore, record: SessionFile) {
+  const file = sessionPath(store, record.id);
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmp, `${JSON.stringify(record, null, 2)}\n`, "utf8");
   try {
-    await client.query("BEGIN");
-    await client.query("SELECT id FROM conversations WHERE id = $1 FOR UPDATE", [conversationId]);
-    const next = await client.query<{ seq: number }>(
-      "SELECT COALESCE(MAX(seq), 0) AS seq FROM messages WHERE conversation_id = $1",
-      [conversationId],
-    );
-    let seq = Number(next.rows[0]?.seq ?? 0);
-    for (const message of messages) {
-      seq += 1;
-      await client.query(
-        "INSERT INTO messages (conversation_id, role, content, seq, payload, created_at) VALUES ($1, $2, $3, $4, $5, clock_timestamp())",
-        [conversationId, message.role, message.content, seq, messagePayload(message)],
-      );
-    }
-    await client.query("UPDATE conversations SET updated_at = now() WHERE id = $1", [conversationId]);
-    await client.query("COMMIT");
+    await rename(tmp, file);
   } catch (error) {
-    await client.query("ROLLBACK");
+    await unlink(tmp).catch(() => undefined);
     throw error;
-  } finally {
-    client.release();
   }
 }
 
-export async function replaceMessages(pool: pg.Pool, conversationId: string, messages: Message[]) {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    await client.query("SELECT id FROM conversations WHERE id = $1 FOR UPDATE", [conversationId]);
-    await client.query("DELETE FROM messages WHERE conversation_id = $1", [conversationId]);
-    let seq = 0;
-    for (const message of messages) {
-      seq += 1;
-      await client.query(
-        "INSERT INTO messages (conversation_id, role, content, seq, payload, created_at) VALUES ($1, $2, $3, $4, $5, clock_timestamp())",
-        [conversationId, message.role, message.content, seq, messagePayload(message)],
-      );
-    }
-    await client.query("UPDATE conversations SET updated_at = now() WHERE id = $1", [conversationId]);
-    await client.query("COMMIT");
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
-  }
+async function writeIfMissing(path: string, content: string) {
+  if (existsSync(path)) return;
+  await writeFile(path, content, "utf8");
 }

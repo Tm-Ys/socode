@@ -20,7 +20,7 @@ const DENY_WRITE_DIRS = [
   "/root",
 ];
 
-const SECRET_DIR_NAMES = [".ssh", ".gnupg", ".aws", ".azure", ".kube", ".config/gcloud"];
+const SECRET_DIR_NAMES = [".ssh", ".gnupg", ".aws", ".azure", ".kube", ".config/gcloud", ".socode"];
 const SECRET_FILE_NAMES = [".netrc", ".npmrc", ".pypirc", ".git-credentials"];
 const SECRET_REL_FILES = [".docker/config.json"];
 const SECRET_BASENAMES = new Set([".env", "providers.json"]);
@@ -186,16 +186,25 @@ export function isInsideWorkspace(workspace: string, path: string) {
   return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 }
 
+function isSessionStorePath(path: string) {
+  const parts = normalize(path).split(sep);
+  const index = parts.indexOf(".socode");
+  return index >= 0 && parts[index + 1] === "sessions";
+}
+
 export function denyReason(path: string): string | null {
   const target = normalize(path);
   const base = basename(target);
   if (SECRET_BASENAMES.has(base) || (/^\.env\./.test(base) && base !== ".env.example")) {
     return `拒绝访问受保护文件: ${base}`;
   }
+  if (isSessionStorePath(target)) {
+    return "拒绝访问工作区会话目录 .socode/sessions";
+  }
   const home = homedir();
   for (const dir of [
     ...DENY_WRITE_DIRS,
-    ...SECRET_DIR_NAMES.map((name) => joinHome(home, name)),
+    ...secretUserDirs(home),
   ]) {
     if (!dir) continue;
     if (target === dir || target.startsWith(`${dir}${sep}`)) {
@@ -722,16 +731,14 @@ export function scrubEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEn
 
 function seatbeltProfile(sandbox?: BashSandbox) {
   const home = homedir();
-  const writeDirs = [
-    ...DENY_WRITE_DIRS,
-    ...SECRET_DIR_NAMES.map((name) => joinHome(home, name)),
-  ].filter(Boolean);
+  const secretDirs = secretUserDirs(home);
+  const writeDirs = [...DENY_WRITE_DIRS, ...secretDirs].filter(Boolean);
   const secretFiles = [
     ...SECRET_FILE_NAMES.map((name) => joinHome(home, name)),
     ...SECRET_REL_FILES.map((name) => joinHome(home, name)),
   ].filter(Boolean);
   const denyWrite = writeDirs.map((dir) => `(subpath ${sb(dir)})`).join(" ");
-  const denySecretDirs = SECRET_DIR_NAMES.map((name) => joinHome(home, name))
+  const denySecretDirs = secretDirs
     .filter(Boolean)
     .map((dir) => `(subpath ${sb(dir)})`)
     .join(" ");
@@ -750,4 +757,11 @@ function sb(path: string) {
 
 function joinHome(home: string, name: string) {
   return home ? `${home}${sep}${name}` : "";
+}
+
+function secretUserDirs(home: string) {
+  const dirs = SECRET_DIR_NAMES.map((name) => joinHome(home, name)).filter(Boolean);
+  const override = process.env.SOCODE_HOME?.trim();
+  if (override) dirs.push(resolve(override));
+  return dirs;
 }

@@ -3,8 +3,11 @@ import { describe, it } from "node:test";
 import { formatBanner, pickWelcome, WELCOME_LINES } from "./banner.js";
 
 describe("welcome lines", () => {
-  it("has a large pool and always picks one of them", () => {
-    assert.ok(WELCOME_LINES.length >= 40);
+  it("explains a command and always picks one of them", () => {
+    assert.ok(WELCOME_LINES.length >= 12);
+    for (const line of WELCOME_LINES) {
+      assert.match(line, /^你知道吗？.+\。$/);
+    }
     assert.equal(pickWelcome(() => 0), WELCOME_LINES[0]);
     assert.equal(pickWelcome(() => 0.999), WELCOME_LINES[WELCOME_LINES.length - 1]);
     for (let i = 0; i < 20; i += 1) {
@@ -19,12 +22,12 @@ describe("formatBanner", () => {
       workspace: "/Users/me/projects/socode",
       title: "新会话",
       mode: "ask",
-      welcome: "先读再改。猜出来的补丁最贵。",
+      welcome: "你知道吗？输入 / 会按前缀列出命令，Tab 补全。",
       width: 56,
       color: false,
     });
     assert.match(text, /╭─ socode/);
-    assert.match(text, /先读再改/);
+    assert.match(text, /你知道吗？/);
     assert.match(text, /Ask · 新会话/);
     assert.match(text, /\/ 看命令/);
     assert.doesNotMatch(text, /\/provider/);
@@ -37,7 +40,7 @@ describe("formatBanner", () => {
       workspace: "/tmp/demo",
       title: "新会话",
       mode: "ask",
-      welcome: "Ask 一声，总比 Full 后悔轻。",
+      welcome: "你知道吗？思考强度请用 /effort 调，不要走 /provider edit。",
       width: 56,
       color: false,
     });

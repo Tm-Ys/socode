@@ -1,8 +1,8 @@
 # socode
 
-本机终端里的编程 Agent。OpenAI 兼容模型、流式输出、工具循环、PostgreSQL 会话。
+本机终端里的编程 Agent。OpenAI 兼容模型、流式输出、工具循环。会话存在当前工作区的 `.socode/sessions/`，换目录互不可见。
 
-默认 **Ask**：能改仓库，写入先问你；密钥和系统路径始终碰不到。不是套壳框架——运行时只依赖 `pg`，其余是一组可直接审的 TypeScript 模块。
+默认 **Ask**：能改仓库，写入先问你；密钥和系统路径始终碰不到。不是套壳框架——运行时没有数据库依赖，其余是一组可直接审的 TypeScript 模块。
 
 ## 亮点
 
@@ -33,54 +33,57 @@ Long 的审批器拿一份干净上下文、只输出 JSON；解析失败、超�
 
 **终端自己就是前端。** 没有 React / Ink：流式 Markdown 差量重绘（标题、代码块、列表、粗体），思考块暗色斜体和正文分开，工具行和失败红色，Ask 审批，问卷（`question`），子代理默认藏过程、右下角 HUD。说明见 [`docs/FRONTEND.md`](docs/FRONTEND.md)。
 
-**上下文看得见、会话回得去。** `/context` 用色块标 system / tools / 对话 / 预留输出 / 空闲。一轮工具超过 6 次、或模型输出超过约 2400 字时，结束后打一条灰色 `recap`；**这一轮入库和后续上下文只留 recap**，需要细节请自行 grep。PostgreSQL 自动建库、迁移；短轮次仍存完整 tool trace。`npm start` 默认新会话，空对话不入库。生成中 Esc 中止当前轮：用户问题留下，半截回复不入库。连续三次同调用或同失败会停，避免空转。`/` 后有幽灵补全和 Tab。
+**上下文看得见、会话回得去。** `/context` 用色块标 system / tools / 对话 / 预留输出 / 空闲。一轮工具超过 6 次、或模型输出超过约 2400 字时，结束后打一条灰色 `recap`；**这一轮入库和后续上下文只留 recap**，需要细节请自行 grep。进入工作区时自动创建 `.socode/sessions/`；对话 JSON 只落在本目录，`/session` 看不到别的仓库。`socode` 默认开新会话，空对话不落盘。生成中 Esc 中止当前轮：用户问题留下，半截回复不入库。连续三次同调用或同失败会停，避免空转。`/` 后有幽灵补全和 Tab。
 
-**小到能审。** 大约 50 个 TypeScript 文件、运行时依赖只有 `pg`。权限、沙箱、Long 审批、预算、rubric、MCP、Skills、压缩、验证、子代理、计划、问卷、recap 都有测试（`npm test`）。策略写在代码里，不藏在框架配置后面。
+**小到能审。** 大约 50 个 TypeScript 文件、运行时没有数据库依赖。权限、沙箱、Long 审批、预算、rubric、MCP、Skills、压缩、验证、子代理、计划、问卷、recap 都有测试（`npm test`）。策略写在代码里，不藏在框架配置后面。
 
 要达到「敢当日常主力」还缺什么、90 天建议先做什么，见 [`docs/PRODUCT-ROADMAP.md`](docs/PRODUCT-ROADMAP.md)。
 
 ## 安装
 
-需要 Node 22+ 和 PostgreSQL。
+需要 Node 22+。
+
+**macOS 安装包**（GitHub Release 里的 `.dmg` / `.pkg`，或 `socode-*-macos.tar.gz`）：
+
+```bash
+# tar.gz
+tar xf socode-*-macos.tar.gz
+cd socode-*-macos
+sudo ./install.sh
+
+# 或双击 .pkg / 打开 .dmg。未签名时按住 Control 点击 → 打开。
+```
+
+安装后进入项目目录运行 `socode`。卸载：`sudo ./uninstall.sh`。
+
+**从源码：**
 
 ```bash
 npm install
-cp .env.example .env
+npx socode
+# 开发时也可以 npm start
 ```
 
-在 `.env` 里填 OpenAI 兼容 Provider：
+把命令装到 PATH：`npm link`（先 `npm run build`）或 `npm install -g ./socode-0.1.0.tgz`。
 
-```
-PROVIDER_NAME="deepseek"
-MODEL="deepseek-flash"
-api_key="sk-..."
-BASE_URL="https://api.deepseek.com/v1"
-CONTEXT_WINDOW="128000"
-MAX_OUTPUT="8192"
-THINKING_EFFORT="none"
-DATABASE_URL="postgres://localhost:5432/socode"
-SYSTEM_PROMPT=""
-MAX_CONTEXT_MESSAGES="200"
-MAX_AGENT_STEPS="80"
-MODE="ask"
-```
+没有保存过 Provider 时，交互式启动会进入向导，写入用户级 `~/.socode/providers.json`（所有工作区、所有对话共用）。也可以用 `--url` / `--api` / `--model` / `--name` 只覆盖本次进程。
 
-`THINKING_EFFORT` 可选：`none` / `minimal` / `low` / `medium` / `high` / `xhigh`，默认 `medium`。运行中请用 `/effort` 调整，不要走 `/provider edit`。多个 Provider 存在 gitignore 的 `providers.json`。已保存的 Provider 整份生效，不再和环境变量字段混拼；没有 `providers.json` 时才用环境变量。
+Harness 默认值在 `~/.socode/config.json`：`mode`、`systemPrompt`、`maxContextMessages`、`maxAgentSteps`、`maxAgentTokens`、`subagentSteps`、`judgeModel`、`longBudgetPolicy`（`dynamic` / `fixed` / `unlimited`）、`longBudgetDynamic`（`50-75` 或 `25-50`）。命令行 `--mode` / `--steps` / `--max` / `--budget` / `--system` 覆盖本次进程。`/mode` 只改当前会话，不写回 config。项目说明放 `AGENTS.md`。若目录里还有旧的 `.env`，第一次启动会一次性迁进 `~/.socode/`，之后不再读取。
 
-可选：`MAX_AGENT_TOKENS`（Long 的 token 预算）、`LONG_APPROVE_MODEL` / `JUDGE_MODEL`（Long 审批、skill 激活、rubric）、`SUBAGENT_STEPS`（子代理步数，默认 24）。`LONG_BUDGET_POLICY` 默认 `dynamic`（也可 `fixed` / `unlimited`），`LONG_BUDGET_DYNAMIC` 默认 `50-75`。审批器也会选用 `providers.json` 里名为 `judge` / `fast` / `cheap` / `mini` 的项。
+`THINKING_EFFORT` 可选：`none` / `minimal` / `low` / `medium` / `high` / `xhigh`，默认 `medium`。运行中请用 `/effort` 调整，不要走 `/provider edit`。审批器也会选用 `providers.json` 里名为 `judge` / `fast` / `cheap` / `mini` 的项。
 
 ## 用法
 
 ```bash
-npm start
-npm start -- --input "你好"
-npm start -- --resume
-npm start -- --id <conversation-uuid>
-npm start -- --steps 120 --max 200
-npm start -- --mode long
+socode
+socode --input "你好"
+socode --resume
+socode --id <conversation-uuid>
+socode --steps 120 --max 200
+socode --mode long
 ```
 
-`npm start` 默认开**新会话**。没有用户/助手内容的对话不会写入数据库；接着上次用 `--resume` 或 `/session`。`--new` 仍可用，和默认一样。
+`socode` 默认开**新会话**。没有用户/助手内容的对话不会写入 `.socode/sessions/`；接着上次用 `--resume` 或 `/session`。`--new` 仍可用，和默认一样。换工作区（`/setworkarea`）会换一套会话目录。源码树里 `npm start` 等价于 `npx socode`。
 
 命令行还可覆盖本次进程的 `--url` / `--api` / `--model` / `--name` / `--context` / `--output` / `--effort` / `--mode` / `--budget`。`--no-stream` / `--no-agent` 关掉流式或工具。
 
@@ -92,7 +95,7 @@ npm test
 
 ## 权限与沙箱
 
-默认 **Ask**（`MODE=ask` 或 `--mode ask`）。工作区内创建、修改、删除，以及有副作用的命令，会先询问：`y` 允许、`n` 或回车拒绝、`a` 本会话同类一律允许。Esc 视为拒绝。工作区外写入直接拒绝，需要 `/mode full`。
+默认 **Ask**（`~/.socode/config.json` 的 `mode`，或 `--mode ask`）。工作区内创建、修改、删除，以及有副作用的命令，会先询问：`y` 允许、`n` 或回车拒绝、`a` 本会话同类一律允许。Esc 视为拒绝。工作区外写入直接拒绝，需要 `/mode full`。
 
 - **Ask**：写、`edit`、删、有副作用的 `bash` 和所有 `git` 先审批，且只能在工作区内；解析后的只读管道（`ls` / `pwd` / `cat | rg`）不打断。bash 的 cwd 和重定向都不能离开工作区。
 - **Full**（`/mode full`）：直接改文件和执行命令，仍禁止 `/etc`、`/usr`、`~/.ssh`、`~/.aws`、工作区 `.env` 等。
@@ -178,7 +181,7 @@ Skills 来自各目录下的 `<name>/SKILL.md`（YAML frontmatter 的 `name` / `
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/index.ts` | CLI、会话循环、斜杠命令 |
+| `src/index.ts` | CLI、会话循环、斜杠命令；发布入口是 `bin/socode.mjs` |
 | `src/agent.ts` | 工具循环、doom loop、Long 预算；上下文顶满时先压缩再继续 |
 | `src/permissions.ts` | 按模式授权 |
 | `src/sandbox.ts` | 路径 denylist、bash 解析/分类、OS 沙箱 |
@@ -200,7 +203,7 @@ Skills 来自各目录下的 `<name>/SKILL.md`（YAML frontmatter 的 `name` / `
 | `src/banner.ts` | 启动欢迎框与随机欢迎语 |
 | `src/think.ts` / `src/markdown.ts` | 思考块拆分、轻量 Markdown → TUI ANSI |
 | `src/recap.ts` | 长轮次灰色回顾；触发后历史只留 recap |
-| `src/db.ts` | PostgreSQL 自动建库与迁移；空会话不入库 |
+| `src/db.ts` | 工作区 `.socode/sessions/` JSON 会话；空会话不落盘；目录间隔离 |
 | `src/context.ts` | 上下文计量与 `/context` 色块 |
 
 ## 刻意不做

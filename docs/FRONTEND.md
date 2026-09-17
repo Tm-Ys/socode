@@ -6,12 +6,12 @@ socode 没有 web 界面。所谓前端就是终端里的这一层 TUI：全是�
 
 ## 启动
 
-`npm start` 后先打一块欢迎框，每次从一池欢迎语里抽一句：
+`socode`（或仓库里 `npm start`）后先打一块欢迎框，每次随机抽一条指令说明：
 
 ```
 ╭─ socode ──────────────────────────────────────╮
 │                                               │
-│  先读再改。猜出来的补丁最贵。                   │
+│  你知道吗？输入 / 会按前缀列出命令，Tab 补全。 │
 │                                               │
 │  ~/projects/socode                            │
 │  Ask · 新会话                                 │
@@ -137,7 +137,7 @@ Ask 模式下，写文件或跑命令前弹一行提问，等一个按键：
   ↑↓ 选择   enter 切换   e 编辑   n 新增   esc 取消
 ```
 
-`e` 或 `/provider edit [name]` 按字段改，回车保留方括号里的当前值，不会把空输入当成清空。`n` 或 `/provider new` 是空表。多个 Provider 存在 `providers.json`。非 TTY 用 `/provider show` / `/provider list` / `/provider <name>`。
+`e` 或 `/provider edit [name]` 按字段改，回车保留方括号里的当前值，不会把空输入当成清空。`n` 或 `/provider new` 是空表。多个 Provider 存在 `~/.socode/providers.json`，和当前工作区无关。非 TTY 用 `/provider show` / `/provider list` / `/provider <name>`。
 
 ## 子代理
 

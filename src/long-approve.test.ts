@@ -71,20 +71,13 @@ describe("formatJudgeUser", () => {
 });
 
 describe("pickJudgeProvider", () => {
-  it("keeps the same endpoint and shrinks output, honoring LONG_APPROVE_MODEL", () => {
-    const prev = process.env.LONG_APPROVE_MODEL;
-    process.env.LONG_APPROVE_MODEL = "flash-lite";
-    try {
-      const judge = pickJudgeProvider(provider);
-      assert.equal(judge.model, "flash-lite");
-      assert.equal(judge.url, provider.url);
-      assert.equal(judge.api, provider.api);
-      assert.equal(judge.thinkingEffort, "none");
-      assert.equal(judge.maxOutput, 256);
-    } finally {
-      if (prev === undefined) delete process.env.LONG_APPROVE_MODEL;
-      else process.env.LONG_APPROVE_MODEL = prev;
-    }
+  it("keeps the same endpoint and shrinks output, honoring judgeModel", () => {
+    const judge = pickJudgeProvider(provider, { judgeModel: "flash-lite" });
+    assert.equal(judge.model, "flash-lite");
+    assert.equal(judge.url, provider.url);
+    assert.equal(judge.api, provider.api);
+    assert.equal(judge.thinkingEffort, "none");
+    assert.equal(judge.maxOutput, 256);
   });
 });
 

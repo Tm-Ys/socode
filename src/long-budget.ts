@@ -91,17 +91,6 @@ export function resolveLongBudget(
   return { policy, ...ordered, x, y, reminder };
 }
 
-export function resolveLongBudgetFromEnv(maxSteps: number): LongBudgetPlan {
-  return resolveLongBudget(maxSteps, {
-    policy: process.env.LONG_BUDGET_POLICY,
-    dynamic: process.env.LONG_BUDGET_DYNAMIC,
-    p25: envInt(process.env.LONG_BUDGET_P25),
-    p50: envInt(process.env.LONG_BUDGET_P50),
-    p75: envInt(process.env.LONG_BUDGET_P75),
-    reminder: envFlag(process.env.LONG_BUDGET_REMINDER),
-  });
-}
-
 export function isTurnBudgetMessage(message: Message) {
   return message.role === "system" && message.content.startsWith(TURN_BUDGET_PREFIX);
 }
@@ -218,17 +207,4 @@ function orderPercentiles(p25: number, p50: number, p75: number, p100: number) {
 function clampStep(value: number | undefined, fallback: number, max: number) {
   if (value === undefined || !Number.isFinite(value) || value < 1) return Math.min(max, Math.max(1, fallback));
   return Math.min(max, Math.max(1, Math.floor(value)));
-}
-
-function envInt(raw?: string) {
-  if (!raw?.trim()) return undefined;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : undefined;
-}
-
-function envFlag(raw?: string) {
-  if (raw === undefined) return undefined;
-  const key = raw.trim().toLowerCase();
-  if (["0", "false", "off", "no"].includes(key)) return false;
-  if (["1", "true", "on", "yes"].includes(key)) return true;
 }

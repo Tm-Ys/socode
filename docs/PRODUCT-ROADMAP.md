@@ -73,7 +73,7 @@ Long 把目标记在会话里的 `【task state】`（不另建表）。上下�
 
 没有 React / Ink。流式 Markdown 差量重绘、工具行、Ask 审批、子代理 HUD，见 [`FRONTEND.md`](./FRONTEND.md)。工具结果默认回显 3 行后折叠。Ask 审批是一行按键，**没有 diff 预览**。
 
-OpenAI 兼容 Provider：`.env` 或 gitignore 的 `providers.json`。`/provider` 查看、编辑、切换、新增。已保存的 Provider 整份生效，不再和环境变量字段混拼。
+OpenAI 兼容 Provider：用户级 `~/.socode/providers.json`。`/provider` 查看、编辑、切换、新增。已保存的 Provider 整份生效。
 
 ### 2.8 测试与体积
 
@@ -468,7 +468,7 @@ P1 其余（MCP 远程传输、hooks、分层记忆、用量面板）和全部 P
 
 - 用户级根目录：`~/.socode/`（MCP 配置已在使用这一约定）。
 - 默认会话：`~/.socode/sessions/` 或同目录 SQLite。
-- 用户级 Provider：不要强制仓库根 `.env`；`.env` 仍可作为项目覆盖。
+- 用户级 Provider：已落在 `~/.socode/providers.json`，不再读仓库根 `.env`。
 - 快照：`~/.socode/checkpoints/` 或会话存储内 blob；工作区 `.socode-audit.jsonl` 继续只做审计。
 
 ---

@@ -137,7 +137,9 @@ export async function activateBaseSkills(params: {
     .filter((name): name is BaseSkillName => (BASE_SKILL_NAMES as readonly string[]).includes(name));
   const unique = [...new Set(allowed)];
   const prompt = params.prompt.trim();
-  const forced = (params.force ?? []).filter((name) => unique.includes(name));
+  const forced = (params.force ?? []).filter((name): name is BaseSkillName =>
+    unique.includes(name as BaseSkillName),
+  );
   if (!unique.length || (!prompt && !forced.length)) return EMPTY_SKILL_ACTIVATION;
   const mentioned = mentionedBaseSkills(prompt, unique);
   if (skipSkillActivate(prompt) && !mentioned.length && !forced.length) return EMPTY_SKILL_ACTIVATION;
