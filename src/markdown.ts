@@ -10,11 +10,14 @@ const YELLOW = "\x1b[33m";
 
 export type MarkdownLive = {
   raw: string;
+  /** Wrapped rows already committed to scrollback (never rewritten). */
+  committed: number;
+  /** Display rows of the unfinished tail currently on the last line. */
   rows: number;
 };
 
 export function newMarkdownLive(): MarkdownLive {
-  return { raw: "", rows: 0 };
+  return { raw: "", committed: 0, rows: 0 };
 }
 
 export function useColor(tty = Boolean(process.stdout.isTTY)) {
@@ -60,6 +63,21 @@ export function rewindLive(write: (text: string) => void, rows: number) {
   write("\x1b[J");
 }
 
+function rewindTail(write: (text: string) => void, rows: number) {
+  if (rows <= 0) return;
+  if (rows > 1) write(`\x1b[${rows - 1}A`);
+  write("\r\x1b[2K");
+}
+
+export function wrapDisplayLines(text: string, columns: number) {
+  const cols = Math.max(1, columns);
+  const rows: string[] = [];
+  for (const line of text.split("\n")) {
+    rows.push(...wrapOneLine(line, cols));
+  }
+  return rows.length ? rows : [""];
+}
+
 export function paintMarkdownDelta(params: {
   live: MarkdownLive;
   chunk: string;
@@ -68,11 +86,13 @@ export function paintMarkdownDelta(params: {
   columns: number;
   color: boolean;
 }) {
-  params.live.raw += params.chunk;
-  const rendered = `${params.prefix}${renderMarkdown(params.live.raw, { color: params.color })}`;
-  rewindLive(params.write, params.live.rows);
-  params.write(rendered);
-  params.live.rows = displayRows(rendered, params.columns);
+  paintLiveDelta({
+    live: params.live,
+    chunk: params.chunk,
+    write: params.write,
+    columns: params.columns,
+    render: (raw) => `${params.prefix}${renderMarkdown(raw, { color: params.color })}`,
+  });
 }
 
 export function thinkingPrefix(nest = "", color = false) {
@@ -99,16 +119,71 @@ export function paintThinkingDelta(params: {
   columns: number;
   color: boolean;
 }) {
+  paintLiveDelta({
+    live: params.live,
+    chunk: params.chunk,
+    write: params.write,
+    columns: params.columns,
+    render: (raw) => renderThinking(raw, { prefix: params.prefix, color: params.color }),
+  });
+}
+
+function paintLiveDelta(params: {
+  live: MarkdownLive;
+  chunk: string;
+  write: (text: string) => void;
+  columns: number;
+  render: (raw: string) => string;
+}) {
   params.live.raw += params.chunk;
-  const rendered = renderThinking(params.live.raw, { prefix: params.prefix, color: params.color });
-  rewindLive(params.write, params.live.rows);
-  params.write(rendered);
-  params.live.rows = displayRows(rendered, params.columns);
+  const wrapped = wrapDisplayLines(params.render(params.live.raw), params.columns);
+  const tail = wrapped.pop() ?? "";
+  const stable = wrapped;
+  const extra = stable.slice(params.live.committed);
+  rewindTail(params.write, params.live.rows);
+  if (extra.length) {
+    params.write(`${extra.join("\n")}\n`);
+    params.live.committed = stable.length;
+  }
+  params.write(tail);
+  params.live.rows = tail || extra.length ? displayRows(tail, params.columns) : 0;
 }
 
 export function finishMarkdownLive(live: MarkdownLive) {
   live.raw = "";
+  live.committed = 0;
   live.rows = 0;
+}
+
+function wrapOneLine(line: string, cols: number) {
+  if (visibleWidth(line) <= cols) return [line];
+  const rows: string[] = [];
+  let buf = "";
+  let width = 0;
+  let i = 0;
+  while (i < line.length) {
+    if (line[i] === "\x1b") {
+      const seq = /^\x1b\[[0-9;]*m/.exec(line.slice(i));
+      if (seq) {
+        buf += seq[0];
+        i += seq[0].length;
+        continue;
+      }
+    }
+    const cp = line.codePointAt(i) ?? 0;
+    const ch = String.fromCodePoint(cp);
+    const w = cp > 127 ? 2 : 1;
+    if (width > 0 && width + w > cols) {
+      rows.push(buf);
+      buf = "";
+      width = 0;
+    }
+    buf += ch;
+    width += w;
+    i += ch.length;
+  }
+  if (buf) rows.push(buf);
+  return rows.length ? rows : [""];
 }
 
 function renderFence(body: string[], color: boolean) {

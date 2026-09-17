@@ -2,6 +2,14 @@ import { isTurnAborted, throwIfAborted, TurnAborted } from "./abort.js";
 import type { ToolSpec } from "./tools.js";
 import type { Message, ToolCall } from "./db.js";
 import { chatCompletionsUrl, type Provider } from "./provider.js";
+import {
+  PROVIDER_MAX_ATTEMPTS,
+  providerBackoffMs,
+  retryableProviderFailure,
+  retryableStatus,
+  TransientProviderError,
+  waitForRetry,
+} from "./retry.js";
 import { absorbChatDelta, finishThinkStream, newThinkStream, type ThinkStream } from "./think.js";
 
 export type { ToolCall };
@@ -59,6 +67,35 @@ export async function completeChat(params: {
   signal?: AbortSignal;
   onDelta?: (text: string) => void;
   onThinking?: (text: string) => void;
+  sleepForRetry?: (ms: number, signal?: AbortSignal) => Promise<void>;
+}): Promise<ChatResult> {
+  const maxAttempts = PROVIDER_MAX_ATTEMPTS;
+  const sleep = params.sleepForRetry ?? waitForRetry;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    throwIfAborted(params.signal);
+    try {
+      return await completeChatOnce(params);
+    } catch (error) {
+      lastError = error;
+      if (isTurnAborted(error)) throw new TurnAborted();
+      const retryable = retryableProviderFailure(error);
+      if (!retryable || attempt === maxAttempts - 1) throw error;
+      const retryAfter = error instanceof TransientProviderError ? error.retryAfter : null;
+      await sleep(providerBackoffMs(attempt, retryAfter), params.signal);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+async function completeChatOnce(params: {
+  provider: Provider;
+  messages: Message[];
+  tools?: ToolSpec[];
+  stream?: boolean;
+  signal?: AbortSignal;
+  onDelta?: (text: string) => void;
+  onThinking?: (text: string) => void;
 }): Promise<ChatResult> {
   throwIfAborted(params.signal);
   const stream = params.stream ?? true;
@@ -101,7 +138,8 @@ export async function completeChat(params: {
     });
   } catch (error) {
     if (params.signal?.aborted || isTurnAborted(error)) throw new TurnAborted();
-    throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw retryableProviderFailure(error) ? new TransientProviderError(message) : error;
   }
 
   const handlers: ChatStreamHandlers = {
@@ -114,7 +152,7 @@ export async function completeChat(params: {
   }
 
   if (!response.ok) {
-    throw new Error(await errorMessage(response));
+    throw await httpFailure(response);
   }
 
   if (!response.body) {
@@ -167,7 +205,8 @@ async function readJsonReply(
     text = await response.text();
   } catch (error) {
     if (signal?.aborted || isTurnAborted(error)) throw new TurnAborted();
-    throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw retryableProviderFailure(error) ? new TransientProviderError(message) : error;
   }
   let data: ChatCompletion;
   try {
@@ -176,7 +215,10 @@ async function readJsonReply(
     throw new Error(`非 JSON 响应 (${response.status}): ${text.slice(0, 400)}`);
   }
   if (!response.ok) {
-    throw new Error(data.error?.message ?? `HTTP ${response.status}: ${text.slice(0, 400)}`);
+    const message = data.error?.message ?? `HTTP ${response.status}: ${text.slice(0, 400)}`;
+    throw retryableStatus(response.status)
+      ? new TransientProviderError(message, response.headers.get("retry-after"))
+      : new Error(message);
   }
   const message = data.choices?.[0]?.message;
   const stream = newThinkStream();
@@ -209,6 +251,13 @@ async function errorMessage(response: Response) {
   } catch {
     return `HTTP ${response.status}: ${text.slice(0, 400)}`;
   }
+}
+
+async function httpFailure(response: Response) {
+  const message = await errorMessage(response);
+  return retryableStatus(response.status)
+    ? new TransientProviderError(message, response.headers.get("retry-after"))
+    : new Error(message);
 }
 
 async function readSseReply(
@@ -251,6 +300,11 @@ async function readSseReply(
     emitChatParts(result, finishThinkStream(stream), handlers);
   } catch (error) {
     if (signal?.aborted || isTurnAborted(error)) throw new TurnAborted();
+    const started = Boolean(result.content || result.thinking || pending.size);
+    if (!started && retryableProviderFailure(error)) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new TransientProviderError(message);
+    }
     throw error;
   } finally {
     signal?.removeEventListener("abort", onAbort);

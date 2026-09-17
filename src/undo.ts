@@ -63,7 +63,9 @@ export async function undoLastTurn(): Promise<string> {
   }
   backups.clear();
   nextWriteStartsTurn = false;
-  const lines = ["已撤回最近一轮 socode 写入的文件（未碰本轮没改过的文件）："];
+  const lines = [
+    "已撤回本轮 socode 的 write/edit/delete（不管 bash，不是对话 rewind，未碰本轮没改过的文件）：",
+  ];
   if (restored.length) lines.push(...restored.map((path) => `  恢复  ${path}`));
   if (removed.length) lines.push(...removed.map((path) => `  删除  ${path}`));
   if (skipped.length) lines.push(...skipped.map((path) => `  跳过  ${path}`));

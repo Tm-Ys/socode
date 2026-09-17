@@ -29,7 +29,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/seeplan", hint: "查看当前任务计划勾选进度" },
   { name: "/setplan", hint: "强制本轮按说明建 Plan，并激活 grill-me" },
   { name: "/setworkarea", hint: "空对话时设置工作区（选文件夹或绝对路径）" },
-  { name: "/undo", hint: "撤回最近一轮 socode 写入的文件" },
+  { name: "/undo", hint: "只撤本轮 write/edit/delete，不管 bash，不是 rewind" },
   { name: "/doctor", hint: "检查 Node、密钥、沙箱、目录是否可写" },
   { name: "/exit", hint: "退出" },
   { name: "/quit", hint: "退出" },

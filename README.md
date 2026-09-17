@@ -37,11 +37,11 @@ Long 的审批器拿一份干净上下文、只输出 JSON；解析失败、超�
 
 **小到能审。** 大约 50 个 TypeScript 文件、运行时没有数据库依赖。权限、沙箱、Long 审批、预算、rubric、MCP、Skills、压缩、验证、子代理、计划、问卷、recap 都有测试（`npm test`）。策略写在代码里，不藏在框架配置后面。
 
-要达到「敢当日常主力」还缺什么、90 天建议先做什么，见 [`docs/PRODUCT-ROADMAP.md`](docs/PRODUCT-ROADMAP.md)。
+要达到「敢当日常主力」还缺什么，见 [`docs/PRODUCT-ROADMAP.md`](docs/PRODUCT-ROADMAP.md)。Windows / SSH 远程工作区见 [`docs/REMOTE.md`](docs/REMOTE.md)。
 
 ## 安装
 
-需要 Node 22+。
+需要 Node 22+（macOS 或 Linux）。Windows 不是支持平台：用 WSL2，或 `ssh -t` 到一台 Unix 再跑 `socode`，见 [`docs/REMOTE.md`](docs/REMOTE.md)。
 
 **macOS 安装包**（GitHub Release 里的 `.dmg` / `.pkg`，或 `socode-*-macos.tar.gz`）：
 
@@ -64,7 +64,7 @@ npx socode
 # 开发时也可以 npm start
 ```
 
-把命令装到 PATH：`npm link`（先 `npm run build`）或 `npm install -g ./socode-0.1.1.tgz`。
+把命令装到 PATH：`npm link`（先 `npm run build`）或 `npm install -g ./socode-0.1.2.tgz`。
 
 没有保存过 Provider 时，交互式启动会进入向导，写入用户级 `~/.socode/providers.json`（所有工作区、所有对话共用）。也可以用 `--url` / `--api` / `--model` / `--name` 只覆盖本次进程。
 
@@ -121,7 +121,7 @@ Long **不会**在沙箱起不来时 fallback 裸跑；密钥、sudo 仍本地�
 - `/skills` 查看已注入的 `AGENTS.md` / `CLAUDE.md` 和发现的 Skills
 - `/seesubagent` 列出子代理；`/seesubagent [序号]` 查看某个子代理的过程（默认隐藏，只在右下角显示在跑）
 - `/seeplan` 查看当前任务计划勾选进度
-- `/undo` 撤回最近一轮 socode 写过、改过或删过的文件（不碰你自己改的其他文件；Esc 后已落地的仍可撤）
+- `/undo` 撤回最近一轮 socode 用 `write`/`edit`/`delete` 碰过的文件（进程内快照，不管 bash，不是对话 rewind；Esc 后已落地的仍可撤）
 - `/doctor` 检查 Node、密钥是否已配、sandbox-exec/bwrap、用户目录和工作区会话目录能不能写。启动也可用 `npm start -- --doctor`
 - `/setplan <说明>` 本轮强制按说明调用 `plan` 拆目标，并激活 grill-me 追问
 - `/setworkarea` 空对话时弹出系统文件夹选择器；也可 `/setworkarea /绝对路径`。输入行空着时灰色显示 `on 路径`
@@ -203,7 +203,7 @@ Skills 来自各目录下的 `<name>/SKILL.md`（YAML frontmatter 的 `name` / `
 | `src/subagent-ui.ts` | 子代理过程默认隐藏，`/seesubagent` 查看 |
 | `src/mcp.ts` | stdio MCP hub |
 | `src/skills.ts` / `src/skill-activate.ts` | 说明文件、Skills、按轮激活 |
-| `src/chat.ts` / `src/provider.ts` | OpenAI 兼容流式、多 Provider |
+| `src/chat.ts` / `src/retry.ts` / `src/provider.ts` | OpenAI 兼容流式、429/5xx/抖动退避、多 Provider |
 | `src/provider-api.ts` / `src/select-ui.ts` | `/effort` `/model` `/provider`：读 `/models`、方向键选择 |
 | `src/banner.ts` | 启动欢迎框与随机欢迎语 |
 | `src/think.ts` / `src/markdown.ts` | 思考块拆分、轻量 Markdown → TUI ANSI |
@@ -216,3 +216,5 @@ Skills 来自各目录下的 `<name>/SKILL.md`（YAML frontmatter 的 `name` / `
 - HTTP / SSE MCP（只做 stdio）
 - 把 Long 做成静默 Full
 - 子代理再开子代理；不给 worker 做 git worktree，共享工作区，靠串行避免同时改同一文件
+- 云端 bash / 把密钥上传到 socode 云。远程开发是 SSH 工作区，见 [`docs/REMOTE.md`](docs/REMOTE.md)
+- 把 `/undo` 做成对话 rewind

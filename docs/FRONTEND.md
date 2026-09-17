@@ -26,7 +26,7 @@ socode 没有 web 界面。所谓前端就是终端里的这一层 TUI：全是�
 
 用户输入提示符是 `ask mode>`（随权限模式着色），空输入时同一行暗色占位 `on ~/path`。下一行橙色：左边 `deepseek-flash · medium · new`（有对话名则换成标题），右边对齐 `context 5%(6.4K / 128K)`，数字和 `/context` 同一套计量。发出消息后、模型还没吐字时，当前行画 npm 式加载：绿色 braille 转圈 + 来回滑动的 `█` 条 + 暗色 `socoding`（`src/load-ui.ts`）。首个思考 / 正文 / 工具调用到来时擦掉；工具结果之后再等模型会重新转。助手回复有前缀 `socoding on <mode> mode `，前缀颜色随模式变。不会再单独打一行 `会话: …`。
 
-流式输出走 `paintMarkdownDelta`：每收到一个正文 delta，把已累积的原文重新渲染成带色 Markdown，用 `\r` + `\x1b[<n>A` + `\x1b[J` 把上一帧擦掉再重画。行数与宽度按 `displayRows`/`visibleWidth` 算，中日韩字符按 2 列宽。非 TTY（管道、重定向）时退化成纯文本直接追加，不重绘。
+流式输出走 `paintMarkdownDelta` / `paintThinkingDelta`：已折满的行进 scrollback，**只重画最后一行 tail**（`\\r` + 清行），不再每 token 把整段思考用 `\\x1b[<n>A` + `\\x1b[J` 擦掉重绘。这是 Codex 那套 stable / tail，避免行数估错时旧帧叠上去刷屏。非 TTY 仍直接追加。
 
 模型思考不走这条正文通道。`reasoning_content` / `reasoning` / `<think>` 会拆成独立的 `thinking` 事件，用 `paintThinkingDelta` 画成暗色斜体，左边标 `思考`，和 `socoding on <mode> mode` 的 Markdown 正文分开。思考只在终端里看，不会写进发给模型的 assistant `content`。
 

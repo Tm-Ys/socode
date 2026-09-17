@@ -38,7 +38,7 @@ describe("renderMarkdown", () => {
 });
 
 describe("markdown live reprint", () => {
-  it("rewinds previous rows then writes the rendered body", () => {
+  it("rewinds only the tail line then writes the updated last row", () => {
     const chunks: string[] = [];
     const live = newMarkdownLive();
     paintMarkdownDelta({
@@ -51,6 +51,7 @@ describe("markdown live reprint", () => {
     });
     assert.equal(chunks.join(""), "P a");
     assert.equal(live.rows, 1);
+    assert.equal(live.committed, 0);
     chunks.length = 0;
     paintMarkdownDelta({
       live,
@@ -60,8 +61,9 @@ describe("markdown live reprint", () => {
       columns: 80,
       color: false,
     });
-    assert.equal(chunks[0], "\r");
+    assert.equal(chunks[0], "\r\x1b[2K");
     assert.equal(chunks.at(-1), "P ab");
+    assert.equal(live.committed, 0);
     finishMarkdownLive(live);
     assert.equal(live.raw, "");
   });
@@ -70,10 +72,40 @@ describe("markdown live reprint", () => {
     assert.equal(displayRows("abcd", 2), 2);
     assert.equal(displayRows("a\nb", 80), 2);
   });
+
+  it("commits wrapped rows to scrollback instead of reprinting the whole block", () => {
+    const chunks: string[] = [];
+    const live = newMarkdownLive();
+    paintMarkdownDelta({
+      live,
+      chunk: "abcdefghij",
+      prefix: "",
+      write: (text) => chunks.push(text),
+      columns: 4,
+      color: false,
+    });
+    assert.equal(live.committed, 2);
+    assert.equal(live.rows, 1);
+    assert.match(chunks.join(""), /abcd\nefgh\nij/);
+    chunks.length = 0;
+    paintMarkdownDelta({
+      live,
+      chunk: "k",
+      prefix: "",
+      write: (text) => chunks.push(text),
+      columns: 4,
+      color: false,
+    });
+    const out = chunks.join("");
+    assert.equal(live.committed, 2);
+    assert.match(out, /\r\x1b\[2K/);
+    assert.match(out, /ijk$/);
+    assert.doesNotMatch(out, /abcd/);
+  });
 });
 
 describe("thinking live reprint", () => {
-  it("paints dim italic separately from markdown", () => {
+  it("paints dim italic separately from markdown and commits finished lines", () => {
     const chunks: string[] = [];
     const live = newMarkdownLive();
     paintThinkingDelta({
@@ -94,7 +126,10 @@ describe("thinking live reprint", () => {
       columns: 80,
       color: false,
     });
-    assert.equal(chunks.at(-1), "  思考  reason\n        more");
+    assert.equal(live.committed, 1);
+    assert.equal(chunks.at(-1), "        more");
+    assert.match(chunks.join(""), /思考 {2}reason\n/);
+    assert.doesNotMatch(chunks.join(""), /reasonreason/);
     const color = renderThinking("note", { prefix: thinkingPrefix("", true), color: true });
     assert.match(color, /\x1b\[2m思考\x1b\[0m/);
     assert.match(color, /\x1b\[3mnote\x1b\[0m/);

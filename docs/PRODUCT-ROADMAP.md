@@ -1,478 +1,335 @@
 # 产品级差距与 90 天路线图
 
-本文是对 **socode 现状的产品盘点**，不是实现清单。目标是说清楚：相对 Claude Code / Codex CLI 这类「敢当日常主力」的编程 Agent，socode 已经站住了哪一块、还缺哪一块、接下来 90 天按什么顺序补、每项怎样才算验收通过。
+本文是对 **socode 现状的产品盘点**，不是实现清单。对照实现以仓库当前代码为准（`src/`、`README.md`、`docs/LONG-MODE.md`、`docs/FRONTEND.md`、`docs/REMOTE.md`）。下文不夸大已有能力，也不把尚未落地的能力写成「已经有了」。
 
-对照实现以仓库当前代码为准（`src/`、`README.md`、`docs/LONG-MODE.md`、`docs/FRONTEND.md`）。下文不夸大已有能力，也不把尚未落地的能力写成「已经有了」。
+版本锚点：本文按 **0.1.1** 重写能力盘点；**0.1.2**（2026-09-17）补上 Provider 退避重试、思考/工具流的 stable+tail 重绘，以及远程开发文档。此前文本仍写「没有 doctor / 没有 Ask diff / 启动依赖 Postgres」，那些已经落地，不再当缺口立项。
 
 ---
 
 ## 1. 背景与对标结论
 
-socode 的产品形状最接近 **Claude Code**：本机终端里的编程 Agent，权限模式是产品本身，工具循环、会话、项目说明、子代理、MCP 都挂在同一套策略上。它不是套壳框架——运行时依赖目前只有 `pg`，其余是一组可直接审的 TypeScript 模块。
+socode 的产品形状最接近 **Claude Code**：本机终端里的编程 Agent，权限模式是产品本身，工具循环、会话、项目说明、子代理、MCP 都挂在同一套策略上。它不是套壳框架——运行时 **没有数据库依赖**，其余是一组可直接审的 TypeScript 模块。
 
-它同时带有一层 **Codex CLI 式的沙箱 / 会话意识**：Ask / Long 下 `bash` 在 macOS 走 `sandbox-exec`、Linux 走 `bwrap`；失败即拒绝（Ask / Long 沙箱起不来就拒执行）；会话进 PostgreSQL；压缩、检查点、审计日志把「这次会话发生了什么」留下来。Codex 那套「沙箱默认、会话可恢复」的味道在这里是有的，但还没有做到「装上就能用、改错能撤回」。
+它同时带有一层 **Codex CLI 式的沙箱 / 会话意识**：Ask / Long 下 `bash` 在 macOS 走 `sandbox-exec`、Linux 走 `bwrap`；失败即拒绝（Ask / Long 沙箱起不来就拒执行）；会话在工作区 `.socode/sessions/`；压缩、任务检查点、审计日志把「这次会话发生了什么」留下来。
 
-它 **不像 Pi**。Pi 的核心是可扩展 harness 平台：把循环、工具、扩展点做成别人能长上去的底座。socode 的核心是 **一种具体的本机编程产品**：权限边界写死在代码里，Skills / MCP / 子代理是同一循环上的插件，而不是给第三方替换循环本身的平台 API。这条路建议继续走。把 socode 做成「可任意组装的 Agent 框架」会稀释现有优势（小、可审、权限即产品）。
+它 **不像 Pi**。Pi 的核心是可扩展 harness 平台。socode 的核心是 **一种具体的本机编程产品**：权限边界写死在代码里。这条路建议继续走。
 
-一句话：**产品形态学 Claude Code，运行时气质靠近 Codex 的沙箱与会话，不要学 Pi 做平台。** 差距不在「有没有 Agent」，而在「敢不敢每天当主力」——编辑要稳、安装要零配置、改错能回滚、中断能恢复、费用看得见。
+一句话：**产品形态学 Claude Code，运行时气质靠近 Codex 的沙箱与会话，不要学 Pi 做平台。** 0.1.1 已经能装上、能问着改、能 doctor、能撤本轮文件写入。还没到「每天打开不会心疼」：补丁协议不够、undo 太浅、网络失败不重试、短轮不默认测、费用几乎看不见。
 
-对标时不要按功能清单打勾。Claude Code 赢在手术刀式改文件、代码导航、安装路径、Checkpoint、TUI / IDE 一体、记忆与 hooks、评测门。Codex CLI 赢在沙箱默认、会话层、审批与 diff 预览的完成度。socode 已经有权限模式、OS 沙箱、Long 编排、stdio MCP、Skills，这些是真的；缺的是把它们从「能跑的 harness」推到「每天打开不会心疼」的产品。
+对标时不要按功能清单打勾。Claude Code 赢在手术刀式改文件、Checkpoint / rewind、安装路径、TUI / IDE 一体。Codex CLI 赢在沙箱默认和审批完成度。socode 已经有权限模式、OS 沙箱、Long 编排、stdio MCP、Skills、Ask 完整 diff、文件会话，这些是真的。
 
 ---
 
-## 2. 已有能力（以代码为准，不夸大）
+## 2. 已有能力（0.1.1，以代码为准）
 
-下面这些 **已经在仓库里**，写路线图时把它们当地基，不要当缺口重复立项。
+写路线图时把它们当地基，不要当缺口重复立项。
 
 ### 2.1 Agent 循环
 
-`src/agent.ts` 实现工具循环：OpenAI 兼容的 function calling、流式 delta、连续三次 **同一调用签名** 或 **同一工具连续失败** 则 doom-loop 停机。生成中 `Esc` 中止当前轮（`src/abort.ts` 的 `TurnAborted`）；用户问题会入库，半截助手回复不入库（`closeIncompleteTrace` 丢掉未完成的 tool 轮）。
+`src/agent.ts`：OpenAI 兼容 function calling、流式 delta、连续三次同一调用签名或同一工具连续失败则停。生成中 `Esc` 中止当前轮；用户问题入库，半截助手回复不入库。上下文顶满时 Long 会先压缩再继续。一轮工具超过 6 次、或助手正文超过约 2400 字时，结束后打灰色 `【recap】`，入库和后续上下文只留 recap。
 
-上下文顶满时 Long 会先压缩再继续。一轮工具超过 6 次、或助手正文超过约 2400 字时，结束后打灰色 `【recap】`，**入库和后续上下文只留 recap**（`src/recap.ts`）。
-
-### 2.2 四种模式，策略真的不同
+### 2.2 四种模式
 
 | 模式 | 现状 |
 | --- | --- |
-| **Ask**（默认） | 工作区内写 / 改 / 删、有副作用的 bash 先 `y` / `n` / `a`；只读管道不打断 |
-| **Plan** | 只能 `read` / `search` / `plan`（及只读 MCP），没有写、删、bash |
-| **Full** | 直接改文件、跑命令；系统目录和密钥仍禁。沙箱起不来时 **警告后裸跑** |
+| **Ask**（默认） | 工作区内写 / 改 / 删、有副作用的 bash 先 `y` / `n` / `a`；只读管道不打断。git、工作区外问用户。密钥和 `sudo` 硬拒绝 |
+| **Plan** | 只能 `read` / `search` / `glob` / `plan` / `question`（及只读 MCP） |
+| **Full** | 直接改文件、跑命令；系统目录和密钥仍禁。沙箱起不来时警告后裸跑 |
 | **Long / 长程** | Ask 的权限边界 + TaskState + 独立 LLM 审批副作用；**不会变成 Full** |
 
-Long 的审批器拿一份干净上下文、只输出 JSON；解析失败、超时、缺字段一律拒绝。密钥、工作区外、`sudo` 在问审批器之前就被本地硬拒绝。设计说明见 [`LONG-MODE.md`](./LONG-MODE.md)。
+Long 审批器只输出 JSON；解析失败、超时、缺字段一律拒绝。设计见 [`LONG-MODE.md`](./LONG-MODE.md)。
 
 ### 2.3 工具
 
-当前循环里真实存在的工具：
+- **文件系统**：`read`（按行、限 200KB）、`write`（临时文件 + rename 原子覆盖）、`edit`（子串替换，容忍 CRLF / 行尾空白，结果带 unified diff）、`delete`（只删文件）
+- **检索与执行**：`search`、`glob`（跳过 `node_modules` / `.git` 等）、`bash`（绝对 cwd，默认 30s，Ask/Long 套 OS 沙箱）
+- **本地纯函数**：`calculate`、`get_current_time`
+- **编排**：`plan`、`question`；Long 另有 `task_state`、`context_compress`；Ask / Full / Long 有 `subagent_plan` / `subagent`
+- **MCP**：`.mcp.json` stdio，名字 `mcp__服务器__工具`
 
-- **文件系统**：`read`（按行、限 200KB）、`write`（整文件覆盖）、`edit`（精确字符串替换，可 `replace_all`）、`delete`（只删文件）
-- **检索与执行**：`search`（正则；可选 glob；优先 `rg`，否则目录 walk）、`bash`（绝对 cwd，默认 30s 超时，Ask/Long 套 OS 沙箱）
-- **本地纯函数**：`calculate`、`get_current_time`（不走权限询问）
-- **编排**：`plan`（Ask / Full / Long / Plan 都有）；`question`（问卷）；`task_state`、`context_compress`（仅 Long）；`subagent_plan` / `subagent`（Ask / Full / Long；Plan 没有）
-- **MCP**：`.mcp.json` stdio 工具，名字 `mcp__服务器__工具`，进同一套权限
+没有 `apply_patch`。`src/patch.ts` 只服务现有 `edit`（匹配策略 + 把前后文本收成 diff），不是多 hunk / 行锚点协议。系统提示要求改已有文件走 `edit`；这是提示词，不是 patch 工具。
 
-系统提示已经要求「改已有文件优先 `edit`，整文件覆盖才用 `write`」。这是提示词约束，**不是**带锚点的 patch 协议，也没有写后强制回读校验。
+### 2.4 会话与配置
 
-### 2.4 会话、压缩、项目记忆
+会话是工作区 `.socode/sessions/<uuid>.json`（`src/db.ts`），换目录互不可见。`socode` 默认新会话，空对话不落盘。Provider 和 harness 默认在用户级 `~/.socode/`（`providers.json`、`config.json`）。第一次启动若目录里还有旧 `.env`，一次性迁走，之后不再读。没有 PostgreSQL。
 
-会话在 PostgreSQL（`src/db.ts`）：启动时 `connectDb`，可自动建库、迁移。`npm start` 默认新会话，空对话不入库。`/compress` 用当前模型摘要较早对话，保留最近两轮，并钉住 harness mode / TaskState / plan。
+项目说明从用户目录到 git 根再到工作区加载 `AGENTS.md` / `CLAUDE.md`。基础 skill 按轮短 JSON 激活，最多 2 个。`/skills` 查看。
 
-项目说明从用户目录到 git 根再到工作区加载 `AGENTS.md` / `CLAUDE.md`（同层 AGENTS 在前、CLAUDE 更具体）。内置与用户 / 项目 Skills 可注入；四个基础 skill 默认不灌全文，按轮短 JSON 询问激活，最多 2 个。`/skills` 查看实际加载结果。
+### 2.5 沙箱、审计、审批 UX
 
-### 2.5 沙箱、审计、审批
+Ask / Long 的 bash：macOS `sandbox-exec` 只允许写工作区；Linux `bwrap`。沙箱起不来则拒绝；Full 才警告后裸跑。git 和工作区外改为询问，批准后这一次放开 `confineWrites`。密钥路径仍硬拒绝。授权追加 `.socode-audit.jsonl`。非 TTY 在 Ask 下无法弹窗，写入直接拒绝。
 
-Ask / Long 下 `bash`：macOS `sandbox-exec` 只允许写工作区；Linux `bwrap` `--ro-bind /` + `--bind` 工作区。沙箱起不来，Ask / Long **拒绝执行**；Full 才会警告后裸跑。bash 按 argv / 管道分类只读与副作用，不靠整句正则。`.env` / `providers.json` / `~/.ssh` 等 denylist、symlink `realpath`。bash 与 MCP 子进程剥掉密钥。每次授权追加工作区 `.socode-audit.jsonl`。非 TTY 在 Ask 下无法弹窗，写入直接拒绝。
+Ask 对 `write` / `edit` / `delete` 在 `y/n/a` 之前打完整 unified diff（`src/ask-diff.ts`）。bash 仍是命令摘要。
 
-### 2.6 长程、子代理、验证
+### 2.6 `/undo`、`/doctor`、安装
 
-Long 把目标记在会话里的 `【task state】`（不另建表）。上下文约 82% 自动压缩。步数默认 Dynamic P50→P75。里程碑写入 `done` 时 harness **强制**跑 `verifyCommands`（白名单测试命令），可选 fail-closed rubric；失败则撤回这次 done。步数 / token 用尽或 Esc 中止会留下 `【checkpoint】`——这是 **任务状态检查点**，不是工作区文件快照。
+- **`/undo`**：进程内、最近一轮 `write` / `edit` / `delete` 的写前字节副本。Esc 后已落地的仍可撤。详见 §4.4 还缺什么。
+- **`/doctor` 与 `--doctor`**：Node 版本、密钥有无、sandbox-exec/bwrap、`~/.socode` 与工作区会话目录可写。
+- **安装**：`bin/socode.mjs`；macOS 有 `.dmg` / `.pkg` / tar.gz。无 Postgres 硬依赖。Windows 不是支持平台，见 [`REMOTE.md`](./REMOTE.md)。
 
-子代理是干净上下文：Long 推荐 `localize` / `edit` / `verify`；Ask/Full 仍可用 `explorer` / `worker`。localize 并行（Long 同时最多 2 个），edit/worker 串行，verify 等写入完成后再跑。子代理看不到父对话，不能再开子代理，不给 worker 单独 git worktree。过程默认隐藏，`/seesubagent` 查看。
+### 2.7 长程、子代理、验证
 
-### 2.7 终端前端与 Provider
+Long 的 `【task state】` 活在会话消息里。里程碑 `done` 时强制跑白名单 `verifyCommands`，可选 fail-closed rubric；失败撤回这次 done。步数 / token 用尽或 Esc 留下 `【checkpoint】`——这是 **任务状态**，不是文件快照，也不是对话 rewind。
 
-没有 React / Ink。流式 Markdown 差量重绘、工具行、Ask 审批、子代理 HUD，见 [`FRONTEND.md`](./FRONTEND.md)。工具结果默认回显 3 行后折叠。Ask 审批是一行按键，**没有 diff 预览**。
+子代理干净上下文：Long 推荐 `localize` / `edit` / `verify`；Ask/Full 仍可用 `explorer` / `worker`。写入串行，禁止嵌套子代理。
 
-OpenAI 兼容 Provider：用户级 `~/.socode/providers.json`。`/provider` 查看、编辑、切换、新增。已保存的 Provider 整份生效。
+### 2.8 终端与 Provider
 
-### 2.8 测试与体积
+手写 ANSI，无 React / Ink，见 [`FRONTEND.md`](./FRONTEND.md)。`/context` 用色块标占用，并可附带 **上一轮** API 的 prompt / completion。没有 `/usage`，没有分项账本。
 
-`npm test` 跑 `src/*.test.ts`（权限、沙箱、Long 审批、MCP、Skills、压缩、验证、子代理、计划、recap 等）。这是 **模块级回归**，不是黄金任务评测门。运行时依赖只有 `pg`。没有 `bin` 入口、没有一键安装脚本、没有 `socode doctor`。
+`completeChat`（`src/chat.ts` + `src/retry.ts`）对 429 / 5xx / 网络抖动最多 3 次，指数退避，尊重 `Retry-After`。401 等 4xx 直接抛。已经吐出 token 的半截流式不再重试。Esc 取消进行中的请求和等待。`provider.ts` 只存密钥和模型，不负责重试。流式空内容仍抛错。
+
+### 2.9 测试
+
+`npm test` 跑 `src/*.test.ts`。这是模块级回归，不是黄金任务评测门。
 
 ---
 
 ## 3. 产品级定义：什么叫「敢当日常主力」
 
-「产品级 / 日常主力」在这里有具体含义，不是「功能多」或「模型强」。对照 Claude Code / Codex CLI，用户在自己的仓库里应能做到下面这些，且 **默认路径不需要先搭 Postgres、不需要先背一套工作流**：
+用户在自己的仓库里应能做到下面这些，且默认路径不需要先搭基础设施、不需要先背一套工作流：
 
-1. **改代码像人在改，不像整文件重写。** 补丁能锚定上下文、失败能重试、写完能核对；大文件不会因为一次 `write` 被截断或格式化毁掉。
-2. **找得到该改的地方。** 有 glob、结构化搜索 / 符号定位；改完有默认的「跑相关测试」习惯，而不是只在 Long 里程碑才验证。
-3. **十分钟内能用。** 一条命令安装；本机默认存储；第一次打开能登录 / 配密钥；`doctor` 能说出沙箱、bwrap、密钥缺了什么。
-4. **改错了能撤。** 这一轮写入的文件可以回到本轮开始前；不是只在对话里留一句 `【checkpoint】`。
-5. **中断不是灾难。** 工具有超时；网络抖动会重试；半截写入可清理；进程崩了能从会话接着做；失败时停下来的语义清楚（哪些错误继续、哪些错误停）。
-6. **看得见自己在干什么、花了多少。** 工具轨迹可折叠；审批能看 diff；token / 步数 / 子代理花费有默认展示和预算，而不是只有 `/context` 里的色块。
+1. **改代码像人在改。** 补丁能锚定上下文、失败能重试、写完能核对。
+2. **找得到该改的地方，改完就测。** glob / 搜索够用；短轮结束前默认尝试相关测试。
+3. **十分钟内能用。** 一条命令安装；本机默认存储；向导配密钥；doctor 能说出缺什么。（0.1.1 在 macOS / Linux 上基本成立。）
+4. **改错了能撤。** 不只是本进程里的文件副本；bash 副作用和跨重启也要有说法。这 **不是** 对话 rewind。
+5. **中断不是灾难。** 工具有超时；网络抖动会重试；半截写入可清理；失败时停下来的语义清楚。
+6. **看得见自己在干什么、花了多少。** 审批能看 diff（已有）；token / 步数 / 子代理花费有默认展示和 `/usage`。
 
-达不到这六条，socode 仍然是「很好的权限 harness + 长程实验」，但还不是每天打开的那个 CLI。P0 对应 1–5；P1 补交互面、扩展点、记忆、评测与费用；P2 才是多表面、更强多 Agent、云端和发行信任。
-
-90 天 **不要求** 追上 Claude Code 的全部 IDE / 生态，只要求：在终端里， socode 对自己仓库的日常改动能让作者愿意关掉另一个 CLI。
+P0 对应还没做完的 1、2、4、5 和 6 的用量部分。P1 补交互面、扩展点、记忆、评测。P2 才是多表面、远程协议 B、更强多 Agent、云端和发行信任。
 
 ---
 
-## 4. P0：日常使用必须补上的差距
+## 4. 还没做完的 P0
 
-P0 五项互相咬合：没有可靠的小补丁，导航和验证会变成「用 bash 绕过」；没有本地存储和 doctor，安装门槛会挡住一切；没有检查点，越敢改越不敢用；没有中断恢复，长任务会变成赌运气。
+原 90 天里的「本地存储 / doctor / 安装 / Ask diff / 本轮文件 undo / glob / 原子写入」已经进 0.1.1。下面这些仍挡「每天当主力」。
 
-### 4.1 手术刀式编辑 / patch（相对整文件 `write`）
+### 4.1 仍然没有 `apply_patch`
 
-**为什么重要。** 日常主力的核心动作是改已有文件。整文件 `write` 在中等规模源文件上代价高、易截断、易把无关格式化带进去；精确字符串 `edit` 在空白、缩进、模型记错一行时直接失败，模型往往会退回 `write` 或用 `bash`/`python` 改文件，从而绕过「小 diff」的产品意图。Claude Code / Codex 的竞争力很大一块在 `apply_patch` / 带上下文的 edit：锚点明确、失败可重试、写完能证明文件里现在是什么。
+**为什么重要。** `edit` 已经能模糊空白、写后带回 diff、原子落地，Ask 也能在审批前看见这份 diff。日常主力仍缺 **一次调用改一个文件的多个 hunk、带行上下文锚点**。模型记错一行或要同时改函数头和函数尾时，只能连打几次 `edit`，或退回整文件 `write`。Claude Code / Codex 的竞争力很大一块在 `apply_patch`。
 
-**现状。** `write` 把 `content` 整份 `writeFile` 覆盖，必要时建父目录，没有临时文件 + rename，没有写后回读。`edit`（`src/fs-tools.ts` 的 `editAbsoluteFile`）做精确子串替换：`old_string` 为空拒绝；找不到则报错让模型再 `read`；多处命中且未 `replace_all` 则拒绝。没有行号锚点、没有 GNU patch / apply_patch 格式、没有模糊空白匹配、没有失败后自动缩小/扩大上下文重试、没有写完再读回把实际 diff 交给模型和用户。系统提示甚至写「写完不要立刻再 `read` 同一文件，除非有理由核对」——这和「写后校验」的产品目标相反。
+**现状。** 工具列表里没有 `apply_patch`。`edit` 是单段子串替换（可 `replace_all`）。没有 GNU patch / V4A 格式，没有「失败后扩大/缩小上下文再匹配」的运行时重试（只有 CRLF 和 trim 两种预备匹配）。对已存在大文件，没有策略层禁止无必要 `write`。
 
-**目标形态。** 改已有文件的主路径改为 **带上下文锚点的 patch**（建议工具名 `apply_patch` 或强化后的 `edit`）：
+**目标形态。** 改已有文件的主路径改为带上下文锚点的 patch（工具名 `apply_patch`，现有 `edit` 保留作 fallback）：
 
-- 协议里带文件路径、若干行上下文、要删/要加的片段；允许同一文件多 hunk。
-- 应用失败时运行时重试：规范化换行、放宽空白、用邻近唯一锚点再匹配；仍失败则返回「当前文件相关片段」而不是一句「未找到」。
-- 成功后 **强制 read-back**：把实际变更的 unified diff（或前后哈希 + 关键片段）写进 tool 结果；Ask 审批应能看到这份 diff。
-- `write` 保留给新文件或真正需要重写的文件；对已存在且超过一定行数的文件，策略或提示应阻止无必要的整文件覆盖。
-- 禁止用 `bash` 的 heredoc / `sed` / `python` 改文件来绕过 patch 工具（现有权限已经部分禁止 `rm`/`mv` 绕过 delete；编辑路径要同等对待）。
+- 协议里带路径、若干行上下文、要删/要加的片段；同一文件多 hunk。
+- 应用失败时运行时再试：规范化换行、放宽空白、用邻近唯一锚点；仍失败则返回当前文件相关片段，而不是一句「未找到」。
+- 成功后继续强制把实际 unified diff 写进 tool 结果（`edit` 已做，patch 必须同等）。
+- `write` 留给新文件或真正需要重写的文件。
+- 继续禁止用 bash 的 heredoc / `sed` / `python` 改文件来绕过。
 
-**验收标准。**
+**验收。** 在 200 行以上的现有 TypeScript 文件上，连续多次「改一个函数里不相邻的两处」走 `apply_patch`，零次整文件 `write`。人为制造缩进不一致时至少自动重试一次。单元测试覆盖多 hunk、锚点漂移、二进制拒绝、写失败回滚。
 
-- 在 200 行以上的现有 TypeScript 文件上，连续 10 次「改一个函数里的 3–20 行」走 patch/edit，**零次**整文件 `write`，且磁盘内容与 hunk 一致。
-- 人为制造缩进/换行不一致时，工具至少自动重试一次并在结果里说明匹配策略；最终失败时返回足够上下文，模型下一轮无需盲 `write`。
-- 写后 tool 结果含实际 diff 或等价校验；单元测试覆盖：唯一匹配、多处拒绝、锚点漂移重试、二进制拒绝、写后内容与声明不一致则失败并回滚本次写入。
-- Ask 模式下用户能在按 `y` 之前看到将要落地的 diff（可与 4.5 / 90 天「diff 预览」合并交付，但 patch 工具本身必须产出这份 diff）。
+### 4.2 短轮不默认跑测试
 
-### 4.2 更好的代码导航，以及改完就测
+**为什么重要。** Long 的 `verifyCommands` 只挂在里程碑 `done` 上。Ask / Full 的日常改动没有这条默认路径。系统提示写的是「需要测试或构建才能确认时再跑」，模型经常声称做完却没跑 `npm test`。
 
-**为什么重要。** Agent 不会「打开侧边栏」；它靠工具建立仓库地图。只有 `search`（正则）时，列文件、找符号、按语言结构跳转都会退化成 `bash rg` / `find`，既慢又容易碰到沙箱与审批。改完不默认跑测试，回归会漏到用户手里——Long 的 `verifyCommands` 很好，但只挂在里程碑 `done` 上，Ask / Full 的短轮日常改动没有这条默认路径。
+**现状。** `glob` 和结构化一点的 `search` 已经有了。没有符号表 / LSP。Ask/Full **不会**在 `edit` 后自动跑测试。`verify` 子代理是模型可选动作。
 
-**现状。** `search` 在绝对目录里跑正则，可选 `glob`（例如 `*.ts`）；有 `rg` 用 `rg`，否则 walk，跳过 `.git` / `node_modules` 等，最多 80 击。没有独立的 `glob` 工具（列文件要靠 `search` 或 `bash ls` / `rg --files`）。没有符号表、没有 AST、没有「定义 / 引用」。系统提示说「需要测试或构建才能确认时再跑」，Long 在 `add_done` 时强制验证；Ask/Full **不会**在每次 `edit` 后自动跑测试。`verify` 子代理存在，但是模型可选动作，不是短轮默认工作流。
+**目标形态。** 实质性 `edit` / `apply_patch` / `write` 之后，短轮结束前应优先跑与改动相关的最小测试（仓库已有 `npm test` / 单文件测试则用之）；用户可用偏好关掉。这不是每次按键都跑全量 CI。Ask 短轮不必套 Long 那套白名单架构，但提示或 harness 钩子要让「改完就测」成为常见轨迹。
 
-**目标形态。**
+**验收。** 黄金任务或脚本：在本仓库改 `src/agent.ts` 一处行为并配测试时，轨迹里出现测试命令，失败会阻止「声称已完成」。偏好关闭后不再强跑。
 
-- 一等工具 `glob`：按模式列出工作区内文件，尊重常见 ignore，返回稳定、截断友好的路径列表。
-- 强化 `search`：结构化输出（path / line / 列或匹配片段）、内置 glob、可选语言/文件类型；中期可加非常薄的符号搜索（例如对 TS/JS/Python 用正则级 `function`/`class` 索引，不必上完整 LSP）。
-- **默认测试工作流**（短轮）：模型在实质性 `edit`/`apply_patch` 之后，应优先跑「与改动相关的最小测试」（仓库已有 `npm test` / 单文件测试则用之）；用户可用偏好关掉。这不是每次 keystroke 都跑全量 CI，而是「这一轮改了代码 → 结束前至少尝试一次相关验证」。
-- 继续禁止用 `grep`；`rg` 作为 `search` 的实现细节可以保留，但产品上应让模型少直接 `bash rg`。
+### 4.3 `/undo` 不持久、不管 bash、不是对话 rewind
 
-**验收标准。**
+**为什么重要。** 用户敢按 `a` 或把 Long 交给模型，前提是搞砸了能回到这一轮开始。现在的 `/undo` 只覆盖「这个进程里、最近一次写文件工具」——比完全没有强，但还不够当主力保险。
 
-- 存在 `glob`（或等价一等工具），单测覆盖 ignore、截断、绝对路径、越出工作区拒绝。
-- `search` 结果机器可读；带 glob 时不漏检、不扫 `node_modules`。
-- 黄金任务或脚本：在本仓库「修改 `src/agent.ts` 一处行为并配测试」时，轨迹里出现测试命令，且失败会阻止「声称已完成」。
-- Ask 短轮不强制 Long 那套 `verifyCommands` 白名单架构，但文档化的默认提示 / 钩子能让「改完就测」成为常见轨迹，而不是偶发。
+**现状（必须写清，避免把它当成 Checkpoint）：**
 
-### 4.3 安装与零配置（去掉 Postgres 硬依赖）
+| 它是 | 它不是 |
+| --- | --- |
+| 进程内 `Map`，`write` / `edit` / `delete` 写前把字节读进内存 | 落盘快照；重启、崩溃、`/new`、换工作区后还在 |
+| 只撤 socode 文件工具碰过的路径 | 撤 `bash`（`sed`、`npm`、`git checkout`、测试写缓存） |
+| 最近一轮写入；下一轮再写才换快照 | 对话 rewind：不删消息、不把模型说辞收回去 |
+| 与 Long 的 `【checkpoint】` 无关 | 任务状态恢复、git stash、Claude Code 式 session rewind |
 
-**为什么重要。** 现在的安装故事是：Node 22+、本机 PostgreSQL、`npm install`、复制 `.env`、填 `DATABASE_URL` 和 API 密钥。对作者可以，对「下一个日常用户」不行。Claude Code / Codex 的第一印象是一条安装命令 + 本机登录；数据库是实现细节，不是入场券。socode 的会话层很好，但把 `pg` 绑死在启动路径上，等于还没展示权限模型就被基础设施挡住。
+`beginUndoTurn` 在每轮 `ask()` 开头置位；若下一轮只聊天不写文件，上一轮快照还在。这是有意的，不是 rewind。
 
-**现状。** `package.json` 没有 `bin`，启动是 `tsx src/index.ts`。`main()` 在缺 Provider 时，TTY 交互会继续，但 **无论是否配密钥都会 `connectDb(DATABASE_URL)`**，默认 `postgres://localhost:5432/socode`。连不上 Postgres 则进程起不来。存储没有 SQLite、没有 `~/.socode/` 文件后端。没有第一轮向导命令名、没有 `socode doctor`。Provider 交互（`/provider new`）存在，但是「已经进了 REPL 之后」。沙箱依赖 `sandbox-exec` / `bwrap`，缺了只在第一次副作用 bash 时才以错误出现。
+**目标形态。** 分三层，不要混成一个命令：
 
-**目标形态。**
+1. **文件 undo（加强现有 `/undo`）**：快照进会话或工作区 `.socode/`，跨重启可撤最近 N 轮 socode 写入的文件；仍不动用户没被本轮碰过的脏文件。
+2. **bash 副作用**：P0 只要求 **声明做不到** 并在 `/undo` 文案里写明；若做，限于能从写前 `stat` 到的常规文件，不宣称能反转 `rm -rf`、网络、git 历史。不要假装能 undo 一条任意 shell。
+3. **对话 rewind**：明确 **不是 P0**。若以后做，应是另一条命令（例如 `/rewind`），恢复消息与可选文件快照，而不是把 `/undo` 做成人称「后悔药」。
 
-- **一条命令安装**：例如 `npm i -g socode` 或文档化的 `curl | bash` 安装 Node 包装脚本；`package.json` 提供 `bin: { socode: ... }`。克隆仓库开发仍可用 `npm start`。
-- **本地默认存储**：会话默认落在用户目录（SQLite 或 JSON/JSONL 文件，例如 `~/.socode/sessions/`）。PostgreSQL 变为可选后端（`DATABASE_URL` 存在则用），而不是启动硬依赖。运行时依赖因此可以在默认路径上变成「零或极少」。
-- **第一轮登录 / 向导**：没有可用 Provider 时进入向导（URL / 密钥 / 模型 / 默认模式），写到 `~/.socode/` 或现有 `providers.json` 的用户级位置，而不是必须先手写仓库根 `.env`。
-- **`socode doctor`**：检查 Node 版本、密钥是否存在（只报有无，不打印密钥）、`sandbox-exec` / `bwrap` 是否在 PATH、会话存储是否可写、当前模式与工作区。失败给可执行的修复建议。
+**验收。** 固定夹具：一轮 `edit`/`write`/`delete` 后 `/undo`，工作区字节级回到该轮开始；重启进程后再 `/undo` 仍能撤（持久化落地后）。文档和欢迎语写明：不管 bash、不是 rewind。有 bash 改文件的轨迹里，`/undo` 必须提示那些路径没被跟踪，而不是静默宣称「已全部撤回」。
 
-**验收标准。**
+### 4.4 中断与失败语义（Provider 重试已落地）
 
-- 在没有 PostgreSQL 的机器上，仅安装 Node 与 socode、填一个 OpenAI 兼容密钥，即可完成一轮 Ask 对话并恢复该会话。
-- 默认存储路径文档化；设置 `DATABASE_URL` 仍能走现有 Postgres 路径（兼容，不强制迁移工具的第一期）。
-- `socode doctor` 在缺 bwrap、缺密钥、存储不可写时退出码非 0，并打印明确项；齐全时退出 0。
-- 第一轮向导可在非 TTY 下跳过并报错（与现有「非 TTY Ask 拒绝写入」一致：脚本用不弹窗）。
+**已做。** `src/retry.ts` + `completeChat`：429 / 5xx / `fetch failed` / `ECONNRESET` 最多 3 次，指数退避，可读 `Retry-After`。401 等 4xx 一次失败。Esc 取消 `fetch` 和 sleep。已经吐出 token 的流不再重试，避免 TUI 重复字。`provider.ts` 仍只是配置文件，不处理 HTTP。
 
-### 4.4 回滚 / 检查点（工作区快照，而不只是对话检查点）
+**还缺。** Ask/Full 步数用尽仍抛错，只有 Long 打 `【checkpoint】`（任务态）。MCP / 长 read 没有和 bash 对齐的超时。stop-on-failure 表还没写成产品说明：权限拒绝 / 沙箱不可用 / 补丁无法应用应停本轮；测试失败交给模型修。
 
-**为什么重要。** 用户敢把 Ask 的 `a` 或 Long 的自动审批交给模型，前提是「这一轮搞砸了能回到这一轮开始」。对话里的 `【checkpoint】` 只能恢复 **任务描述**，不能把已经写入磁盘的坏 diff 收回来。没有文件级 undo，日常主力会自我设限：只敢问、不敢改。
-
-**现状。** Long 在预算停、Esc 中止时写 `【checkpoint】` 并更新 TaskState（`src/task-state.ts` 的 `checkpointReply`）。这是会话内状态，不是 git stash / worktree / overlay fs。子代理明确 **不** 给 worker 做 git worktree，共享工作区、靠串行避免同时改同一文件。系统提示禁止模型主动 `git reset --hard`。没有「撤销本轮 socode 写入」的斜杠命令，没有写前快照。
-
-**目标形态。**
-
-- 每一轮用户提交（或每一次即将写入工作区的工具批次）前，记录本轮将要触碰的文件的 **写前快照**（内容哈希 + 副本，或 git 可用时的 `git stash push --keep-index` / 临时 commit / overlay，由实现选风险最低的一种）。
-- 用户命令 **撤销本轮改动**（建议 `/undo` 或 `/checkpoint restore`）：只回滚 **本轮 socode 写入的文件**，不动用户在同一轮之外的脏工作区。
-- 快照元数据进会话（哪些路径、时间、轮次），可列出最近几份。
-- 与 git 共存：仓库是 git 时优先用 git 机制，但 **不要求** 用户先 commit；非 git 目录仍能用文件副本回滚。
-- 明确不在 P0 做多 Agent 并行 worktree（那是 P2）；P0 只保证单循环「这一轮」可撤。
-
-**验收标准。**
-
-- 固定夹具：一轮中 `edit`/`write`/`delete` 若干文件后执行 undo，工作区字节级回到该轮开始；用户预先改过、本轮未碰的文件保持不动。
-- 非 git 目录同样能 undo。
-- Esc 中止时：已落地的写入仍可 undo；未落地的不留半截文件（与 4.5 的部分写入清理一起验收）。
-- 文档写清：这不是时间旅行调试器，默认只保留最近 N 轮快照。
-
-### 4.5 中断、重试、恢复要硬
-
-**为什么重要。** 日常使用充满超时、API 429、Wi-Fi 抖动、用户按 Esc、进程被杀。现在循环在「成功路径」上清楚，在「失败路径」上语义不齐：工具错误往往只是字符串结果，模型可能继续空转直到 doom-loop；`fetch` 失败直接抛；`writeFile` 中途崩溃没有清理约定；Ask/Full 步数用尽抛错，只有 Long 优雅停。用户无法预测「停了之后磁盘和会话是什么状态」。
-
-**现状。**
-
-- `bash` 默认 30s 超时（验证命令 60s）；超时杀进程组。
-- `Esc` 中止当前轮；Long 额外打检查点；`saveFailedTurn` 会把用户消息和已完成的 tool 轨迹入库。
-- `completeChat`（`src/chat.ts`）单次 `fetch`，无退避重试；流式空内容抛错。
-- 工具失败多返回 `工具执行失败` / `权限拒绝` 文本，循环继续，直到连续三次同失败才停。
-- 无「进程崩溃后自动 resume 到未完成 tool 轮」的协议；下次 `--resume` 只能回到已入库消息。
-- Full 沙箱失败会裸跑（与 Ask/Long 不同），属于权限语义，不是恢复语义，但用户容易把它理解成「失败了还是执行了」。
-
-**目标形态。**
-
-- **工具超时**：每个工具有明确超时（bash 已有；MCP / 网络 / 长 read 要对齐），超时作为失败结果，可配置，超时后不留孤儿进程（bash 已 `kill` 进程组，需推广到 MCP 子进程）。
-- **网络重试**：对 Provider 的可重试错误（超时、429、5xx、空闲断开）做有限次指数退避；用户 Esc 立即取消重试。不可重试的 4xx 直接失败。
-- **部分写入清理**：`write` / `apply_patch` 使用临时文件 + 原子 rename，或失败时恢复写前字节；禁止留下截断文件。
-- **崩溃恢复**：启动时检测未正常关闭的会话（锁文件或 `persisted` 标志），提示 `/resume` 最近一次；已入库的完整 tool 轮可续，未完成的 assistant tool_calls 必须继续走 `closeIncompleteTrace`，不得把半截协议发给模型。
-- **stop-on-failure 语义**写进产品说明并实现：权限拒绝、沙箱不可用、磁盘满、补丁无法应用 → 默认停止本轮并报告；普通测试失败 → 交给模型修（Ask 可再审批）；doom-loop → 停。Long 保持优雅检查点；Ask/Full 步数用尽应同样留下可读的停止原因，而不是只抛「超过最大工具步数」。
-
-**验收标准。**
-
-- 单测或集成：模拟 Provider 429 两次后成功，轨迹只有一次用户可见成功回复；第三次仍失败则明确报错且不写坏文件。
-- 补丁应用到一半抛错后，目标文件内容等于写前。
-- 杀掉进程再 `--resume`：不会因为半截 `tool_calls` 导致 API 400；用户能看到「上次未完成」。
-- 文档用一张表列出：超时 / 拒绝 / 测试失败 / doom / Esc / 步数用尽分别会怎样对待会话、磁盘、检查点。
+**验收（已覆盖）。** 单测：429 两次后成功只产生一次正文；401 不重试。
 
 ---
 
-## 5. P1：与竞品对齐的能力
+## 5. P1：与竞品对齐
 
-P1 不阻塞「能每天改自己的仓库」，但阻塞「愿意把 socode 推荐给别人、愿意长时间开着」。
+P1 不阻塞「能改自己的仓库」，但阻塞「愿意长时间开着、愿意推荐给别人」。
 
-### 5.1 真正的 TUI，和 / 或 IDE 表面
+### 5.1 `/usage` 与默认用量行
 
-**为什么重要。** 前端今天能用：流式 Markdown、工具一行摘要、审批一个键、子代理 HUD。它还不够「看懂一轮复杂改动」：工具轨迹不能展开，审批看不到 diff，长输出靠截断。Claude Code 的终端体验和 IDE 扩展让用户 **在同意之前看见将发生的事**。Codex 也把 diff / 沙箱状态放在会话层。没有这一层，P0 的 patch 和检查点在用户眼里仍是黑盒。
+**为什么重要。** 子代理、Long 审批、skill 激活都是额外调用。用户只在 `/context` 里看到上一轮 prompt / completion，不知道这一轮多少步、子代理花了多少。没有 `/usage`。Long 有 token/步数硬停；Ask 没有「意外子代理爆发」的软阈值。
 
-**现状。** 手写 ANSI，无 React/Ink（见 `docs/FRONTEND.md`）。工具结果最多 3 行；Ask 审批是 `askPermission` 的 `y/n/a`，参数只有短路径。没有 VS Code / Cursor 的 app-server、没有 LSP、没有内联批注。
+**现状。** `runAgent` 累计 `TokenUsage`，存在 `lastUsage` 里给 `/context` 用。没有美元估价、没有分项（主循环 / 审批 / 子代理 / 压缩）、没有跨会话账本、不默认上报。
 
-**目标形态。** 两条可以只先做一条，但产品上要承认另一条是明确的后续：
+**目标形态。** 每轮结束默认打一行：主模型 tokens、工具步数、子代理次数与 tokens、墙钟时间。`/usage` 看本会话累计。可选软/硬阈值。未配置单价时不编造金额。
 
-1. **终端 TUI 升级**：工具轨迹可折叠 / 展开；`edit`/`apply_patch`/`write` 在审批前显示 diff；失败行保持红色；长 bash 输出可滚或外开 pager。仍可以不引入大型 UI 框架，但交互状态要比现在的「一行 ●」丰富。
-2. **或 IDE 表面**：一个很小的 app-server（本机 HTTP/WS 或 stdio 协议），给 VS Code / Cursor 扩展喂：当前模式、待审批 diff、会话列表。扩展可以薄，核心逻辑仍在 CLI。
+**验收。** 一轮含一次子代理的对话，结束行能分开父 / 子 tokens。`/usage` 存在且与 `/context` 不抢同一块色带。
 
-**验收标准。** Ask 下对一次 `apply_patch` 按 `n` 之前，用户能在终端（或 IDE）看到将改变的行。工具轨迹默认折叠、按键或点击可展开完整输出。若做 IDE：扩展能完成一轮「打开 diff → 批准 → 看到文件变化」，且权限模式与 CLI 一致。
+### 5.2 TUI 轨迹与 IDE 表面
 
-### 5.2 MCP 或等价扩展点（产品演进，而不是从零发明）
+Ask diff 已有。仍缺：工具轨迹可折叠展开、长 bash 可滚或外开 pager。IDE 仍可以是很薄的 app-server，核心留在 CLI。不把「再做一遍 Ask diff」立项。
 
-**为什么重要。** 编程 Agent 的边界不可能预置所有工具（浏览器、issue、内部 RPC）。Claude Code 把 MCP 当正式扩展面；Pi 则把整个 harness 开放。socode 已经选择「MCP 进同一套权限循环」，这比做 Pi 式平台更贴产品。用户仍会拿「能不能接我自己的服务器」衡量是否主力。
+### 5.3 MCP 远程传输与 hooks
 
-**现状。** stdio MCP **已经落地**：读 Claude/Cursor 风格 `.mcp.json`（`~/.socode/mcp.json` 先加载，项目覆盖同名），工具名 `mcp__…`，`readOnlyHint` 为真的可在 Plan 使用，副作用走 Ask / Long / Full。HTTP / SSE MCP 明确未做。`/mcp` 看连接状态。Long 文档的「非目标」写的是：**Long 模式本身不负责实现 MCP**，由独立模块负责、套同一权限——这与「产品不要 MCP」不是一回事。
+stdio MCP 已落地。缺口是 HTTP / SSE（可选）和项目级 hooks（PreToolUse 等进审计日志）。不要重写 stdio 实现。不要用 MCP 代替 [`REMOTE.md`](./REMOTE.md) 的远程工作区。
 
-先前若把「MCP」整项当成缺口，需要更新认知：缺口已经从「有没有 MCP」变成「扩展面是否完整、以及要不要 hooks」。
+### 5.4 分层记忆
 
-**目标形态（建议重新评估后的产品决策）。**
+`AGENTS.md` 已有。缺全局 / 会话记忆晋升。没有用户确认不得改持久记忆文件。
 
-- **保持**：MCP 是工具插件，不是可替换循环；权限失败即拒绝，不因 MCP 放宽沙箱。
-- **补齐**：HTTP / SSE MCP（或至少一种远程传输），资源 / prompts 若成本低可跟；工具数量上限与命名规则保持可审。
-- **等价扩展点**：Claude Code 式的可选 hooks（PreToolUse / PostToolUse / Stop / SessionStart），用项目或用户目录下的小脚本，进审计日志。Hooks 是「产品演进」，因为它们让团队在不改 socode 源码的情况下约束 Agent；这比把循环改成插件总线更接近 Claude Code，也避免滑向 Pi。
-- **暂缓**：MCP 市场、任意 WASM 插件、让第三方替换 `runAgent`。
+### 5.5 Eval / 回归套件
 
-**验收标准。** 一份文档化的决策：stdio 已有 + 远程传输是否做、hooks 是否做。若做 HTTP MCP：用一个远程只读服务器在 Plan 下可调用、在 Ask 下副作用会审批。若做 hooks：PreToolUse 能拒绝一次 `bash`，并写入 `.socode-audit.jsonl`。不把「再实现一遍 stdio MCP」列为里程碑。
-
-### 5.3 更丰富的项目记忆
-
-**为什么重要。** `AGENTS.md` 解决「仓库想告诉 Agent 什么」。日常主力还需要：「这个用户讨厌改格式」「上次在这个仓库用 pnpm」「本会话已经否决过某种方案」。没有分层记忆，模型会每轮重新发明偏好，或把错误偏好写进代码。
-
-**现状。** 说明文件从宽到窄拼接（用户级 `~/.socode` / `~/.claude`，再沿 git 根到工作区）。Skills 有发现与按轮激活。`recap` 压缩长轮。Long 的 TaskState / plan 钉在压缩保留区。**没有**会话级自动蒸馏、没有全局偏好存储、没有 Stop hook 把「用户骂过的点」写回记忆。记忆写入完全靠人改 markdown。
-
-**目标形态。** 三层，后者覆盖前者，均可只读审计：
-
-1. **全局**（`~/.socode/MEMORY.md` 或等价）：跨仓库的用户偏好，需用户同意才写。
-2. **项目**（现有 `AGENTS.md` / `CLAUDE.md`）：继续作为主契约。
-3. **会话**（短、可过期）：本会话的约束与否决项，压缩时钉住，会话结束后可选择晋升到项目层。
-
-可选 hooks：一轮结束时跑 `Stop` 脚本或一次小模型蒸馏，提案由用户 `/memory accept` 才写入。不要默默改 `AGENTS.md`。
-
-**验收标准。** 能指出三层文件路径与优先级。压缩后会话约束仍在。没有用户确认时，Agent 不得改持久记忆文件。提供 `/memory` 查看（建议名，见附录）。
-
-### 5.4 Eval / 回归套件（发布门）
-
-**为什么重要。** 权限、沙箱、压缩都有单测，改提示词或 `edit` 协议时仍可能让「日常任务」变笨：整文件写入回潮、跳过测试、绕过沙箱。没有黄金任务和轨迹回放，发布只能靠作者手感。Claude Code 一类产品把评测当门，不是当博客。
-
-**现状。** `npm test` 覆盖模块行为。没有固定仓库夹具上的多步 Agent 任务、没有录制/回放轨迹、没有 CI 上的「主路径不得用 `write` 改已有大文件」类门禁。
-
-**目标形态。** 小而硬的回归集（先 5–10 个任务即可）：
-
-- 黄金任务：例如「在本仓库给某函数加参数并改测试」「只读回答某模块职责」「Ask 下拒绝工作区外写入」。
-- 轨迹回放：对录制的 tool 序列断言（工具名、是否调用 bash、是否整文件 write）。
-- 发布门：`npm test` + 这组 eval 在 CI 全过才标可发布。第一期允许 mock Provider 或固定假模型，重点锁 **harness 不变量**，而不是锁模型智商。
-
-**验收标准。** 文档列出任务、夹具、如何跑。至少一条任务在「现有 `edit` 被故意改坏」时失败。CI 配置或脚本存在；本地一条命令可跑。不把「用真模型每周跑一遍」当成 P1 唯一门（那是加分项）。
-
-### 5.5 费用与用量可见，且预算是默认能力
-
-**为什么重要。** 子代理、Long 动态步数、审批器、skill 激活都是额外 LLM 调用。用户只看到 `/context` 的色块和上一轮 API 的 prompt/completion，不知道这一轮多少步、子代理花了多少、沙箱 bash 跑了多久。没有默认预算，Long 可能在用户出门时把钱烧在重试上。
-
-**现状。** `runAgent` 累计 `TokenUsage`；`/context` 打印估算占用和「API 回报 prompt / completion」。Long 有 `MAX_AGENT_TOKENS` 和步数预算，用尽则检查点停。没有美元估价、没有分项（主循环 / 审批 / 子代理 / 压缩）、没有沙箱耗时、没有告警阈值、没有跨会话用量账本。
-
-**目标形态。** 每轮结束默认打一行用量：主模型 tokens、工具步数、子代理次数与 tokens、审批调用、墙钟时间。`/usage` 看本会话累计。可选预算：超过软阈值警告，超过硬阈值停（Long 已有硬停，应推广到 Ask 的「意外子代理爆发」）。不强制接计费 API；按模型名用用户配置的单价即可，缺省只显示 tokens。
-
-**验收标准。** 一轮含一次子代理的对话，结束行能分开「父 / 子」tokens。未配置单价时不编造金额。软阈值可测。用量数据不默认上报网络（与 P2 遥测 opt-in 一致）。
+`npm test` 不是黄金任务门。先 5–10 个夹具：不得整文件覆盖已有大文件、工作区外写入询问或拒绝、undo 恢复、Provider 429 重试。第一期允许 mock Provider。
 
 ---
 
 ## 6. P2：更晚再做的规模化
 
-P2 不是不重要，是 **在 P0 未完成时做了会变成错误的产品**。没有可靠编辑和撤销就做云端执行，只是把风险搬到别人的机器上。
+没有可靠 patch 和更硬的 undo 就做云端执行，只是把风险搬到别人的机器上。
 
-### 6.1 多表面共享核心（CLI / IDE / 远程会话协议）
+### 6.1 多表面与远程会话协议
 
-把 `runAgent`、权限、会话存储抽成稳定协议，CLI、IDE 扩展、未来的远程会话都当 client。现在 `src/index.ts` 把 REPL、斜杠命令、持久化缠在一起，FRONTEND 也写明没有 web。P2 的验收应是：同一会话可在 CLI 暂停、在 IDE 恢复，模式与审批一致。90 天只允许为 P1 的 IDE 做 **最小** app-server，不在本期做完整多表面协议。
+把 `runAgent`、权限、会话存储抽成稳定协议。现在 `src/index.ts` 把 REPL、斜杠命令、持久化缠在一起。远程开发的产品决策见 [`REMOTE.md`](./REMOTE.md)：**先 A（ssh -t 整进程在远端），再 B（本地 TUI + 远端 worker）**。B 才是这条「远程会话协议」。90 天若做远程，只允许 A 的入口糖，不做完整 B。
 
 ### 6.2 更强的多 Agent
 
-并行 explore、角色（定位 / 编辑 / 审查）、合并与冲突处理。现状：最多 6 个子代理、localize 并行上限 2、写入串行、共享工作区、禁止嵌套子代理。这是正确的安全默认。P2 若做并行写入，必须先有 per-agent worktree 或补丁隔离，以及冲突合并 UX。不要在共享工作区上「多个 worker 一起 `write`」。
+现状：最多 6 个子代理、localize 并行上限 2、写入串行、共享工作区。P2 若并行写入，必须先有 per-agent worktree。不要在共享工作区上多个 worker 一起 `write`。
 
-### 6.3 云端 / 远程执行
+### 6.3 云端 / 远程执行（不是远程开发）
 
-把 bash 放到远端沙箱或开发容器。当前产品优势是 **本机 + OS 沙箱 + 密钥不离机**。远程执行要重做密钥、工作区同步、审批延迟。在本地 undo / doctor / 默认存储完成前不要做。若做，必须与现有 denylist、审计、Ask 审批同构。
+把 bash 放到云沙箱或开发容器。当前优势是本机 OS 沙箱 + 密钥不离机。与 [`REMOTE.md`](./REMOTE.md) 的 SSH 工作区分开记账。90 天不做云端执行。
 
 ### 6.4 发行信任
 
-签名发布、自动更新、遥测 opt-in、隐私声明。现在是 `npm start` 的源码树，没有发布通道，没有更新器，审计日志只写在工作区本地。P2 验收：安装物可校验签名；更新需用户同意；默认无网络遥测；仓库内有隐私说明（收哪些、不收哪些、MCP 子进程环境已剥离密钥）。90 天可先写隐私草稿，不必做自动更新。
+已有 GitHub Release 与 macOS 安装包，未签名。P2：签名、自动更新需用户同意、默认无遥测、隐私说明。
 
 ---
 
-## 7. 90 天里程碑（建议顺序与依赖）
+## 7. 接下来的顺序（接 0.1.1）
 
-顺序按「先让改代码可逆、可安装，再让人看见 diff，最后用评测锁住」排列。并行时不要打乱依赖。日期按三个月窗口理解，不按日历周排工。
+原里程碑 2–5（存储、undo 雏形、doctor、Ask diff）已交付。不要再按那张图施工。剩余依赖：
 
 ```
-[1 手术刀 patch + 写后校验]
+[apply_patch + 写后 diff 已有，补多 hunk / 锚点]
         │
         ▼
-[2 本地默认存储，去掉 Postgres 硬依赖]  ← 可与 1 后半并行，但不要阻塞 1 的单测
+[/undo 持久化；文案已写明只管本轮、不管 bash、不是 rewind]
         │
         ▼
-[3 本轮检查点 / undo]  ← 依赖 1 的原子写入；存储后端最好已可插拔（2）
+[短轮改完就测  +  /usage]
         │
         ▼
-[4 doctor + 安装 UX]  ← 依赖 2，否则 doctor 只能报「请先装 Postgres」
-        │
-        ▼
-[5 审批 diff 预览]  ← 依赖 1 产出 unified diff；可早做原型，但验收以 patch 工具为准
-        │
-        ▼
-[6 小型回归 eval]  ← 锁住 1–5 的不变量；mock Provider 即可
+[小型回归 eval]
 ```
 
-P1 其余（MCP 远程传输、hooks、分层记忆、用量面板）和全部 P2 **不进 90 天必达**。若有余力，优先 **用量一行展示**（5.5 的最小集）和 **MCP 决策文档**，不要新开云端或并行 worker。
+Provider 429/5xx 退避已在 `src/retry.ts`。远程：文档已在 [`REMOTE.md`](./REMOTE.md)。实现最多穿插 **A：`socode ssh` 包装**。不要插入云沙箱，不要和 eval 抢。
 
-### 里程碑 1：patch 编辑 + 校验
+P1 其余（MCP HTTP、hooks、分层记忆、TUI 折叠）和全部 P2 **不进当前必达**。有余力优先 `/usage` 最小集。
 
-- **做**：带锚点的 apply/edit、失败重试、写后 diff/read-back、已存在大文件避免无必要 `write`、原子落地。
-- **依赖**：无。可先于存储改造。
-- **验收**：见 §4.1。附带：现有 `edit` 精确匹配行为作为 fallback 仍要有测试，避免老轨迹全断。
-
-### 里程碑 2：本地默认存储，去掉 Postgres 硬依赖
-
-- **做**：会话存储接口；默认 SQLite 或文件；`DATABASE_URL` 仍可选 Postgres；启动不再在无 Postgres 时崩溃。
-- **依赖**：尽量不与里程碑 1 改同一批文件工具；和 `src/db.ts` / `src/index.ts` 耦合。
-- **验收**：见 §4.3 中与存储相关的条目。允许尚未做 global `bin`（那是里程碑 4）。
-
-### 里程碑 3：检查点 / 撤销本轮
-
-- **做**：写前快照、`/undo`（或等价）、与 git 脏工作区共存、Esc 后仍可撤已落地写入。
-- **依赖**：里程碑 1 的原子写入；建议在里程碑 2 之后，以便快照元数据进同一会话存储。
-- **验收**：见 §4.4。
-
-### 里程碑 4：doctor + 安装 UX
-
-- **做**：`bin`、用户级配置目录、第一轮向导、`socode doctor`（Node、密钥、sandbox-exec/bwrap、存储可写）。
-- **依赖**：里程碑 2（否则 doctor 的「存储」项没有默认后端）。
-- **验收**：见 §4.3 中安装 / 向导 / doctor 条目。文档安装节从「需要 PostgreSQL」改为「默认不需要」。
-
-### 里程碑 5：diff 预览审批 UX
-
-- **做**：Ask（及需要时 Full 的确认场景）在落地前展示 patch diff；折叠/展开不强制，但 diff 本身必须看见。
-- **依赖**：里程碑 1。不依赖 IDE。
-- **验收**：见 §5.1 中与终端 diff 相关的条目。IDE app-server 不在本里程碑。
-
-### 里程碑 6：小型回归 eval 套件
-
-- **做**：5–10 个黄金任务 + 轨迹断言 + 一条本地命令；能锁「不得整文件覆盖已有大文件」「工作区外写入拒绝」「undo 恢复」等。
-- **依赖**：1–5 的行为已稳定，否则 eval 会每周改期望。
-- **验收**：见 §5.4。CI 有则更好；没有 CI 时至少 `package.json` 脚本和夹具入仓。
-
-90 天结束时的 **产品口令**：在一台只有 Node、没有 Postgres 的 Linux 或 macOS 上，安装 socode，配密钥，用 Ask 改本仓库一个现有函数，审批时能看见 diff，跑测试，`/undo` 能回到改前，`doctor` 为绿。做不到这一句，就还不能自称日常主力。
+90 天口令更新为：在一台只有 Node 的 Linux 或 macOS 上，安装 socode，配密钥，用 Ask 对已有文件打 **patch（多 hunk）**，审批看见 diff，短轮跑测试，网络 429 能自己缓过来，`/undo` 重启后仍能回到改前，`/doctor` 为绿，`/usage` 能看见这一轮花了多少。Windows 走 SSH / WSL，见远程文档。
 
 ---
 
-## 8. 明确非目标 / 暂缓（防止范围膨胀）
+## 8. 明确非目标 / 暂缓
 
-下面这些 **90 天不要做**。其中一部分是仓库里已经写过的「刻意不做」，仍然有效；一部分是对标时容易被拉进来的诱惑。
+### 8.1 继续成立
 
-### 8.1 继续成立的非目标
+- 不要把 Long 做成静默 Full。
+- 不要在 Long 范围里重写 Linux 全量沙箱。
+- 子代理不要嵌套；90 天不要给 worker 上 git worktree。
+- 不要做 HTTP/SSE MCP 的同时推倒 stdio。
+- 不要引入大型前端框架。
+- 不要做 Pi 式可替换 harness。
+- **不要把 `/undo` 做成对话 rewind。** 那是另一个产品。
+- **不要把远程开发做成云端 bash。**
 
-摘自 README 与 [`LONG-MODE.md`](./LONG-MODE.md)，产品上仍然成立：
+### 8.2 已关闭的旧缺口（不要再立项）
 
-- **不要把 Long 做成静默 Full。** 沙箱起不来就拒绝；本地已能判定的危险请求不交给审批器。
-- **不要在 Long 范围里重写 Linux 全量沙箱。** 继续依赖 bwrap；没有就拒绝副作用 bash。doctor 只负责 **发现** 缺失，不负责发明第二套沙箱。
-- **不要用 Long 去「修掉全部审计 P0」。** 那些是更激进预授权的阻断项，与长程编排分开排期。
-- **子代理不要嵌套子代理。** 90 天不要给 worker 上 git worktree（与 P0 的「本轮快照」不是一回事：本轮快照是父循环的 undo，不是每人一份沙盒）。
-- **不要做 HTTP/SSE MCP 的同时，把 stdio 实现推倒重来。**
-- **不要引入大型前端框架** 作为 TUI 的前提；P1 的 diff 预览应能在现有 ANSI 层落地。
-- **不要做 Pi 式可替换 harness 平台**（自定义循环插件、第三方替换权限内核）。
-
-### 8.2 建议重新评估的旧非目标
-
-这些曾被写成「先不做」或落在 Long 文档的范围外。作为 **产品** 而不是作为 Long PR，应该重新排队，而不是继续当成禁忌：
-
-| 旧表述 | 建议 |
+| 旧表述 | 现在 |
 | --- | --- |
-| Long 非目标里「MCP / 子代理由独立模块负责」 | **保持模块边界**，但产品要承认 MCP 已是正式能力；缺口改为远程传输与 hooks，而不是「有没有 MCP」。 |
-| README「HTTP / SSE MCP（只做 stdio）」 | **P1 重新评估**，不进 90 天必达。若用户连接云端工具的需求上升，再单开里程碑。 |
-| 「不给 worker 做 git worktree」 | **90 天仍不做多 worker 隔离**；但 P0 的本轮 checkpoint 可以使用 git 作为实现手段。不要把两条混成「任何 git 快照都禁止」。 |
-| 系统提示「写完不要立刻再 read」 | **应随里程碑 1 改掉**（产品要 read-back）。这是提示词，不是架构非目标。 |
-| 小到能审、运行时只有 `pg` | **默认存储去掉硬依赖后，「只有 pg」这条卖点要改成「默认无服务端依赖」**；Postgres 变为可选。体积纪律仍要：不借存储改造引入框架森林。 |
+| 启动依赖 Postgres / 运行时只有 `pg` | 文件会话，无数据库依赖 |
+| 没有 `bin`、没有 doctor、没有向导 | `bin/socode.mjs`、`/doctor`、`--doctor`、缺 Provider 进向导 |
+| Ask 审批只有短预览 | `write`/`edit`/`delete` 完整 unified diff |
+| 没有 glob | 有 `glob` |
+| `edit` 只能精确匹配、write 非原子 | CRLF/trim、`atomicWrite`、edit 结果带 diff |
+| 没有本轮文件 undo | 有进程内 `/undo`；剩余见 §4.3 |
+| 会话在 `~/.socode/sessions/` | **不是**。会话在工作区 `.socode/sessions/`；用户级 `~/.socode/` 只放 Provider / config / MCP |
 
-### 8.3 90 天明确不做
+### 8.3 当前窗口明确不做
 
-- 云端执行、远程开发容器、把密钥上传到 socode 云（目前也没有云）。
-- 多 worker 并行写同一工作区、自动 merge、角色市场。
-- 签名发布、自动更新、默认打开的遥测。
-- 完整 VS Code/Cursor 功能对标（除了若有人提前做的最小 app-server 原型）。
-- 符号级 IDE 质量的 LSP、全语言 AST 索引。
-- 计费账户体系、多租户、团队管理面。
-- 为评测去训练或绑定单一模型。
+- 云端执行、远程开发容器、把密钥上传到 socode 云。
+- 完整远程协议 B（本地 TUI + 远端 worker）——文档可以写，实现排在 A 之后。
+- 对话 rewind、多 worker 并行写、自动 merge。
+- 签名发布、自动更新、默认遥测。
+- 完整 VS Code/Cursor 对标、LSP / 全语言 AST。
+- 计费账户、多租户。
+- Windows 原生 bash / PowerShell 工具层。
 
-若某项 P1/P2 提前做了，也必须服从：权限失败即拒绝、不扩大 Long 权限、不把 Postgres 再次变成唯一路径。
+若某项提前做了，仍服从：权限失败即拒绝、不扩大 Long 权限、不把 Postgres 再变回唯一路径。
 
 ---
 
-## 9. 附录：建议新增的命令 / 模块名（仅建议，本文不实现）
+## 9. 附录：名称（仅统一用词）
 
-名称可在实现 PR 里调整；列在这里是为了让后续讨论有同一套词。
+### 9.1 命令
 
-### 9.1 用户命令
-
-| 建议 | 作用 |
+| 名称 | 状态 |
 | --- | --- |
-| `socode` | `package.json` `bin` 入口，等价于今天的 `npm start` |
-| `socode doctor` | 检查 Node、密钥、sandbox-exec/bwrap、会话存储、工作区写权限 |
-| `socode login` / 第一轮向导 | 无 Provider 时引导写入用户级配置 |
-| `/undo` | 撤销本轮 socode 对工作区的写入 |
-| `/checkpoint` | 列出本会话文件快照（与 Long 的 `【checkpoint】` 文案区分：后者是任务状态） |
-| `/usage` | 本会话 token / 步数 / 子代理花费 |
-| `/memory` | 查看分层记忆；`/memory accept` 晋升会话记忆 |
-| `/diff` | 展示待审批或上一轮落地的 patch（若审批 UI 已内嵌 diff 则可省略） |
+| `socode` | 已有 `bin` |
+| `socode --doctor` / `/doctor` | 已有 |
+| 第一轮 Provider 向导 | 已有 |
+| `/undo` | 已有，能力见 §4.3 |
+| `/usage` | **没有** |
+| `/rewind` | **没有**；若做，不要叫 undo |
+| `socode ssh` | **没有**；见 [`REMOTE.md`](./REMOTE.md) |
+| `/memory` | 没有 |
+| `/checkpoint`（文件快照列表） | 没有；勿与 Long `【checkpoint】` 混名 |
 
-现有 `/compress`、`/context`、`/mode`、`/task`、`/mcp`、`/skills` 保持。
+现有 `/compress`、`/context`、`/mode`、`/task`、`/mcp`、`/skills`、`/seeplan`、`/seesubagent` 保持。
 
-### 9.2 工具名
+### 9.2 工具
 
-| 建议 | 作用 |
+| 名称 | 状态 |
 | --- | --- |
-| `apply_patch` | 带锚点的多 hunk 补丁；或把现有 `edit` 升级到同一协议并保留别名 |
-| `glob` | 列文件 |
-| `search` | 保留，输出结构化；可选后续 `search_symbols` |
-| `write` | 仅新文件或显式重写 |
+| `apply_patch` | **没有** |
+| `glob` | 已有 |
+| `search` | 已有 |
+| `write` / `edit` / `delete` | 已有 |
 
-### 9.3 模块（建议路径，不预建空文件）
+### 9.3 模块
 
-| 建议路径 | 职责 |
+| 路径 | 职责 |
 | --- | --- |
-| `src/patch.ts` | 解析 / 应用 / 重试 / read-back |
-| `src/store.ts` | 会话存储接口；`src/db.ts` 降为 Postgres 适配器 |
-| `src/store-sqlite.ts` 或 `src/store-files.ts` | 默认后端 |
-| `src/checkpoint.ts` | 写前快照与 `/undo` |
-| `src/doctor.ts` | `socode doctor` |
-| `src/install-ui.ts` 或扩 `src/provider.ts` | 第一轮向导、用户级 `~/.socode` |
-| `src/retry.ts` | Provider 退避重试 |
-| `src/diff-ui.ts` | 终端 diff 预览，供审批使用 |
-| `src/eval/` 或 `eval/` | 黄金任务夹具与回放 |
-| `src/usage.ts` | 分项用量 |
-| `src/hooks.ts` | 可选 PreToolUse 等（P1，非 90 天必达） |
-| `src/memory.ts` | 分层记忆读写（P1） |
+| `src/patch.ts` | 现为 `edit` 的匹配与 diff；将来才是 apply_patch 解析器 |
+| `src/db.ts` | 工作区文件会话，不是 Postgres 适配器 |
+| `src/undo.ts` | 进程内写前快照 |
+| `src/doctor.ts` | doctor |
+| `src/ask-diff.ts` | Ask 审批 diff |
+| `src/retry.ts` | Provider 429/5xx/网络抖动退避 |
+| `src/usage.ts` | **没有** |
+| `docs/REMOTE.md` | 远程开发决策 |
 
-### 9.4 配置与路径（建议）
+### 9.4 路径
 
-- 用户级根目录：`~/.socode/`（MCP 配置已在使用这一约定）。
-- 默认会话：`~/.socode/sessions/` 或同目录 SQLite。
-- 用户级 Provider：已落在 `~/.socode/providers.json`，不再读仓库根 `.env`。
-- 快照：`~/.socode/checkpoints/` 或会话存储内 blob；工作区 `.socode-audit.jsonl` 继续只做审计。
+- 用户级：`~/.socode/`（`providers.json`、`config.json`、`mcp.json`、可选 skills）。
+- 会话：工作区 `.socode/sessions/`。
+- 审计：工作区 `.socode-audit.jsonl`。
+- 持久 undo（尚未做）：应进工作区 `.socode/` 或会话 JSON，不要写到用户级以免串仓库。
 
 ---
 
 ## 10. 本文与实现的关系
 
-本文 **只描述差距、顺序和验收**。落地必须另开实现 PR，并按里程碑拆开，避免「一个 PR 里重写存储、编辑协议和 TUI」。实现时若发现本文与代码不符，以代码为准改文档，不要用文档冒充功能已经存在。
+本文描述差距、顺序和验收。落地另开实现 PR，按 §7 拆开。实现时若发现本文与代码不符，以代码为准改文档。

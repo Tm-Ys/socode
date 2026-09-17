@@ -66,7 +66,7 @@ type TaskState = {
 2. 模型调用 `task_state`（仅 Long 出现在 tool specs）
 3. 用户 `/task`、`/task goal …`、`/task milestone …`、`/task note …`、`/task clear`
 
-检查点：预算停、用户 Esc 中止时再写一条 TaskState，并对用户打 `【checkpoint】` 摘要。同一会话下一轮接着做。
+检查点：预算停、用户 Esc 中止时再写一条 TaskState，并对用户打 `【checkpoint】` 摘要（任务态，不是工作区文件快照，也不是 `/undo`）。同一会话下一轮接着做。
 
 ## 循环上相对 Ask/Full/Plan 的改动
 

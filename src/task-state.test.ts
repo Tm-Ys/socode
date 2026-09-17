@@ -49,6 +49,8 @@ describe("TaskState", () => {
     const state = applyTaskPatch(emptyTaskState(), { goal: "long mode", addMilestone: "PR" });
     const text = checkpointReply(state, "budget", "工具步数已达上限。");
     assert.match(text, /【checkpoint】/);
+    assert.match(text, /任务状态已保存/);
+    assert.match(text, /不是工作区文件快照/);
     assert.match(text, /long mode/);
     assert.match(text, /PR/);
   });

@@ -297,7 +297,7 @@ export function checkpointReply(state: TaskState, reason: CheckpointReason, deta
   const extra = detail.trim() ? ` ${detail.trim()}` : "";
   const next = state.milestones[0] ?? "（未指定，请先确认目标）";
   return [
-    `${CHECKPOINT_PREFIX}${why}，任务状态已保存。${extra}`,
+    `${CHECKPOINT_PREFIX}${why}，任务状态已保存（不是工作区文件快照，也不是 /undo）。${extra}`,
     `目标: ${state.goal.trim() || "（未设定）"}`,
     `已完成: ${listOrDash(state.done)}`,
     `下一步: ${next}`,
