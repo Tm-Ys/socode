@@ -4,6 +4,7 @@ import { dirname, extname, isAbsolute, join } from "node:path";
 import { throwIfAborted, TurnAborted } from "./abort.js";
 import { bashSpawn, denyReason, realExistingPath, scrubEnv, shouldFallbackSandbox, type BashSandbox } from "./sandbox.js";
 import { applySnippetEdit, formatEditDiff } from "./patch.js";
+import { snapshotForUndo } from "./undo.js";
 
 const MAX_READ_BYTES = 200_000;
 const MAX_OUTPUT_CHARS = 32_000;
@@ -61,6 +62,7 @@ export async function readAbsoluteFile(path: string, offset?: number, limit?: nu
 
 export async function writeAbsoluteFile(path: string, content: string) {
   const file = requireAbsolutePath(path, "path");
+  await snapshotForUndo(file);
   await mkdir(dirname(file), { recursive: true });
   await atomicWrite(file, content);
   return `已写入 ${file} (${Buffer.byteLength(content, "utf8")} bytes)`;
@@ -75,6 +77,7 @@ export async function editAbsoluteFile(path: string, oldText: string, newText: s
     throw new Error(`文件不存在: ${file}`);
   }
   if (!info.isFile()) throw new Error(`path 必须是文件: ${file}`);
+  await snapshotForUndo(file);
   const text = await readFile(file, "utf8");
   const result = applySnippetEdit(text, oldText, newText, replaceAll);
   await atomicWrite(file, result.next);
@@ -92,6 +95,7 @@ export async function deleteAbsoluteFile(path: string) {
     throw new Error(`文件不存在: ${file}`);
   }
   if (!info.isFile()) throw new Error(`delete 只能删文件，不是目录: ${file}`);
+  await snapshotForUndo(file);
   await unlink(file);
   return `已删除 ${file}`;
 }

@@ -135,6 +135,7 @@ const NEVER_ALWAYS_BINS = new Set([
   "osascript",
   "kill",
   "pkill",
+  "git",
 ]);
 const WRAPPER_BINS = new Set([
   "env",
@@ -237,7 +238,7 @@ export function writeKind(path: string): Exclude<FileOp, "exec" | "delete"> {
 
 export function mutationDenied(
   mode: AgentMode,
-  workspace: string,
+  _workspace: string,
   path: string,
   op: FileOp,
 ): string | null {
@@ -245,9 +246,6 @@ export function mutationDenied(
   if (blocked) return blocked;
   if (mode === "plan") {
     return `当前是 Plan 模式，不能${opLabel(op)}。请只给出计划，或让用户输入 /mode ask、/mode long 或 /mode full 后再执行。`;
-  }
-  if (mode !== "full" && !isInsideWorkspace(workspace, path)) {
-    return `${workspaceModeLabel(mode)} 模式不能在工作区外${opLabel(op)}。路径: ${path}。需要的话请 /mode full。`;
   }
   return null;
 }
@@ -624,21 +622,52 @@ export function extractAbsolutePaths(command: string, cwd: string) {
   return found;
 }
 
+export function bashTouchesOutside(workspace: string, cwd: string, command: string) {
+  if (!isInsideWorkspace(workspace, cwd)) return true;
+  for (const path of extractAbsolutePaths(command, cwd)) {
+    if (!isInsideWorkspace(workspace, realExistingPath(path))) return true;
+  }
+  return false;
+}
+
 export function bashEscapesWorkspace(mode: AgentMode, workspace: string, cwd: string, command: string) {
+  const paths = extractAbsolutePaths(command, cwd);
   if (mode === "full") {
-    for (const path of extractAbsolutePaths(command, cwd)) {
-      const real = realExistingPath(path);
-      const blocked = denyReason(real);
+    for (const path of paths) {
+      const blocked = denyReason(realExistingPath(path));
       if (blocked) return blocked;
     }
     return null;
   }
-  for (const path of extractAbsolutePaths(command, cwd)) {
-    const real = realExistingPath(path);
-    const blocked = mutationDenied(mode, workspace, real, classifyBash(command).op);
+  for (const path of paths) {
+    const blocked = denyReason(realExistingPath(path));
     if (blocked) return blocked;
   }
   return null;
+}
+
+export function sandboxToolStatus(): { ok: boolean; detail: string; hint?: string } {
+  if (process.platform === "darwin") {
+    const ok = existsSync("/usr/bin/sandbox-exec");
+    return {
+      ok,
+      detail: ok ? "/usr/bin/sandbox-exec 可用" : "未找到 /usr/bin/sandbox-exec",
+      hint: ok ? undefined : "Ask / Long 的副作用 bash 会拒绝执行。需要 macOS 自带的 sandbox-exec。",
+    };
+  }
+  if (process.platform === "linux") {
+    const ok = existsSync("/usr/bin/bwrap");
+    return {
+      ok,
+      detail: ok ? "/usr/bin/bwrap 可用" : "未找到 /usr/bin/bwrap",
+      hint: ok ? undefined : "安装 bubblewrap（bwrap）后，Ask / Long 才能跑有副作用的 bash。",
+    };
+  }
+  return {
+    ok: false,
+    detail: `${process.platform} 没有 Ask/Long 的 OS 沙箱`,
+    hint: "Ask / Long 会拒绝副作用 bash。改文件可用 write/edit；要跑命令请 /mode full。",
+  };
 }
 
 export function opLabel(op: FileOp) {

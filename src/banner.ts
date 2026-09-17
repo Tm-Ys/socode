@@ -9,7 +9,9 @@ const CYAN = "\x1b[36m";
 
 export const WELCOME_LINES = [
   "你知道吗？输入 / 会按前缀列出命令，Tab 补全。",
-  "你知道吗？/mode ask 改文件前会问：y 允许、n 或回车拒绝、a 本会话同类都允许。",
+  "你知道吗？Ask 审批 write/edit/delete 会打出完整 diff，y 允许、n 拒绝、a 本会话同类都允许。",
+  "你知道吗？/undo 只撤回最近一轮 socode 写过、改过或删过的文件，不碰你自己改的其他文件。",
+  "你知道吗？/doctor 检查 Node、密钥、沙箱和目录能不能写；启动也可用 --doctor。",
   "你知道吗？/mode plan 只能看代码和写计划，不会改文件，也不会跑有副作用的命令。",
   "你知道吗？/mode full 会直接改仓库、跑命令；系统目录和密钥文件仍然碰不到。",
   "你知道吗？/mode long 或 /mode 长程 适合跨很多步的任务；副作用由独立 LLM 审批，不会变成 Full。",

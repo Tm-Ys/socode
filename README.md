@@ -15,7 +15,7 @@
 | **Full** | 你已经信任这次会话 | 直接改文件、跑命令；系统目录和密钥仍禁 |
 | **Long / 长程** | 跨很多步的任务 | 只读预授权；副作用由**独立 LLM 审批**，**不会变成 Full** |
 
-Long 的审批器拿一份干净上下文、只输出 JSON；解析失败、超时、缺字段一律拒绝。密钥、工作区外、`sudo` 在问审批器之前就被本地硬拒绝。设计说明见 [`docs/LONG-MODE.md`](docs/LONG-MODE.md)。
+Long 的审批器拿一份干净上下文、只输出 JSON；解析失败、超时、缺字段一律拒绝。密钥、`sudo` 在问审批器之前就被本地硬拒绝；git 和工作区外会问用户。设计说明见 [`docs/LONG-MODE.md`](docs/LONG-MODE.md)。
 
 **失败即拒绝，OS 沙箱和应用层叠在一起。** Ask / Long 下 `bash` 在 macOS 走 `sandbox-exec`（只允许写工作区），Linux 走 `bwrap`。沙箱起不来就拒绝执行，Full 才会警告后裸跑。bash 不再靠整句正则：拆成 argv，剥掉 `env` / `timeout` / `xargs` / `bash -c`，按每一段管道分类——`ls | wc` 仍只读，`ls | tee out` / `find | xargs rm` 会升级；`$()` 和进程替换解析不了就当有副作用。另有：`.env` / `providers.json` / `~/.ssh` 等 denylist、symlink `realpath`、`git status` 的 `a` 不会扩成 `sudo`。bash 和 MCP 子进程都剥掉密钥。每次授权追加到工作区 `.socode-audit.jsonl`。非 TTY（脚本、`--input`）在 Ask 下无法弹窗，写入直接拒绝。
 
@@ -64,7 +64,7 @@ npx socode
 # 开发时也可以 npm start
 ```
 
-把命令装到 PATH：`npm link`（先 `npm run build`）或 `npm install -g ./socode-0.1.0.tgz`。
+把命令装到 PATH：`npm link`（先 `npm run build`）或 `npm install -g ./socode-0.1.1.tgz`。
 
 没有保存过 Provider 时，交互式启动会进入向导，写入用户级 `~/.socode/providers.json`（所有工作区、所有对话共用）。也可以用 `--url` / `--api` / `--model` / `--name` 只覆盖本次进程。
 
@@ -95,14 +95,14 @@ npm test
 
 ## 权限与沙箱
 
-默认 **Ask**（`~/.socode/config.json` 的 `mode`，或 `--mode ask`）。工作区内创建、修改、删除，以及有副作用的命令，会先询问：`y` 允许、`n` 或回车拒绝、`a` 本会话同类一律允许。Esc 视为拒绝。工作区外写入直接拒绝，需要 `/mode full`。
+默认 **Ask**（`~/.socode/config.json` 的 `mode`，或 `--mode ask`）。工作区内创建、修改、删除，以及有副作用的命令，会先询问：`y` 允许、`n` 或回车拒绝、`a` 本会话同类一律允许。`write` / `edit` / `delete` 审批时打出完整 unified diff，不只是短预览。Esc 视为拒绝。git 和工作区外的读写也会问你，不是直接拒绝；`.env`、系统路径、`sudo` 仍硬拒绝。
 
-- **Ask**：写、`edit`、删、有副作用的 `bash` 和所有 `git` 先审批，且只能在工作区内；解析后的只读管道（`ls` / `pwd` / `cat | rg`）不打断。bash 的 cwd 和重定向都不能离开工作区。
+- **Ask**：写、`edit`、删、有副作用的 `bash` 和所有 `git` 先审批；工作区内只读管道（`ls` / `pwd` / `cat | rg`）不打断。工作区外的路径同样先问。批准 git 或区外 bash 后，这一次会放开 OS 写隔离。
 - **Full**（`/mode full`）：直接改文件和执行命令，仍禁止 `/etc`、`/usr`、`~/.ssh`、`~/.aws`、工作区 `.env` 等。
 - **Plan**（`/mode plan`）：只能看、写计划和向用户提问。只读 MCP 可用。
 - **Long**（`/mode long` 或 `/mode 长程`）：Ask 的权限边界 + 长程编排 + LLM 审批副作用。进入后维护 TaskState（`/task`）。
 
-Long **不会**在沙箱起不来时 fallback 裸跑，也**不会**把本地已能判定的危险请求交给审批器。
+Long **不会**在沙箱起不来时 fallback 裸跑；密钥、sudo 仍本地硬拒绝，不会丢给审批器。git 和工作区外会问用户。
 
 ## 交互命令
 
@@ -121,6 +121,8 @@ Long **不会**在沙箱起不来时 fallback 裸跑，也**不会**把本地已
 - `/skills` 查看已注入的 `AGENTS.md` / `CLAUDE.md` 和发现的 Skills
 - `/seesubagent` 列出子代理；`/seesubagent [序号]` 查看某个子代理的过程（默认隐藏，只在右下角显示在跑）
 - `/seeplan` 查看当前任务计划勾选进度
+- `/undo` 撤回最近一轮 socode 写过、改过或删过的文件（不碰你自己改的其他文件；Esc 后已落地的仍可撤）
+- `/doctor` 检查 Node、密钥是否已配、sandbox-exec/bwrap、用户目录和工作区会话目录能不能写。启动也可用 `npm start -- --doctor`
 - `/setplan <说明>` 本轮强制按说明调用 `plan` 拆目标，并激活 grill-me 追问
 - `/setworkarea` 空对话时弹出系统文件夹选择器；也可 `/setworkarea /绝对路径`。输入行空着时灰色显示 `on 路径`
 - `/exit` 或 `/quit` 退出
@@ -184,6 +186,9 @@ Skills 来自各目录下的 `<name>/SKILL.md`（YAML frontmatter 的 `name` / `
 | `src/index.ts` | CLI、会话循环、斜杠命令；发布入口是 `bin/socode.mjs` |
 | `src/agent.ts` | 工具循环、doom loop、Long 预算；上下文顶满时先压缩再继续 |
 | `src/permissions.ts` | 按模式授权 |
+| `src/ask-diff.ts` | Ask 审批前的 unified diff |
+| `src/undo.ts` | 本轮写前快照与 `/undo` |
+| `src/doctor.ts` | `/doctor` 与 `--doctor` |
 | `src/sandbox.ts` | 路径 denylist、bash 解析/分类、OS 沙箱 |
 | `src/long-approve.ts` | Long 副作用的独立 JSON 审批器 |
 | `src/task-state.ts` | 长程状态（活在对话消息里） |

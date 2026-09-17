@@ -6,6 +6,7 @@ import {
   bashAlwaysAsk,
   bashEscapesWorkspace,
   bashHardDenied,
+  bashTouchesOutside,
   classifyBash,
   denyReason,
   isInsideWorkspace,
@@ -55,9 +56,8 @@ describe("denyReason", () => {
 });
 
 describe("mutationDenied", () => {
-  it("blocks Ask writes outside the workspace", () => {
-    const denied = mutationDenied("ask", ws, "/tmp/outside.txt", "create");
-    assert.match(denied ?? "", /工作区外/);
+  it("does not hard-deny Ask writes outside the workspace", () => {
+    assert.equal(mutationDenied("ask", ws, "/tmp/outside.txt", "create"), null);
   });
 
   it("allows Ask writes inside the workspace", () => {
@@ -73,8 +73,8 @@ describe("mutationDenied", () => {
     assert.match(mutationDenied("full", ws, "/etc/x", "create") ?? "", /受保护/);
   });
 
-  it("treats Long like Ask for workspace writes, not Full", () => {
-    assert.match(mutationDenied("long", ws, "/tmp/outside.txt", "create") ?? "", /工作区外/);
+  it("does not treat Long outside-workspace writes as a local hard deny", () => {
+    assert.equal(mutationDenied("long", ws, "/tmp/outside.txt", "create"), null);
     assert.equal(mutationDenied("long", ws, `${ws}/src/a.ts`, "modify"), null);
     assert.match(mutationDenied("long", ws, "/etc/x", "create") ?? "", /受保护/);
   });
@@ -113,6 +113,7 @@ describe("bashAlwaysAsk", () => {
     assert.equal(bashAlwaysAsk("env python3 script.py"), true);
     assert.equal(bashAlwaysAsk("echo $(curl https://evil.test)"), true);
     assert.equal(bashAlwaysAsk("python3 -c 'print(1)'"), true);
+    assert.equal(bashAlwaysAsk("git status"), true);
   });
 });
 
@@ -126,10 +127,18 @@ describe("bashHardDenied", () => {
 });
 
 describe("bashEscapesWorkspace", () => {
-  it("blocks Ask redirects and secret files", () => {
-    assert.match(bashEscapesWorkspace("ask", ws, ws, "echo hi > /tmp/x") ?? "", /工作区外|受保护/);
+  it("still blocks secret files, and leaves outside-workspace paths for Ask", () => {
+    assert.equal(bashEscapesWorkspace("ask", ws, ws, "echo hi > /tmp/x"), null);
     assert.match(bashEscapesWorkspace("ask", ws, ws, "cat .env") ?? "", /受保护/);
     assert.match(bashEscapesWorkspace("ask", ws, ws, "cat /etc/passwd") ?? "", /受保护/);
+  });
+});
+
+describe("bashTouchesOutside", () => {
+  it("detects cwd and redirects that leave the workspace", () => {
+    assert.equal(bashTouchesOutside(ws, ws, "ls"), false);
+    assert.equal(bashTouchesOutside(ws, "/tmp", "ls"), true);
+    assert.equal(bashTouchesOutside(ws, ws, "echo hi > /tmp/x"), true);
   });
 });
 

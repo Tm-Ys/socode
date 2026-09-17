@@ -43,7 +43,7 @@ export function applySnippetEdit(text: string, oldText: string, newText: string,
   return { next, count: targets.length, strategy: "trim" as const };
 }
 
-export function formatEditDiff(path: string, before: string, after: string) {
+export function formatEditDiff(path: string, before: string, after: string, max = 4000) {
   const oldLines = before.split("\n");
   const newLines = after.split("\n");
   let start = 0;
@@ -63,7 +63,7 @@ export function formatEditDiff(path: string, before: string, after: string) {
     ...removed.map((line) => `-${line}`),
     ...added.map((line) => `+${line}`),
   ].join("\n");
-  return hunk.length > 4000 ? `${hunk.slice(0, 4000)}\n... [diff truncated]` : hunk;
+  return hunk.length > max ? `${hunk.slice(0, max)}\n... [diff truncated]` : hunk;
 }
 
 function countOccurrences(text: string, needle: string) {

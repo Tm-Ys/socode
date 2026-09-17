@@ -8,6 +8,7 @@ import {
   type SlashCommand,
 } from "./commands.js";
 import { stopLoadUi } from "./load-ui.js";
+import { paintAskDiff } from "./ask-diff.js";
 import { inputPlaceholder } from "./workarea.js";
 
 const DIM = "\x1b[2m";
@@ -352,14 +353,15 @@ export async function withPermissionLock<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-export async function askPermission(title: string, detail: string): Promise<PermissionAnswer> {
+export async function askPermission(title: string, detail: string, diff?: string): Promise<PermissionAnswer> {
   return await withPermissionLock(async () => {
     if (!stdin.isTTY || !stdout.isTTY) return "deny";
     const yellow = "\x1b[33m";
     const dim = "\x1b[2m";
-    stdout.write(
-      `\n${yellow}? ${title}${RESET}\n  ${dim}${detail}${RESET}\n  ${dim}y 允许  n 拒绝  a 本会话同类一律允许${RESET}\n`,
-    );
+    const color = stdout.isTTY && !process.env.NO_COLOR;
+    stdout.write(`\n${yellow}? ${title}${RESET}\n  ${dim}${detail}${RESET}\n`);
+    if (diff?.trim()) stdout.write(`${paintAskDiff(diff.trimEnd(), color)}\n`);
+    stdout.write(`  ${dim}y 允许  n 拒绝  a 本会话同类一律允许${RESET}\n`);
 
     return await new Promise((resolve) => {
       const wasRaw = stdin.isRaw;

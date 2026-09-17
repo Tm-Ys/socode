@@ -12,6 +12,7 @@ import {
 import type { AgentMode } from "./mode.js";
 import { isMcpTool } from "./mcp.js";
 import type { Policy } from "./permissions.js";
+import { bashTouchesOutside, commandHead } from "./sandbox.js";
 import { formatSubagentPlan, isReadonlyKind, isVerifyKind, parseSubagentPlan, type SubagentKind } from "./subagent-plan.js";
 import { formatTaskStateCli, patchFromToolArgs } from "./task-state.js";
 import { formatPlanCli, patchFromPlanArgs, planNeedsReview } from "./plan.js";
@@ -525,10 +526,17 @@ export async function executeTool(
       return formatQuestionResult(questions, outcome);
     }
     if (name === "bash") {
-      return await runBash(str(args, "command"), str(args, "cwd"), 30_000, signal, {
-        workspace: policy?.workspace ?? process.cwd(),
-        cwd: str(args, "cwd"),
-        confineWrites: policy?.mode !== "full",
+      const cwd = str(args, "cwd");
+      const command = str(args, "command");
+      const workspace = policy?.workspace ?? process.cwd();
+      const lift =
+        policy?.mode === "full" ||
+        commandHead(command) === "git" ||
+        bashTouchesOutside(workspace, cwd, command);
+      return await runBash(command, cwd, 30_000, signal, {
+        workspace,
+        cwd,
+        confineWrites: !lift,
       });
     }
     if (isMcpTool(name) || policy?.mcp?.has(name)) {

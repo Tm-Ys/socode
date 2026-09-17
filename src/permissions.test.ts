@@ -8,13 +8,13 @@ import { createPolicy } from "./permissions.js";
 const ws = process.cwd();
 
 describe("createPolicy", () => {
-  it("denies Ask writes outside the workspace without prompting", async () => {
+  it("asks Ask writes outside the workspace instead of hard-denying", async () => {
     const policy = createPolicy(ws, () => "ask");
     const denied = await policy.authorize("write", {
       path: "/tmp/socode-outside.txt",
       content: "x",
     });
-    assert.match(denied ?? "", /工作区外/);
+    assert.match(denied ?? "", /用户拒绝了/);
   });
 
   it("denies Plan writes inside the workspace", async () => {
@@ -26,25 +26,25 @@ describe("createPolicy", () => {
     assert.match(denied ?? "", /Plan/);
   });
 
-  it("denies Ask bash cwd outside the workspace", async () => {
+  it("asks Ask bash cwd outside the workspace instead of hard-denying", async () => {
     const policy = createPolicy(ws, () => "ask");
     const denied = await policy.authorize("bash", { cwd: "/tmp", command: "ls" });
-    assert.match(denied ?? "", /工作区内/);
+    assert.match(denied ?? "", /用户拒绝了/);
   });
 
-  it("denies mutating bash outside the workspace in Ask", async () => {
+  it("asks mutating bash outside the workspace in Ask", async () => {
     const policy = createPolicy(ws, () => "ask");
     const denied = await policy.authorize("bash", { cwd: "/tmp", command: "mkdir x" });
-    assert.match(denied ?? "", /工作区/);
+    assert.match(denied ?? "", /用户拒绝了/);
   });
 
-  it("denies Ask bash redirects to /tmp even with workspace cwd", async () => {
+  it("asks Ask bash redirects to /tmp even with workspace cwd", async () => {
     const policy = createPolicy(ws, () => "ask");
     const denied = await policy.authorize("bash", {
       cwd: ws,
       command: "echo hi > /tmp/socode-audit-pwned",
     });
-    assert.match(denied ?? "", /工作区外|受保护/);
+    assert.match(denied ?? "", /用户拒绝了/);
   });
 
   it("denies Ask read of workspace .env", async () => {
@@ -56,7 +56,7 @@ describe("createPolicy", () => {
   it("requires approval for git in Ask even when cwd is inside the workspace", async () => {
     const policy = createPolicy(ws, () => "ask");
     const denied = await policy.authorize("bash", { cwd: ws, command: "git status" });
-    assert.match(denied ?? "", /用户拒绝了执行命令|工作区外/);
+    assert.match(denied ?? "", /用户拒绝了执行命令|用户拒绝了git/);
   });
 
   it("blocks denylist paths even in Full", async () => {
@@ -86,7 +86,7 @@ describe("createPolicy", () => {
     const secret = await policy.authorize("read", { path: `${ws}/.env` });
     assert.match(secret ?? "", /受保护/);
     const outside = await policy.authorize("write", { path: "/tmp/socode-outside.txt", content: "x" });
-    assert.match(outside ?? "", /工作区外/);
+    assert.match(outside ?? "", /用户拒绝了/);
   });
 
   it("uses the Long LLM judge for in-workspace side effects", async () => {
@@ -106,7 +106,20 @@ describe("createPolicy", () => {
     assert.deepEqual(calls, ["write", "bash"]);
   });
 
-  it("does not call the Long judge for local hard-denies", async () => {
+  it("asks the user for Long git instead of the LLM judge", async () => {
+    let called = 0;
+    const policy = createPolicy(ws, () => "long", undefined, {
+      longApprove: async () => {
+        called += 1;
+        return { allow: true, reason: "should not run" };
+      },
+    });
+    const denied = await policy.authorize("bash", { cwd: ws, command: "git status" });
+    assert.match(denied ?? "", /用户拒绝了/);
+    assert.equal(called, 0);
+  });
+
+  it("does not call the Long judge for secrets or sudo", async () => {
     let called = 0;
     const policy = createPolicy(ws, () => "long", undefined, {
       longApprove: async () => {
@@ -116,7 +129,7 @@ describe("createPolicy", () => {
     });
     assert.match(
       (await policy.authorize("write", { path: "/tmp/socode-outside.txt", content: "x" })) ?? "",
-      /工作区外/,
+      /用户拒绝了/,
     );
     assert.match((await policy.authorize("read", { path: `${ws}/.env` })) ?? "", /受保护/);
     assert.match((await policy.authorize("bash", { cwd: ws, command: "sudo ls" })) ?? "", /sudo/);
@@ -155,7 +168,7 @@ describe("createPolicy", () => {
       symlinkSync("/etc/passwd", link);
       const policy = createPolicy(dir, () => "ask");
       const denied = await policy.authorize("read", { path: link });
-      assert.match(denied ?? "", /受保护|工作区内/);
+      assert.match(denied ?? "", /受保护|用户拒绝了/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -175,10 +188,10 @@ describe("createPolicy", () => {
     assert.match((await child.authorize("question", { questions: [] })) ?? "", /不能向用户提问/);
   });
 
-  it("denies Ask glob outside the workspace", async () => {
+  it("asks Ask glob outside the workspace instead of hard-denying", async () => {
     const policy = createPolicy(ws, () => "ask");
     const denied = await policy.authorize("glob", { directory: "/tmp", pattern: "*" });
-    assert.match(denied ?? "", /工作区内/);
+    assert.match(denied ?? "", /用户拒绝了/);
   });
 
   it("keeps explorer subagents read-only", async () => {

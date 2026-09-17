@@ -40,7 +40,7 @@ Mini Markdown 支持：`#` 标题、``` 代码块（暗青色）、`>` 引用、
   ● bash  rg -n "foo" src
 ```
 
-`●` 青色加粗，工具名加粗，参数是暗色的摘要——`read/write/edit/delete` 只显示短路径（相对 cwd 或 `~`），`bash` 显示截断到 72 列的命令，`search` / `glob` 显示 pattern + 目录（`src/tool-ui.ts`）。Ask 审批 `edit` 时详情里带一小段 `原文 → 替换`。
+`●` 青色加粗，工具名加粗，参数是暗色的摘要——`read/write/edit/delete` 只显示短路径（相对 cwd 或 `~`），`bash` 显示截断到 72 列的命令，`search` / `glob` 显示 pattern + 目录（`src/tool-ui.ts`）。Ask 审批 `write` / `edit` / `delete` 时在确认前打出完整 unified diff（绿加红删），不是短预览。
 
 结果最多回显 3 行、缩进 4 空格、暗色；超出的折叠成 `… +N 行`。判定为失败的（`工具执行失败`/`权限拒绝`/非零 `exit=` 等）整段转红。`plan` 例外：完整框起来的进度板直接打出来，不截三行。
 
@@ -65,14 +65,14 @@ Mini Markdown 支持：`#` 标题、``` 代码块（暗青色）、`>` 引用、
 
 ## 权限审批
 
-Ask 模式下，写文件或跑命令前弹一行提问，等一个按键：
+Ask 模式下，写文件或跑命令前弹提问，等一个按键：
 
 - `y` 允许
 - `n` 拒绝
 - 回车 拒绝
 - `a` 本会话同类一律允许
 
-逻辑在 `src/prompt.ts` 的 `askPermission`，和主输入共用一条 readline 流，靠 `pause/resume` 让出控制权。
+`write` / `edit` / `delete` 在选项上面打 unified diff（`src/ask-diff.ts`，上限约 12KB）。`bash` 仍是命令摘要。逻辑在 `src/prompt.ts` 的 `askPermission`，和主输入共用一条 readline 流，靠 `pause/resume` 让出控制权。
 
 ## 问卷
 

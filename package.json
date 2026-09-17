@@ -1,6 +1,6 @@
 {
   "name": "socode",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "本机终端里的编程 Agent",
   "type": "module",
   "bin": {

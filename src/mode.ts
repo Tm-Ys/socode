@@ -84,7 +84,7 @@ export function modeHint(mode: AgentMode) {
   if (mode === "long") {
     return "长程：记住目标并自动压缩；只读预授权；副作用由独立 LLM 审批，不会变成 Full";
   }
-  return "创建/修改/删除和 git 会先询问，仅限工作区内；回车视为拒绝；工作区外写入请改用 /mode full";
+  return "创建/修改/删除和 git 会先询问；工作区外也会问你，不是直接拒绝；回车视为拒绝。密钥和系统路径仍禁止";
 }
 
 export function modeRules(mode: AgentMode) {
@@ -97,13 +97,13 @@ export function modeRules(mode: AgentMode) {
   if (mode === "long") {
     return [
       "当前是 Long（长程）模式：面向多步骤、跨压缩的长任务。",
-      "权限与 Ask 同类边界，不是 Full：工作区内 `read` / `search` / `glob` 自动允许。创建/修改/删除、git、网络、解释器由独立的 Long 审批 LLM 决定（干净上下文、只输出 JSON），不是对用户 y/n，也不是盲目放行。密钥、工作区外、sudo 仍本地硬拒绝。被拒绝后不要换一种方式硬做。",
+      "权限与 Ask 同类边界，不是 Full：工作区内 `read` / `search` / `glob` 自动允许。创建/修改/删除、网络、解释器由独立的 Long 审批 LLM 决定（干净上下文、只输出 JSON），不是对用户 y/n，也不是盲目放行。git 和工作区外操作会问用户。密钥、sudo 仍本地硬拒绝。被拒绝后不要换一种方式硬做。",
       "先 glob/search 再 read，再做小范围编辑。每完成一个里程碑，harness 会强制跑已记录的 verifyCommands（仅测试/类型检查，不是任意 bash）；失败则撤回 done 并写入 failures，必须停手。",
       "不要空转：同一工具连续失败就停下来改方法。上下文变挤时系统会自动 /compress；你只需在摘要后继续当前目标，不要重做已完成项。",
       "步数或 token 预算用尽时会保存检查点。用户下一轮同一会话即可接着做，不要假装任务已经全部完成。",
     ].join("");
   }
-  return "创建、修改、删除文件仅限工作区内，会先征得用户同意（y 允许 / n 拒绝 / 回车拒绝 / a 本会话同类一律允许）。所有 git 命令同样要先问。不能读 .env 等密钥文件，不能在工作区外写文件、删文件，也不能把 bash cwd 或重定向放到工作区外；需要区外权限时让用户 `/mode full`。被拒绝后不要换一种方式硬做，改为说明并给计划。";
+  return "创建、修改、删除文件会先征得用户同意（y 允许 / n 拒绝 / 回车拒绝 / a 本会话同类一律允许）。git、工作区外的读写和 bash 同样要先问，不要当成直接拒绝。不能读 .env 等密钥文件，不能 sudo；被拒绝后不要换一种方式硬做，改为说明并给计划。";
 }
 
 export function modeInstruction(mode: AgentMode) {

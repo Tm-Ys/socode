@@ -4,6 +4,8 @@ import { isTurnAborted, TurnAborted, TurnFailed } from "./abort.js";
 import { formatBanner, pickWelcome } from "./banner.js";
 import { closeIncompleteTrace, runAgent, type AgentEvent } from "./agent.js";
 import { loadConfig, longBudgetFromConfig, migrateLegacyDotenv } from "./config.js";
+import { formatDoctor, runDoctor } from "./doctor.js";
+import { beginUndoTurn, undoLastTurn } from "./undo.js";
 import type { TokenUsage } from "./chat.js";
 import { canCompress, compressHistory, shouldAutoCompress } from "./compress.js";
 import {
@@ -108,7 +110,7 @@ import {
   workareaPlaceholder,
 } from "./workarea.js";
 
-const BOOLEAN_FLAGS = new Set(["resume", "new", "no-stream", "no-agent"]);
+const BOOLEAN_FLAGS = new Set(["resume", "new", "no-stream", "no-agent", "doctor"]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function parseArgs(argv: string[]) {
@@ -150,6 +152,7 @@ function usage() {
   socode --resume
   socode --id <conversation-uuid>
   socode --url/--api/--model/--name/--context/--output/--effort/--steps/--max/--mode/--budget
+  socode --doctor                     检查 Node、密钥、沙箱、目录是否可写
 
 OpenAI 兼容 Provider 存在 ~/.socode/providers.json；默认值在 ~/.socode/config.json
 权限模式：--mode full | ask | plan | long（也可用 /mode 切换，长程可用 长程）。Esc 中止当前轮，/quit 退出。`;
@@ -877,6 +880,12 @@ async function main() {
   const conversationFlag = flags.id;
   let mode = loadMode(flags.mode, cfg.mode);
 
+  if (flagOn(flags.doctor)) {
+    const report = await runDoctor({ workspace: process.cwd(), mode, provider });
+    console.log(formatDoctor(report));
+    process.exit(report.ok ? 0 : 1);
+  }
+
   if (!providerReady(provider)) {
     if (oneShot !== undefined || !process.stdin.isTTY) {
       console.error(usage());
@@ -982,6 +991,7 @@ async function main() {
     setPermissionGate(abort);
     const load = createLoadUi();
     load.start();
+    beginUndoTurn();
     try {
       let activated: string[] = [];
       if (agentEnabled) {
@@ -1280,6 +1290,15 @@ async function main() {
         break;
       }
       try {
+        if (prompt === "/doctor") {
+          const report = await runDoctor({ workspace, mode, provider });
+          console.log(`\n${formatDoctor(report)}\n`);
+          continue;
+        }
+        if (prompt === "/undo") {
+          console.log(`\n${await undoLastTurn()}\n`);
+          continue;
+        }
         if (prompt === "/context") {
           printContextUsage(session.messages);
           continue;

@@ -80,12 +80,14 @@ type TaskState = {
 | 操作 | Long | Ask | Full | Plan |
 | --- | --- | --- | --- | --- |
 | 工作区 `read` / `search` / `glob` | 本地预授权 | 预授权 | 允许 | 允许 |
-| 工作区外读 | 本地拒绝 | 拒绝 | 允许（denylist 除外） | 拒绝 |
+| 工作区外读 | 问用户 | 问用户 | 允许（denylist 除外） | 拒绝 |
 | 工作区 `write` / `edit` / `delete` | **LLM 审批** | y/n/a | 允许 | 拒绝 |
+| 工作区外写 / bash cwd / 重定向 | 问用户 | 问用户 | 允许（denylist 除外） | 拒绝 |
 | 只读短 bash（`ls`/`pwd`…） | 本地预授权 | 预授权 | 允许 | 拒绝 |
-| git / 网络 / 解释器 / 其它 bash | **LLM 审批** | y/n/a | 允许 | 拒绝 |
+| git | 问用户 | y/n（每次） | 允许 | 拒绝 |
+| 网络 / 解释器 / 其它 bash | **LLM 审批** | y/n/a | 允许 | 拒绝 |
 | `sudo` 等 | 本地硬拒绝 | 硬拒绝 | 不走 Ask 硬拒绝 | 拒绝 |
-| OS 写隔离 `confineWrites` | 开 | 开 | 关 | （无 bash） |
+| OS 写隔离 `confineWrites` | 开（git / 区外批准后关） | 开（git / 区外批准后关） | 关 | （无 bash） |
 | `.env` / 系统路径 | 本地拒绝 | 拒绝 | 拒绝 | 拒绝 |
 
 Ask/Full/Plan **不会**调用 Long 审批器。即使把 `longApprove` 传进 `createPolicy`，Ask 仍走用户 y/n。
@@ -94,7 +96,7 @@ Long **不会**：
 
 - 把 `classifyBash` 放宽，或把 Long 当成 Full
 - 在沙箱起不来时 fallback 裸跑
-- 在本地已能判定的 P0 类问题上问审批器（symlink/密钥/区外/sudo 先硬拒绝）
+- 在本地已能判定的 P0 类问题上问审批器（symlink/密钥/sudo 先硬拒绝；工作区外和 git 问用户）
 
 ## Long 独有：LLM 自动审批
 

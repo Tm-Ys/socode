@@ -1,5 +1,4 @@
 import type { AgentMode } from "./mode.js";
-import { workspaceModeLabel } from "./mode.js";
 import { writeAudit } from "./audit.js";
 import { askPermission, type PermissionAnswer } from "./prompt.js";
 import {
@@ -25,6 +24,7 @@ import {
   bashAlwaysAsk,
   bashEscapesWorkspace,
   bashHardDenied,
+  bashTouchesOutside,
   classifyBash,
   commandHead,
   denyReason,
@@ -36,6 +36,7 @@ import {
   writeKind,
   type FileOp,
 } from "./sandbox.js";
+import { formatAskDiff } from "./ask-diff.js";
 
 export type Policy = {
   mode: AgentMode;
@@ -150,35 +151,50 @@ async function authorizeInner(
     const path = realExistingPath(str(args, name === "read" ? "path" : "directory"));
     const blocked = denyReason(path);
     if (blocked) return blocked;
-    if (current !== "full" && !isInsideWorkspace(workspace, path)) {
-      return `${workspaceModeLabel(current)} 模式只能读取工作区内的文件。路径: ${path}。需要的话请 /mode full。`;
-    }
-    return null;
-  }
-
-  if (name === "write" || name === "edit") {
-    const path = realExistingPath(str(args, "path"));
+    if (isInsideWorkspace(workspace, path) || current === "full") return null;
+    const where = displayPath(workspace, path);
     return await decide(current, workspace, grants, {
-      op: writeKind(path),
+      op: "exec",
       path,
-      detail: name === "edit" ? editPreview(workspace, path, args) : displayPath(workspace, path),
+      detail: where,
+      title: `读取工作区外  ${where}`,
       tool: name,
       args,
       tasks,
       hooks,
+      escaped: true,
+    });
+  }
+
+  if (name === "write" || name === "edit") {
+    const path = realExistingPath(str(args, "path"));
+    const detail = displayPath(workspace, path);
+    return await decide(current, workspace, grants, {
+      op: writeKind(path),
+      path,
+      detail,
+      diff: formatAskDiff(name, path, args),
+      tool: name,
+      args,
+      tasks,
+      hooks,
+      escaped: !isInsideWorkspace(workspace, path),
     });
   }
 
   if (name === "delete") {
     const path = realExistingPath(str(args, "path"));
+    const detail = displayPath(workspace, path);
     return await decide(current, workspace, grants, {
       op: "delete",
       path,
-      detail: displayPath(workspace, path),
+      detail,
+      diff: formatAskDiff("delete", path, args),
       tool: name,
       args,
       tasks,
       hooks,
+      escaped: !isInsideWorkspace(workspace, path),
     });
   }
 
@@ -187,9 +203,6 @@ async function authorizeInner(
     const command = str(args, "command");
     const blocked = denyReason(cwd);
     if (blocked) return blocked;
-    if (current !== "full" && !isInsideWorkspace(workspace, cwd)) {
-      return `${workspaceModeLabel(current)} 模式只能在工作区内执行命令。cwd: ${cwd}。需要的话请 /mode full。`;
-    }
     if (current === "plan") {
       return "当前是 Plan 模式，不能执行命令。请只给出计划，或让用户输入 /mode ask、/mode long 或 /mode full 后再执行。";
     }
@@ -205,7 +218,9 @@ async function authorizeInner(
       if (verifyCommandDenied(command) === null) return null;
       return "verify 子代理只能跑测试/类型检查或只读命令";
     }
-    if (kind.readonly) return null;
+    const outside = bashTouchesOutside(workspace, cwd, command);
+    const git = commandHead(command) === "git";
+    if (kind.readonly && !outside && !git) return null;
     return await decide(
       current,
       workspace,
@@ -214,12 +229,14 @@ async function authorizeInner(
         op: kind.op,
         path: cwd,
         detail: clip(command.replace(/\s+/g, " "), 72),
+        title: outside ? `工作区外  ${clip(command.replace(/\s+/g, " "), 72)}` : git ? `git  ${clip(command.replace(/\s+/g, " "), 56)}` : undefined,
         tool: name,
         args,
         tasks,
         hooks,
+        escaped: outside || git,
       },
-      bashAlwaysAsk(command) ? undefined : `${kind.op}:${isInsideWorkspace(workspace, cwd) ? "in" : "out"}:${commandHead(command)}`,
+      bashAlwaysAsk(command) ? undefined : `${kind.op}:${outside ? "out" : "in"}:${commandHead(command)}`,
     );
   }
 
@@ -261,10 +278,13 @@ async function decide(
     op: FileOp;
     path: string;
     detail: string;
+    diff?: string;
+    title?: string;
     tool: string;
     args: Record<string, unknown>;
     tasks?: TaskStore;
     hooks?: PolicyHooks;
+    escaped?: boolean;
   },
   grantKey?: string,
 ): Promise<string | null> {
@@ -272,18 +292,19 @@ async function decide(
   if (blocked) return blocked;
   if (mode === "full") return null;
 
-  if (mode === "long") {
+  const inside = isInsideWorkspace(workspace, req.path);
+  if (mode === "long" && inside && !req.escaped) {
     return await longSideEffect(workspace, req);
   }
 
-  const inside = isInsideWorkspace(workspace, req.path);
   const key = grantKey ?? `${req.op}:${inside ? "in" : "out"}`;
   if (grants.has(key)) return null;
 
   const zone = inside ? "工作区内" : "工作区外";
   const answer: PermissionAnswer = await askPermission(
-    `${opLabel(req.op)}  ${req.detail}`,
+    req.title ?? `${opLabel(req.op)}  ${req.detail}`,
     `${zone}  ${req.path}`,
+    req.diff,
   );
   if (answer === "deny") return `用户拒绝了${opLabel(req.op)}: ${req.detail}`;
   if (answer === "always") grants.add(key);
@@ -339,14 +360,6 @@ function str(args: Record<string, unknown>, key: string) {
 
 function clip(text: string, max: number) {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
-}
-
-function editPreview(workspace: string, path: string, args: Record<string, unknown>) {
-  const where = displayPath(workspace, path);
-  const oldText = typeof args.old_string === "string" ? args.old_string.replace(/\s+/g, " ").trim() : "";
-  const newText = typeof args.new_string === "string" ? args.new_string.replace(/\s+/g, " ").trim() : "";
-  if (!oldText) return where;
-  return `${where}  ${clip(oldText, 40)} → ${clip(newText, 40)}`;
 }
 
 function summarize(name: string, args: Record<string, unknown>) {

@@ -1,5 +1,5 @@
 import { runBash } from "./fs-tools.js";
-import { bashEscapesWorkspace, bashHardDenied } from "./sandbox.js";
+import { bashEscapesWorkspace, bashHardDenied, bashTouchesOutside } from "./sandbox.js";
 
 export const VERIFY_TIMEOUT_MS = 60_000;
 
@@ -61,6 +61,11 @@ export async function runVerifyCommands(params: {
     if (escaped) {
       ok = false;
       lines.push(`$ ${cmd}\n拒绝: ${escaped}`);
+      continue;
+    }
+    if (bashTouchesOutside(params.workspace, params.workspace, cmd)) {
+      ok = false;
+      lines.push(`$ ${cmd}\n拒绝: 验证命令不能离开工作区`);
       continue;
     }
     try {
