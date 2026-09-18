@@ -64,7 +64,7 @@ npx socode
 # 开发时也可以 npm start
 ```
 
-把命令装到 PATH：`npm link`（先 `npm run build`）或 `npm install -g ./socode-0.1.2-fix2.tgz`。
+把命令装到 PATH：`npm link`（先 `npm run build`）或 `npm install -g ./socode-0.1.3-fix2.tgz`。
 
 没有保存过 Provider 时，交互式启动会进入向导，写入用户级 `~/.socode/providers.json`（所有工作区、所有对话共用）。也可以用 `--url` / `--api` / `--model` / `--name` 只覆盖本次进程。
 
