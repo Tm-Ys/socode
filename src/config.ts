@@ -15,7 +15,9 @@ export type SocodeConfig = {
   judgeModel: string;
   longBudgetPolicy: LongBudgetPolicyName;
   longBudgetDynamic: string;
-  /** USD per 1M tokens, keyed by model id. Missing price → show tokens only. */
+  /** 把 models.dev 的美元单价换成人民币。Provider 自设的已经是人民币。 */
+  usdCny: number;
+  /** 旧字段，不再用于估价。现价走 models.dev 或 Provider.pricing。 */
   modelPricing: Record<string, ModelPrice>;
 };
 
@@ -28,6 +30,7 @@ const DEFAULTS: SocodeConfig = {
   judgeModel: "",
   longBudgetPolicy: "dynamic",
   longBudgetDynamic: "50-75",
+  usdCny: 7.2,
   modelPricing: {},
 };
 
@@ -135,6 +138,7 @@ function normalizeConfig(input: Partial<SocodeConfig>): SocodeConfig {
     judgeModel: typeof input.judgeModel === "string" ? input.judgeModel.trim() : "",
     longBudgetPolicy: parseLongBudgetPolicy(input.longBudgetPolicy),
     longBudgetDynamic: (input.longBudgetDynamic ?? DEFAULTS.longBudgetDynamic).trim() || DEFAULTS.longBudgetDynamic,
+    usdCny: usdCnyOr(input.usdCny, DEFAULTS.usdCny),
     modelPricing: normalizePricing(input.modelPricing),
   };
 }
@@ -153,6 +157,10 @@ function normalizePricing(input: Record<string, ModelPrice> | undefined): Record
     };
   }
   return out;
+}
+
+function usdCnyOr(value: number | undefined, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 function floorOr(value: number | undefined, fallback: number) {

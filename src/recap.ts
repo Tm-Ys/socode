@@ -1,5 +1,8 @@
+import { completeChat } from "./chat.js";
 import type { Message } from "./db.js";
+import { providerForRole, type Provider } from "./provider.js";
 import { summarizeTool } from "./tool-ui.js";
+import type { TokenUsage } from "./usage.js";
 
 export const RECAP_TOOL_LIMIT = 6;
 export const RECAP_TEXT_CHARS = 2400;
@@ -81,6 +84,60 @@ export function historyAfterTurn(user: Message, trace: Message[]): Message[] {
   const recap = recapHistoryMessage(trace);
   if (!recap) return [user, ...trace];
   return [user, recap];
+}
+
+export async function historyAfterTurnAsync(
+  user: Message,
+  trace: Message[],
+  provider: Provider,
+): Promise<{ messages: Message[]; usage?: TokenUsage }> {
+  const local = recapHistoryMessage(trace);
+  if (!local) return { messages: [user, ...trace] };
+  try {
+    const llm = providerForRole(provider, "recap");
+    const result = await completeChat({
+      provider: { ...llm, maxOutput: Math.min(512, Math.max(128, llm.maxOutput)), thinkingEffort: "none" },
+      stream: false,
+      messages: [
+        {
+          role: "system",
+          content:
+            "你是回合摘要器。根据本轮工具与回复写一段不超过 8 行的中文 recap，供后续接着干活。保留改过的文件、关键结论、未完成事项。不要客套，不要 markdown 标题。",
+        },
+        { role: "user", content: recapPrompt(trace, local.content) },
+      ],
+    });
+    const text = result.content.trim();
+    if (!text) return { messages: [user, local], usage: result.usage };
+    return {
+      messages: [user, { role: "assistant" as const, content: `${RECAP_PREFIX}\n${text}\n${RECAP_HINT}` }],
+      usage: result.usage,
+    };
+  } catch {
+    return { messages: [user, local] };
+  }
+}
+
+function recapPrompt(trace: Message[], local: string) {
+  const bits = [`本地提纲：\n${local}`];
+  for (const message of trace) {
+    if (message.role === "assistant") {
+      if (message.content.trim()) bits.push(`助手: ${clipRecap(message.content, 800)}`);
+      for (const call of message.toolCalls ?? []) {
+        bits.push(`调用 ${call.name}: ${clipRecap(call.arguments, 200)}`);
+      }
+    } else if (message.role === "tool") {
+      bits.push(`工具结果: ${clipRecap(message.content, 400)}`);
+    }
+  }
+  const text = bits.join("\n");
+  return text.length > 12_000 ? `${text.slice(0, 12_000)}\n…` : text;
+}
+
+function clipRecap(text: string, max: number) {
+  const trimmed = text.trim();
+  if (trimmed.length <= max) return trimmed;
+  return `${trimmed.slice(0, max)}…`;
 }
 
 function groupTools(tools: RecapCall[]) {

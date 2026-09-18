@@ -14,7 +14,7 @@ export const WELCOME_LINES = [
   "你知道吗？输入 / 会按前缀列出命令，Tab 补全。",
   "你知道吗？Ask 审批 write/edit/delete 会打出完整 diff，y 允许、n 拒绝、a 本会话同类都允许。",
   "你知道吗？/undo 只撤回最近一轮 write/edit/delete，快照落在本工作区 .socode/undo，关进程后还能撤；不管 bash，也不是把对话倒回去。",
-  "你知道吗？每轮结束会打 tokens（含缓存）；单价写在 ~/.socode/config.json 的 modelPricing，没配就不估金额。",
+  "你知道吗？每轮结束会打 tokens（含缓存）；标价默认从 models.dev 换成人民币，主模型 / 子代理 / 标题 / Recap / 审批 / 压缩可各自定价。",
   "你知道吗？/doctor 检查 Node、密钥、沙箱和目录能不能写；启动也可用 --doctor。",
   "你知道吗？/mode plan 只能看代码和写计划，不会改文件，也不会跑有副作用的命令。",
   "你知道吗？/mode full 会直接改仓库、跑命令；系统目录和密钥文件仍然碰不到。",

@@ -1,7 +1,8 @@
 import { completeChat } from "./chat.js";
 import { loadConfig } from "./config.js";
 import type { Message } from "./db.js";
-import { listProviders, type Provider } from "./provider.js";
+import { providerForRole, type Provider } from "./provider.js";
+import type { TokenUsage } from "./usage.js";
 
 export const LONG_APPROVE_TIMEOUT_MS = 12_000;
 
@@ -24,7 +25,7 @@ export type ChatFn = (params: {
   messages: Message[];
   stream?: boolean;
   signal?: AbortSignal;
-}) => Promise<{ content: string }>;
+}) => Promise<{ content: string; usage?: TokenUsage }>;
 
 export const JUDGE_SYSTEM_PROMPT = `你是 socode Long 模式的权限审批器，不是对话助手。
 只根据这一条独立请求判断：是否允许当前副作用操作。没有聊天历史，不要猜测用户稍后会解释。
@@ -63,15 +64,11 @@ export function parseJudgeReply(text: string): JudgeVerdict {
 }
 
 export function pickJudgeProvider(base: Provider, opts?: { judgeModel?: string }): Provider {
-  const model = (opts?.judgeModel ?? loadConfig().judgeModel).trim();
-  const named = listProviders(base).find((item) => /^(judge|fast|cheap|mini)$/i.test(item.name));
-  const source =
-    named && named.url && named.api
-      ? named
-      : base;
+  const source = providerForRole(base, "approve");
+  const model = (opts?.judgeModel ?? loadConfig().judgeModel).trim() || source.model;
   return {
     ...source,
-    model: model || source.model,
+    model,
     thinkingEffort: "none",
     maxOutput: Math.min(256, Math.max(64, source.maxOutput || 256)),
   };
@@ -129,6 +126,7 @@ export async function judgeLongApprove(
     provider: Provider;
     complete?: ChatFn;
     timeoutMs?: number;
+    onUsage?: (usage: TokenUsage) => void;
   },
 ): Promise<JudgeVerdict> {
   if (!params.provider.url || !params.provider.api || !params.provider.model) {
@@ -148,6 +146,7 @@ export async function judgeLongApprove(
         { role: "user", content: formatJudgeUser(req) },
       ],
     });
+    if (result.usage) params.onUsage?.(result.usage);
     return parseJudgeReply(result.content ?? "");
   } catch (error) {
     const aborted =
@@ -162,8 +161,9 @@ export async function judgeLongApprove(
 export function createLongApprover(
   provider: () => Provider,
   complete?: ChatFn,
+  onUsage?: (usage: TokenUsage) => void,
 ): LongApprover {
-  return (req) => judgeLongApprove(req, { provider: provider(), complete });
+  return (req) => judgeLongApprove(req, { provider: provider(), complete, onUsage });
 }
 
 export function logLongApprove(tool: string, verdict: JudgeVerdict) {

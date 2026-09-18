@@ -3,7 +3,8 @@ import { describe, it } from "node:test";
 import {
   addTokenUsage,
   emptyTokenUsage,
-  estimateUsageUsd,
+  estimateUsageCny,
+  formatCny,
   formatUsageLine,
   parseTokenUsage,
   lookupModelPrice,
@@ -21,8 +22,8 @@ describe("parseTokenUsage", () => {
     assert.equal(usage?.cacheReadTokens, 800);
     assert.equal(usage?.reasoningTokens, 10);
     assert.equal(usage?.promptIncludesCache, true);
-    const usd = estimateUsageUsd(usage!, { input: 1, output: 2, cacheRead: 0.1 });
-    assert.equal(usd, (200 * 1 + 50 * 2 + 800 * 0.1) / 1_000_000);
+    const cny = estimateUsageCny(usage!, { input: 1, output: 2, cacheRead: 0.1 });
+    assert.equal(cny, (200 * 1 + 50 * 2 + 800 * 0.1) / 1_000_000);
   });
 
   it("keeps Anthropic cache fields outside input tokens", () => {
@@ -33,8 +34,8 @@ describe("parseTokenUsage", () => {
       cache_creation_input_tokens: 40,
     });
     assert.equal(usage?.promptIncludesCache, false);
-    const usd = estimateUsageUsd(usage!, { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1.25 });
-    assert.equal(usd, (200 * 1 + 20 * 2 + 800 * 0.1 + 40 * 1.25) / 1_000_000);
+    const cny = estimateUsageCny(usage!, { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1.25 });
+    assert.equal(cny, (200 * 1 + 20 * 2 + 800 * 0.1 + 40 * 1.25) / 1_000_000);
   });
 
   it("reads DeepSeek prompt cache hits", () => {
@@ -49,13 +50,16 @@ describe("parseTokenUsage", () => {
 });
 
 describe("formatUsageLine", () => {
-  it("omits dollars when no price is configured", () => {
+  it("omits yuan when no price is configured", () => {
     const usage = emptyTokenUsage();
     usage.promptTokens = 1200;
     usage.completionTokens = 80;
     assert.match(formatUsageLine(usage), /入 1\.2K/);
     assert.match(formatUsageLine(usage), /未标价/);
     assert.doesNotMatch(formatUsageLine(usage, { price: { input: 1, output: 2 } }), /未标价/);
+    assert.match(formatUsageLine(usage, { price: { input: 1, output: 2 } }), /¥/);
+    assert.match(formatUsageLine(usage, { cny: 1.234 }), /¥1\.23/);
+    assert.equal(formatCny(0.002), "¥0.0020");
   });
 
   it("adds cache and sums turns", () => {

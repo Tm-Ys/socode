@@ -1,9 +1,12 @@
 node_modules/
 dist/
 release/
+undefined/
+.tmptest/
 
 .env
 providers.json
 .socode-audit.jsonl
-.socode/sessions/
+.socode/
 .DS_Store
+*.tgz

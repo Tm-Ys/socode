@@ -33,18 +33,20 @@ describe("loadConfig", () => {
       assert.equal(cfg.judgeModel, "");
       assert.equal(cfg.longBudgetPolicy, "dynamic");
       assert.equal(cfg.longBudgetDynamic, "50-75");
+      assert.equal(cfg.usdCny, 7.2);
       assert.deepEqual(cfg.modelPricing, {});
     });
   });
 
   it("persists ~/.socode/config.json", () => {
     withHome((home) => {
-      saveConfig({ mode: "plan", maxAgentSteps: 12, judgeModel: "lite" });
+      saveConfig({ mode: "plan", maxAgentSteps: 12, judgeModel: "lite", usdCny: 7.1 });
       resetConfigCache();
       const cfg = loadConfig();
       assert.equal(cfg.mode, "plan");
       assert.equal(cfg.maxAgentSteps, 12);
       assert.equal(cfg.judgeModel, "lite");
+      assert.equal(cfg.usdCny, 7.1);
       assert.match(readFileSync(join(home, "config.json"), "utf8"), /"plan"/);
     });
   });

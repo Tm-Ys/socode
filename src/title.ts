@@ -1,6 +1,7 @@
 import { completeChat } from "./chat.js";
 import type { ConversationRow } from "./db.js";
 import type { Provider } from "./provider.js";
+import type { TokenUsage } from "./usage.js";
 
 const DEFAULT_TITLE = "新会话";
 
@@ -34,7 +35,7 @@ export async function generateTitle(params: {
   provider: Provider;
   userText: string;
   assistantText: string;
-}) {
+}): Promise<{ title: string; usage?: TokenUsage }> {
   const fallback = params.userText.replace(/\s+/g, " ").trim().slice(0, 24) || DEFAULT_TITLE;
   try {
     const result = await completeChat({
@@ -51,9 +52,9 @@ export async function generateTitle(params: {
         },
       ],
     });
-    return sanitizeTitle(result.content, fallback);
+    return { title: sanitizeTitle(result.content, fallback), usage: result.usage };
   } catch {
-    return fallback;
+    return { title: fallback };
   }
 }
 

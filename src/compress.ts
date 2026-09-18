@@ -6,6 +6,7 @@ import { harnessModeMessage, isHarnessModeMessage, lastHarnessMode } from "./mod
 import type { Provider } from "./provider.js";
 import { isTaskStateMessage, lastTaskState, taskStateMessage } from "./task-state.js";
 import { isPlanMessage, lastPlan, planMessage } from "./plan.js";
+import type { TokenUsage } from "./usage.js";
 
 const KEEP_USER_TURNS = 2;
 const MIN_STALE_TOKENS = 1200;
@@ -117,7 +118,7 @@ export async function compressAgentMessages(params: {
   signal?: AbortSignal;
   keepTurns?: number;
   note?: string;
-}): Promise<{ messages: Message[]; saved: number } | null> {
+}): Promise<{ messages: Message[]; saved: number; usage?: TokenUsage } | null> {
   const { head, rest } = peelAgentPrefix(params.messages);
   const react = { unit: "react" as const, keepTurns: params.keepTurns };
   const opts = canCompress(rest, react) ? react : undefined;
@@ -133,7 +134,7 @@ export async function compressAgentMessages(params: {
       note: params.note,
     });
     if (result.saved < 200) return null;
-    return { messages: [...head, ...result.messages], saved: result.saved };
+    return { messages: [...head, ...result.messages], saved: result.saved, usage: result.usage };
   } catch {
     return null;
   }
@@ -148,7 +149,7 @@ export async function compressHistory(params: {
   unit?: "user" | "react";
   keepTurns?: number;
   note?: string;
-}): Promise<{ messages: Message[]; saved: number; summaryTokens: number }> {
+}): Promise<{ messages: Message[]; saved: number; summaryTokens: number; usage?: TokenUsage }> {
   const { stale, keep } = splitForCompress(params.history, { unit: params.unit, keepTurns: params.keepTurns });
   const staleTokens = stale.reduce((sum, message) => sum + messageTokens(message), 0);
   if (stale.length === 0 || staleTokens < MIN_STALE_TOKENS) {
@@ -191,7 +192,12 @@ export async function compressHistory(params: {
   const messages = [summaryMessage, ...keep];
   const after = messages.reduce((sum, message) => sum + messageTokens(message), 0);
   const before = staleTokens + keep.reduce((sum, message) => sum + messageTokens(message), 0);
-  return { messages, saved: Math.max(0, before - after), summaryTokens: messageTokens(summaryMessage) };
+  return {
+    messages,
+    saved: Math.max(0, before - after),
+    summaryTokens: messageTokens(summaryMessage),
+    usage: result.usage,
+  };
 }
 
 function toTranscript(messages: Message[]) {

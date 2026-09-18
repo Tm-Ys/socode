@@ -19,6 +19,7 @@ import {
 import {
   addProvider,
   applyProviderDraft,
+  AUX_LLM_ROLES,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT,
   DEFAULT_THINKING_EFFORT,
@@ -32,10 +33,14 @@ import {
   maskApiKey,
   providerReady,
   resolveFieldInput,
+  roleLabel,
   saveProvider,
   switchProvider,
   THINKING_EFFORTS,
+  type AuxLlmRole,
   type Provider,
+  type RoleLlm,
+  type RoleLlmDraft,
 } from "./provider.js";
 import { createModelPickState, defaultEffortIndex, fetchModelCatalog } from "./provider-api.js";
 import { pickEffort, pickProviderModel, pickSavedProvider } from "./select-ui.js";
@@ -139,8 +144,8 @@ async function promptProviderForm(
     mode === "new" ? "新增 Provider（OpenAI 兼容）" : mode === "setup" ? "配置 Provider（OpenAI 兼容）" : "编辑 Provider（OpenAI 兼容）";
   const hint =
     creating
-      ? "按字段填写。名称 / API URL / API Key / 模型必填；其余回车用默认值。思考强度请用 /effort 调整。"
-      : "按字段修改。回车保留方括号里的当前值。思考强度请用 /effort 调整。";
+      ? "按字段填写。名称 / API URL / API Key / 主模型必填。子代理、标题、Recap、审批、压缩留空则用主模型；审批再空则跟 Recap。各角色单价可不同。思考强度请用 /effort 调整。"
+      : "按字段修改。回车保留方括号里的当前值。角色模型填 - 则回到主模型。思考强度请用 /effort 调整。";
   console.log(`\n${title}\n${hint}`);
   const name = await askField(rl, "名称", {
     current: creating ? "" : current.name,
@@ -160,7 +165,7 @@ async function promptProviderForm(
     secret: true,
     required: true,
   });
-  const model = await askField(rl, "模型", {
+  const model = await askField(rl, "主模型", {
     current: creating ? "" : current.model,
     hint: "例如 deepseek-flash",
     required: true,
@@ -171,6 +176,22 @@ async function promptProviderForm(
   const maxOutput = await askField(rl, "最大输出", {
     current: String(creating ? DEFAULT_MAX_OUTPUT : current.maxOutput),
   });
+  const inputPrice = await askField(rl, "主输入单价", {
+    current: creating || current.pricing?.input === undefined ? "" : String(current.pricing.input),
+    hint: "人民币 / 百万 token，空着跟 models.dev，- 清除",
+  });
+  const cacheInputPrice = await askField(rl, "主缓存输入单价", {
+    current: creating || current.pricing?.cacheInput === undefined ? "" : String(current.pricing.cacheInput),
+    hint: "人民币 / 百万 token，可空",
+  });
+  const outputPrice = await askField(rl, "主输出单价", {
+    current: creating || current.pricing?.output === undefined ? "" : String(current.pricing.output),
+    hint: "人民币 / 百万 token，空着跟 models.dev，- 清除",
+  });
+  const roles: Partial<Record<AuxLlmRole, RoleLlmDraft>> = {};
+  for (const role of AUX_LLM_ROLES) {
+    roles[role] = await askRoleLlm(rl, role, creating ? undefined : current.llms?.[role]);
+  }
   const next = applyProviderDraft(
     {
       name,
@@ -180,10 +201,42 @@ async function promptProviderForm(
       contextWindow,
       maxOutput,
       thinkingEffort: creating ? DEFAULT_THINKING_EFFORT : current.thinkingEffort,
+      inputPrice,
+      cacheInputPrice,
+      outputPrice,
+      ...roles,
     },
     creating ? emptyProvider() : current,
   );
   return creating ? addProvider(next) : saveProvider(next, { replaceName: current.name });
+}
+
+async function askRoleLlm(
+  rl: readline.Interface,
+  role: AuxLlmRole,
+  current?: RoleLlm,
+): Promise<RoleLlmDraft> {
+  const label = roleLabel(role);
+  const model = await askField(rl, `${label}模型`, {
+    current: current?.model ?? "",
+    hint: role === "approve" ? "空着跟 Recap，再空则跟主模型，- 清除" : "空着跟主模型，- 清除",
+  });
+  const inputPrice = await askField(rl, `${label}输入单价`, {
+    current: current?.pricing?.input === undefined ? "" : String(current.pricing.input),
+    hint:
+      role === "approve"
+        ? "人民币 / 百万 token，空着跟 Recap 或主定价，- 清除"
+        : "人民币 / 百万 token，空着跟主定价或 models.dev，- 清除",
+  });
+  const cacheInputPrice = await askField(rl, `${label}缓存输入单价`, {
+    current: current?.pricing?.cacheInput === undefined ? "" : String(current.pricing.cacheInput),
+    hint: "人民币 / 百万 token，可空",
+  });
+  const outputPrice = await askField(rl, `${label}输出单价`, {
+    current: current?.pricing?.output === undefined ? "" : String(current.pricing.output),
+    hint: "人民币 / 百万 token，空着跟主定价或 models.dev，- 清除",
+  });
+  return { model, inputPrice, cacheInputPrice, outputPrice };
 }
 
 function printProviderList(provider: Provider) {

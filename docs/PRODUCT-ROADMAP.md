@@ -2,7 +2,7 @@
 
 本文是对 **socode 现状的产品盘点**，不是实现清单。对照实现以仓库当前代码为准（`src/`、`README.md`、`docs/LONG-MODE.md`、`docs/FRONTEND.md`、`docs/REMOTE.md`）。下文不夸大已有能力，也不把尚未落地的能力写成「已经有了」。
 
-版本锚点：本文按 **0.1.1** 重写能力盘点；**0.1.2**（2026-09-17）补上 Provider 退避重试、思考/工具流的 stable+tail 重绘；**0.1.3** 落地 Remote-SSH；**0.1.3-fix2** 把 Ask/Long bash 收成 Codex workspace-write（可写工作区+`/tmp`、默认断网、`.git` 只读）；**0.1.4** 稳住 Remote-SSH 会话（listen + `ssh -W`、备用屏、`/ssh` Tab、`/sshquit`）。此前文本仍写「没有 doctor / 没有 Ask diff / 启动依赖 Postgres」，那些已经落地，不再当缺口立项。
+版本锚点：本文按 **0.1.1** 重写能力盘点；**0.1.2**（2026-09-17）补上 Provider 退避重试、思考/工具流的 stable+tail 重绘；**0.1.3** 落地 Remote-SSH；**0.1.3-fix2** 把 Ask/Long bash 收成 Codex workspace-write（可写工作区+`/tmp`、默认断网、`.git` 只读）；**0.1.4** 稳住 Remote-SSH 会话（listen + `ssh -W`、备用屏、`/ssh` Tab、`/sshquit`）；**0.1.5** 用量走 models.dev 人民币标价，Provider 可按主模型 / 子代理 / 标题 / Recap / 审批 / 压缩分模型分定价。此前文本仍写「没有 doctor / 没有 Ask diff / 启动依赖 Postgres」，那些已经落地，不再当缺口立项。
 
 ---
 
@@ -75,7 +75,7 @@ Long 的 `【task state】` 活在会话消息里。里程碑 `done` 时强制�
 
 ### 2.8 终端与 Provider
 
-手写 ANSI，无 React / Ink，见 [`FRONTEND.md`](./FRONTEND.md)。每轮结束默认打 `tokens` 行（入 / 缓存 / 出，可选美元）。`/usage` 看本会话累计。`/context` 仍是色块占用，并可附带上一轮用量行。没有父/子分项账本，没有墙钟时间。
+手写 ANSI，无 React / Ink，见 [`FRONTEND.md`](./FRONTEND.md)。每轮结束默认打 `tokens` 行（入 / 缓存 / 出，可选人民币）。`/usage` 看本会话累计。`/context` 仍是色块占用，并可附带上一轮用量行。没有父/子分项账本，没有墙钟时间。
 
 `completeChat`（`src/chat.ts` + `src/retry.ts`）对 429 / 5xx / 网络抖动最多 3 次，指数退避，尊重 `Retry-After`。401 等 4xx 直接抛。已经吐出 token 的半截流式不再重试。Esc 取消进行中的请求和等待。`provider.ts` 只存密钥和模型，不负责重试。流式空内容仍抛错。
 
@@ -167,11 +167,11 @@ P1 不阻塞「能改自己的仓库」，但阻塞「愿意长时间开着、�
 
 **为什么重要。** 子代理、Long 审批、skill 激活都是额外调用。用户应能看见这一轮花了多少，而不是只在 `/context` 里猜窗口占用。
 
-**现状。** 对标 OpenCode：解析 API `usage` 的 input / output / cache read / cache write / reasoning；OpenAI 的 `prompt_tokens` 已含缓存，估价时要扣掉，避免重复计费。每轮结束默认打一行 `tokens  入 …  缓存 …  出 …`，没有 `modelPricing` 就写 `未标价`，**不编造金额**。`/usage` 看本会话累计。单价是 `~/.socode/config.json` 里按模型 id 的美元 / 百万 token（`input` / `output`，可选 `cacheRead` / `cacheWrite`）。
+**现状。** 对标 OpenCode：解析 API `usage` 的 input / output / cache read / cache write / reasoning；OpenAI 的 `prompt_tokens` 已含缓存，估价时要扣掉，避免重复计费。每轮结束默认打一行 `tokens  入 …  缓存 …  出 …`，对不上单价就写 `未标价`，**不编造金额**。`/usage` 看本会话累计。默认从 [models.dev](https://models.dev) 拉美元单价，再按 `usdCny` 换成人民币 / 百万 token。Provider 的主模型 / 子代理 / 标题 / Recap / 审批 / 压缩可各自写 `input` / `cacheInput` / `output`（人民币 / 百万 token）；角色模型留空则用主模型，审批留空则用 Recap。
 
 **还缺。** 父循环 / 审批 / 子代理 / 压缩分项；墙钟时间；软/硬花费阈值。
 
-**验收（已覆盖最小集）。** 有 `usage` 的一轮结束后出现 token 行；`/usage` 存在且不占用 `/context` 色带；没配单价时没有美元数字。
+**验收（已覆盖最小集）。** 有 `usage` 的一轮结束后出现 token 行；`/usage` 存在且不占用 `/context` 色带；没对上单价时没有人民币数字。
 
 ### 5.2 TUI 轨迹与 IDE 表面
 
@@ -286,7 +286,7 @@ P1 其余（MCP HTTP、hooks、分层记忆、TUI 折叠、usage 分项）和全
 | `socode --doctor` / `/doctor` | 已有 |
 | 第一轮 Provider 向导 | 已有 |
 | `/undo` | 已有，能力见 §4.3 |
-| `/usage` | 已有最小集：每轮 token 行 + 会话累计；单价可选 |
+| `/usage` | 已有：每轮 token 行 + 会话累计；models.dev 或 Provider 人民币单价 |
 | `/rewind` | **没有**；若做，不要叫 undo |
 | `socode connect` / `/remote-ssh` | **已有**（0.1.3，协议 B） |
 | `socode ssh` | **没有**（A 的 `ssh -t` 包装，可继续不做） |
@@ -314,7 +314,8 @@ P1 其余（MCP HTTP、hooks、分层记忆、TUI 折叠、usage 分项）和全
 | `src/doctor.ts` | doctor |
 | `src/ask-diff.ts` | Ask 审批 diff |
 | `src/retry.ts` | Provider 429/5xx/网络抖动退避 |
-| `src/usage.ts` | API usage 解析、每轮 token 行、按标价估美元 |
+| `src/usage.ts` | API usage 解析、每轮 token 行、按人民币标价估金额 |
+| `src/models-dev.ts` | 从 models.dev 拉模型单价并缓存 |
 | `src/sandbox.ts` | 路径 denylist、bash 分类、Codex 式 workspace-write OS 沙箱 |
 | `docs/REMOTE.md` | 远程开发决策 |
 

@@ -1,6 +1,6 @@
 {
   "name": "socode",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "本机终端里的编程 Agent",
   "license": "MIT",
   "type": "module",
@@ -27,6 +27,7 @@
     "build": "tsc -p tsconfig.build.json",
     "prepack": "npm run build",
     "pack:release": "bash scripts/pack-release.sh",
+    "publish:release": "bash scripts/publish-release.sh",
     "pack:runtime": "tsx src/runtime-pack.ts --pack-runtime",
     "test": "tsx --test src/*.test.ts"
   },

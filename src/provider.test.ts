@@ -8,7 +8,9 @@ import {
   dumpProviderStore,
   emptyProvider,
   findProvider,
+  formatProvider,
   loadProvider,
+  providerForRole,
   providerReady,
   providerStorePath,
   resolveFieldInput,
@@ -46,7 +48,181 @@ describe("provider draft", () => {
     assert.equal(provider.contextWindow, 128000);
     assert.equal(provider.maxOutput, 8192);
     assert.equal(provider.thinkingEffort, "medium");
+    assert.equal(provider.pricing, undefined);
     assert.equal(providerReady(provider), true);
+  });
+
+  it("stores cny per 1M token prices on the provider", () => {
+    const provider = applyProviderDraft({
+      name: "deepseek",
+      url: "https://api.deepseek.com/v1",
+      api: "sk-test",
+      model: "deepseek-flash",
+      contextWindow: "",
+      maxOutput: "",
+      thinkingEffort: "",
+      inputPrice: "2",
+      cacheInputPrice: "0.2",
+      outputPrice: "8",
+    });
+    assert.deepEqual(provider.pricing, { input: 2, cacheInput: 0.2, output: 8 });
+  });
+
+  it("clears provider prices with - so models.dev is used", () => {
+    const priced = applyProviderDraft({
+      name: "deepseek",
+      url: "https://api.deepseek.com/v1",
+      api: "sk-test",
+      model: "deepseek-flash",
+      contextWindow: "",
+      maxOutput: "",
+      thinkingEffort: "",
+      inputPrice: "2",
+      outputPrice: "8",
+    });
+    const cleared = applyProviderDraft(
+      {
+        name: "deepseek",
+        url: "https://api.deepseek.com/v1",
+        api: "sk-test",
+        model: "deepseek-flash",
+        contextWindow: "",
+        maxOutput: "",
+        thinkingEffort: "",
+        inputPrice: "-",
+        outputPrice: "-",
+      },
+      priced,
+    );
+    assert.equal(cleared.pricing, undefined);
+  });
+
+  it("clears leftover cache price when input and output go back to models.dev", () => {
+    const priced = applyProviderDraft({
+      name: "deepseek",
+      url: "https://api.deepseek.com/v1",
+      api: "sk-test",
+      model: "deepseek-flash",
+      contextWindow: "",
+      maxOutput: "",
+      thinkingEffort: "",
+      inputPrice: "2",
+      cacheInputPrice: "0.2",
+      outputPrice: "8",
+    });
+    const cleared = applyProviderDraft(
+      {
+        name: "deepseek",
+        url: "https://api.deepseek.com/v1",
+        api: "sk-test",
+        model: "deepseek-flash",
+        contextWindow: "",
+        maxOutput: "",
+        thinkingEffort: "",
+        inputPrice: "-",
+        outputPrice: "-",
+      },
+      priced,
+    );
+    assert.equal(cleared.pricing, undefined);
+  });
+
+  it("stores per-role models and prices, empty roles fall back to main", () => {
+    const provider = applyProviderDraft({
+      name: "deepseek",
+      url: "https://api.deepseek.com/v1",
+      api: "sk-test",
+      model: "deepseek-chat",
+      contextWindow: "",
+      maxOutput: "",
+      thinkingEffort: "",
+      inputPrice: "2",
+      outputPrice: "8",
+      subagent: { model: "deepseek-flash", inputPrice: "0.5", outputPrice: "2" },
+      title: { model: "deepseek-flash" },
+      recap: { inputPrice: "0.3", outputPrice: "1" },
+    });
+    assert.equal(provider.model, "deepseek-chat");
+    assert.deepEqual(provider.llms?.subagent, {
+      model: "deepseek-flash",
+      pricing: { input: 0.5, output: 2 },
+    });
+    assert.deepEqual(provider.llms?.title, { model: "deepseek-flash" });
+    assert.deepEqual(provider.llms?.recap, { pricing: { input: 0.3, output: 1 } });
+    assert.equal(provider.llms?.compress, undefined);
+
+    const main = providerForRole(provider, "main");
+    assert.equal(main.model, "deepseek-chat");
+    assert.deepEqual(main.pricing, { input: 2, output: 8 });
+
+    const sub = providerForRole(provider, "subagent");
+    assert.equal(sub.model, "deepseek-flash");
+    assert.deepEqual(sub.pricing, { input: 0.5, output: 2 });
+
+    const title = providerForRole(provider, "title");
+    assert.equal(title.model, "deepseek-flash");
+    assert.equal(title.pricing, undefined);
+
+    const recap = providerForRole(provider, "recap");
+    assert.equal(recap.model, "deepseek-chat");
+    assert.deepEqual(recap.pricing, { input: 0.3, output: 1 });
+
+    const approve = providerForRole(provider, "approve");
+    assert.equal(approve.model, "deepseek-chat");
+    assert.deepEqual(approve.pricing, { input: 0.3, output: 1 });
+
+    const withRecapModel = applyProviderDraft({
+      name: "deepseek",
+      url: "https://api.deepseek.com/v1",
+      api: "sk-test",
+      model: "deepseek-chat",
+      contextWindow: "",
+      maxOutput: "",
+      thinkingEffort: "",
+      recap: { model: "deepseek-flash" },
+    });
+    assert.equal(providerForRole(withRecapModel, "approve").model, "deepseek-flash");
+    assert.equal(providerForRole(withRecapModel, "approve").pricing, undefined);
+
+    const compress = providerForRole(provider, "compress");
+    assert.equal(compress.model, "deepseek-chat");
+    assert.deepEqual(compress.pricing, { input: 2, output: 8 });
+
+    const shown = formatProvider(provider);
+    assert.match(shown, /主模型: deepseek-chat/);
+    assert.match(shown, /子代理: deepseek-flash/);
+    assert.match(shown, /标题: deepseek-flash/);
+    assert.match(shown, /Recap: 同主模型/);
+    assert.match(shown, /审批: 同主模型/);
+    assert.match(shown, /压缩: 同主模型/);
+  });
+
+  it("clears a role model with - so that role uses main_llm", () => {
+    const priced = applyProviderDraft({
+      name: "deepseek",
+      url: "https://api.deepseek.com/v1",
+      api: "sk-test",
+      model: "deepseek-chat",
+      contextWindow: "",
+      maxOutput: "",
+      thinkingEffort: "",
+      subagent: { model: "flash", inputPrice: "1", outputPrice: "4" },
+    });
+    const cleared = applyProviderDraft(
+      {
+        name: "deepseek",
+        url: "https://api.deepseek.com/v1",
+        api: "sk-test",
+        model: "deepseek-chat",
+        contextWindow: "",
+        maxOutput: "",
+        thinkingEffort: "",
+        subagent: { model: "-", inputPrice: "-", outputPrice: "-" },
+      },
+      priced,
+    );
+    assert.equal(cleared.llms, undefined);
+    assert.equal(providerForRole(cleared, "subagent").model, "deepseek-chat");
   });
 
   it("keeps the current value when the field is left empty", () => {

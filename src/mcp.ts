@@ -1,4 +1,5 @@
 import { isTurnAborted, TurnAborted } from "./abort.js";
+import { packageVersion } from "./banner.js";
 import type { AgentMode } from "./mode.js";
 import { loadMcpServers, type McpServerConfig } from "./mcp-config.js";
 import { McpStdioClient } from "./mcp-client.js";
@@ -165,7 +166,7 @@ async function connectServer(config: McpServerConfig, workspace: string): Promis
       {
         protocolVersion: "2024-11-05",
         capabilities: {},
-        clientInfo: { name: "socode", version: "0.1.4" },
+        clientInfo: { name: "socode", version: packageVersion() },
       },
       15_000,
     );

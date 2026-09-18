@@ -17,7 +17,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/model", hint: "在已保存的 Provider / 模型之间切换" },
   { name: "/effort", hint: "从 API 读取并用方向键调整思考强度" },
   { name: "/context", hint: "查看上下文占用" },
-  { name: "/usage", hint: "本轮与本会话 token / 缓存 / 价格" },
+  { name: "/usage", hint: "本轮与本会话 token / 缓存 / 人民币" },
   { name: "/compress", hint: "压缩对话上下文" },
   { name: "/mode", hint: "查看权限模式" },
   { name: "/mode full", hint: "Full Access，直接改文件" },

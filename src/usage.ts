@@ -9,7 +9,7 @@ export type TokenUsage = {
   promptIncludesCache?: boolean;
 };
 
-/** USD per 1 million tokens, same unit as OpenCode / models.dev. */
+/** 人民币 / 百万 token。展示用；models.dev 的美元价会先按汇率换算。 */
 export type ModelPrice = {
   input: number;
   output: number;
@@ -111,7 +111,7 @@ export function lookupModelPrice(model: string, pricing: Record<string, ModelPri
   return undefined;
 }
 
-export function estimateUsageUsd(usage: TokenUsage, price?: ModelPrice) {
+export function estimateUsageCny(usage: TokenUsage, price?: ModelPrice) {
   if (!price) return undefined;
   const cached = usage.cacheReadTokens ?? 0;
   const created = usage.cacheWriteTokens ?? 0;
@@ -122,14 +122,17 @@ export function estimateUsageUsd(usage: TokenUsage, price?: ModelPrice) {
   const output = usage.completionTokens * price.output;
   const cacheRead = cached * (price.cacheRead ?? price.input);
   const cacheWrite = created * (price.cacheWrite ?? price.input);
-  const usd = (input + output + cacheRead + cacheWrite) / 1_000_000;
-  if (!Number.isFinite(usd) || usd < 0) return undefined;
-  return usd;
+  const cny = (input + output + cacheRead + cacheWrite) / 1_000_000;
+  if (!Number.isFinite(cny) || cny < 0) return undefined;
+  return cny;
 }
+
+/** @deprecated 金额已改为人民币，请用 estimateUsageCny */
+export const estimateUsageUsd = estimateUsageCny;
 
 export function formatUsageLine(
   usage: TokenUsage,
-  opts?: { price?: ModelPrice; session?: TokenUsage; sessionUsd?: number; color?: boolean },
+  opts?: { price?: ModelPrice; cny?: number; session?: TokenUsage; sessionCny?: number; color?: boolean },
 ) {
   const parts = [
     `入 ${compactTokens(usage.promptTokens)}`,
@@ -138,8 +141,8 @@ export function formatUsageLine(
     `出 ${compactTokens(usage.completionTokens)}`,
     usage.reasoningTokens ? `思考 ${compactTokens(usage.reasoningTokens)}` : "",
   ].filter(Boolean);
-  const usd = estimateUsageUsd(usage, opts?.price);
-  if (usd !== undefined) parts.push(formatUsd(usd));
+  const cny = opts?.cny !== undefined ? opts.cny : estimateUsageCny(usage, opts?.price);
+  if (cny !== undefined) parts.push(formatCny(cny));
   else if (opts?.price === undefined) parts.push("未标价");
   const line = `tokens  ${parts.join("  ")}`;
   const dim = opts?.color ? "\x1b[2m" : "";
@@ -147,28 +150,29 @@ export function formatUsageLine(
   return `${dim}${line}${reset}`;
 }
 
-export function formatSessionUsage(usage: TokenUsage, usd?: number, color = false) {
+export function formatSessionUsage(usage: TokenUsage, cny?: number, color = false) {
   const parts = [
     `入 ${compactTokens(usage.promptTokens)}`,
     usage.cacheReadTokens ? `缓存 ${compactTokens(usage.cacheReadTokens)}` : "",
     usage.cacheWriteTokens ? `写缓存 ${compactTokens(usage.cacheWriteTokens)}` : "",
     `出 ${compactTokens(usage.completionTokens)}`,
-    usd !== undefined ? `累计 ${formatUsd(usd)}` : "",
+    cny !== undefined ? `累计 ${formatCny(cny)}` : "",
   ].filter(Boolean);
   const dim = color ? "\x1b[2m" : "";
   const reset = color ? "\x1b[0m" : "";
   return `${dim}本会话  ${parts.join("  ")}${reset}`;
 }
 
-export function formatUsd(amount: number) {
-  if (amount > 0 && amount < 0.0001) return "<$0.0001";
-  if (amount < 0.01) return `$${amount.toFixed(4)}`;
-  if (amount < 1) return `$${amount.toFixed(3)}`;
-  return `$${amount.toFixed(2)}`;
+export function formatCny(amount: number) {
+  if (amount > 0 && amount < 0.0001) return "<¥0.0001";
+  if (amount < 0.01) return `¥${amount.toFixed(4)}`;
+  if (amount < 1) return `¥${amount.toFixed(3)}`;
+  return `¥${amount.toFixed(2)}`;
 }
 
 function normalizePrice(price: ModelPrice): ModelPrice | undefined {
-  if (!(price.input > 0) || !(price.output > 0)) return undefined;
+  if (!Number.isFinite(price.input) || price.input < 0) return undefined;
+  if (!Number.isFinite(price.output) || price.output < 0) return undefined;
   return {
     input: price.input,
     output: price.output,

@@ -79,6 +79,27 @@ describe("pickJudgeProvider", () => {
     assert.equal(judge.thinkingEffort, "none");
     assert.equal(judge.maxOutput, 256);
   });
+
+  it("falls back to recap then main when approve is empty", () => {
+    const withRecap = pickJudgeProvider({
+      ...provider,
+      llms: { recap: { model: "recap-lite" } },
+    });
+    assert.equal(withRecap.model, "recap-lite");
+    assert.equal(withRecap.thinkingEffort, "none");
+
+    const own = pickJudgeProvider({
+      ...provider,
+      llms: {
+        recap: { model: "recap-lite" },
+        approve: { model: "approve-lite" },
+      },
+    });
+    assert.equal(own.model, "approve-lite");
+
+    const main = pickJudgeProvider(provider);
+    assert.equal(main.model, "big-model");
+  });
 });
 
 describe("judgeLongApprove", () => {

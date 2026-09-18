@@ -1,7 +1,7 @@
 import { completeChat } from "./chat.js";
 import { loadConfig } from "./config.js";
 import type { Message } from "./db.js";
-import { listProviders, type Provider } from "./provider.js";
+import { providerForRole, type Provider } from "./provider.js";
 import type { LastVerify, RubricScore, TaskState, VerifyRubric } from "./task-state.js";
 
 export const RUBRIC_AXES = ["file_change", "spec_alignment", "integrity", "runtime"] as const;
@@ -193,12 +193,11 @@ export function createLongRubric(provider: () => Provider, complete?: ChatFn): L
 }
 
 function pickRubricProvider(base: Provider): Provider {
-  const model = loadConfig().judgeModel;
-  const named = listProviders(base).find((item) => /^(judge|fast|cheap|mini)$/i.test(item.name));
-  const source = named && named.url && named.api ? named : base;
+  const source = providerForRole(base, "approve");
+  const model = loadConfig().judgeModel.trim() || source.model;
   return {
     ...source,
-    model: model || source.model,
+    model,
     thinkingEffort: "none",
     maxOutput: Math.min(2048, Math.max(512, source.maxOutput || 1024)),
   };

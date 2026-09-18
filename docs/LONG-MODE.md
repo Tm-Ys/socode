@@ -136,7 +136,7 @@ Long **不会**：
 
 ### 模型
 
-优先 `~/.socode/config.json` 的 `judgeModel`；否则若 `providers.json` 里有名为 `judge` / `fast` / `cheap` / `mini` 的项就用它；再否则用当前 Provider，但 `thinkingEffort=none`、`maxOutput≤256`。
+同一套 API URL / Key。模型来自 Provider 的 **审批** 角色（`llms.approve`）；留空则用 Recap，再空才用主模型。调用时强制 `thinkingEffort=none`、`maxOutput≤256`。`config.json` 的 `judgeModel` 若有值仍可覆盖模型 id。不再因为另一个 Provider 名叫 `judge` / `fast` 就换端点。
 
 ## 压缩 / 预算 / 检查点
 

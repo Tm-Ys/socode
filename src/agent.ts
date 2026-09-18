@@ -39,6 +39,7 @@ export type AgentOutcome = {
   reply: string;
   trace: Message[];
   usage?: TokenUsage;
+  compressUsage?: TokenUsage;
   stopped?: BudgetStop;
 };
 
@@ -117,6 +118,7 @@ export async function runAgent(params: {
   policy?: Policy;
   onEvent?: (event: AgentEvent) => void;
   requirePlan?: boolean;
+  compressProvider?: Provider;
   complete?: (params: {
     provider: Provider;
     messages: Message[];
@@ -136,6 +138,7 @@ export async function runAgent(params: {
     extra: params.policy?.mcp?.specs({ mode: params.policy?.mode, role: params.policy?.role }),
   });
   const usage = emptyTokenUsage();
+  const compressUsage = emptyTokenUsage();
   const longHorizon = params.policy?.mode === "long";
   const parentLong = longHorizon && !params.policy?.nested;
   const budget: LongBudgetPlan = params.policy?.longBudget ?? resolveLongBudget(maxSteps);
@@ -196,18 +199,19 @@ export async function runAgent(params: {
             });
           }
         } else {
-          return stopForBudget("steps", trace, usage, params.policy);
+          return stopForBudget("steps", trace, usage, params.policy, compressUsage);
         }
       }
       if (parentLong && params.maxContextTokens) {
         const used = messages.reduce((sum, message) => sum + messageTokens(message), 0);
         if (used >= params.maxContextTokens * LONG_COMPRESS_RATIO) {
           const compressed = await compressAgentMessages({
-            provider: params.provider,
+            provider: params.compressProvider ?? params.provider,
             messages,
             signal: params.signal,
           });
           if (compressed) {
+            addUsage(compressUsage, compressed.usage);
             messages.length = 0;
             messages.push(...compressed.messages);
             lastCompressStep = step;
@@ -216,7 +220,7 @@ export async function runAgent(params: {
           const still =
             messages.reduce((sum, message) => sum + messageTokens(message), 0) >= params.maxContextTokens;
           if (still) {
-            return stopForBudget("context", trace, usage, params.policy);
+            return stopForBudget("context", trace, usage, params.policy, compressUsage);
           }
         }
       }
@@ -251,7 +255,7 @@ export async function runAgent(params: {
         }
         const assistant: Message = { role: "assistant", content: reply };
         trace.push(assistant);
-        return { reply, trace, usage: nonemptyUsage(usage) };
+        return { reply, trace, usage: nonemptyUsage(usage), compressUsage: nonemptyUsage(compressUsage) };
       }
 
       const assistant: Message = {
@@ -280,14 +284,16 @@ export async function runAgent(params: {
           output = `权限拒绝: 同一工具连续调用 ${REPEAT_LIMIT} 次，已停止以免空转。请换一种做法或直接回复用户。`;
           doom = true;
         } else if (call.name === "context_compress" && parentLong) {
-          output = await runContextCompress({
-            provider: params.provider,
+          const compressed = await runContextCompress({
+            provider: params.compressProvider ?? params.provider,
             messages,
             args,
             signal: params.signal,
             step,
             lastCompressStep,
           });
+          output = compressed.text;
+          addUsage(compressUsage, compressed.usage);
           if (!output.startsWith("工具执行失败") && !output.startsWith("权限拒绝")) lastCompressStep = step;
         } else {
           output = await executeTool(call.name, call.arguments, params.signal, params.policy).catch(fail);
@@ -335,7 +341,7 @@ export async function runAgent(params: {
         const stop: Message = { role: "assistant", content: reply };
         const closed = closeIncompleteTrace(trace);
         closed.push(stop);
-        return { reply, trace: closed, usage: nonemptyUsage(usage) };
+        return { reply, trace: closed, usage: nonemptyUsage(usage), compressUsage: nonemptyUsage(compressUsage) };
       }
 
       if (parentLong) {
@@ -351,7 +357,7 @@ export async function runAgent(params: {
           maxContextTokens: params.maxContextTokens,
         });
         if (reason === "tokens") {
-          return stopForBudget(reason, trace, usage, params.policy);
+          return stopForBudget(reason, trace, usage, params.policy, compressUsage);
         }
       }
     }
@@ -365,7 +371,7 @@ export async function runAgent(params: {
       maxContextTokens: params.maxContextTokens,
     });
     if (parentLong) {
-      return stopForBudget(over ?? "steps", trace, usage, params.policy);
+      return stopForBudget(over ?? "steps", trace, usage, params.policy, compressUsage);
     }
     return fail(new Error(`超过最大工具步数 ${maxSteps}`));
   } catch (error) {
@@ -386,9 +392,9 @@ async function runContextCompress(params: {
   signal?: AbortSignal;
   step: number;
   lastCompressStep: number;
-}) {
+}): Promise<{ text: string; usage?: TokenUsage }> {
   if (params.step - params.lastCompressStep < 2) {
-    return "工具执行失败: 刚刚压缩过，先继续做事再压";
+    return { text: "工具执行失败: 刚刚压缩过，先继续做事再压" };
   }
   const keepTurns = clampKeepTurns(params.args.keep_turns);
   const note = typeof params.args.note === "string" ? params.args.note : undefined;
@@ -401,10 +407,13 @@ async function runContextCompress(params: {
     keepTurns,
     note,
   });
-  if (!compressed) return "工具执行失败: 对话还不够长，无需压缩";
+  if (!compressed) return { text: "工具执行失败: 对话还不够长，无需压缩" };
   params.messages.length = 0;
   params.messages.push(...compressed.messages, ...live);
-  return `[context_compress] ok  reason=${reason}  saved≈${compressed.saved} tokens  keep=${keepTurns}\n摘要已写入会话（【会话摘要】）。TaskState 与 harness mode 仍钉在原文。继续当前 goal，不要重做 done。`;
+  return {
+    text: `[context_compress] ok  reason=${reason}  saved≈${compressed.saved} tokens  keep=${keepTurns}\n摘要已写入会话（【会话摘要】）。TaskState 与 harness mode 仍钉在原文。继续当前 goal，不要重做 done。`,
+    usage: compressed.usage,
+  };
 }
 
 function clampKeepTurns(value: unknown) {
@@ -418,6 +427,7 @@ function stopForBudget(
   trace: Message[],
   usage: TokenUsage,
   policy?: Policy,
+  compressUsage?: TokenUsage,
 ): AgentOutcome {
   const closed = closeIncompleteTrace(trace);
   const detail =
@@ -434,7 +444,13 @@ function stopForBudget(
     policy?.tasks?.patch({ notes: [state.notes, `checkpoint: ${reason}`].filter(Boolean).join("\n").slice(-2000) });
   }
   closed.push({ role: "assistant", content: reply });
-  return { reply, trace: closed, usage: nonemptyUsage(usage), stopped: reason };
+  return {
+    reply,
+    trace: closed,
+    usage: nonemptyUsage(usage),
+    compressUsage: nonemptyUsage(compressUsage ?? emptyTokenUsage()),
+    stopped: reason,
+  };
 }
 
 function addUsage(total: TokenUsage, next?: TokenUsage) {

@@ -9,7 +9,7 @@ socode 没有 web 界面。所谓前端就是终端里的这一层 TUI：全是�
 `socode`（或仓库里 `npm start`）后先打一块欢迎框，每次随机抽一条指令说明：
 
 ```
-╭─ socode @ 0.1.4 presented by Tm-Ys ───────────╮
+╭─ socode @ 0.1.5 presented by Tm-Ys ───────────╮
 │                                               │
 │  你知道吗？输入 / 会按前缀列出命令，Tab 补全。 │
 │                                               │
@@ -152,7 +152,7 @@ Ask 模式下，写文件或跑命令前弹提问，等一个按键：
 - 压缩上下文时打：`压缩上下文，大约省下 N tokens`
 - 错误统一走 `err> <message>` 到 stderr
 - `/context` 打色块占用（system / tools / 对话 / 预留输出 / 空闲）；recap 过的轮次按短 recap 计 token，报告里会标 `recap N 轮`
-- 每轮结束默认打一行暗色 `tokens  入 …  缓存 …  出 …`（有 `modelPricing` 才带 `$`，否则 `未标价`）；`/usage` 看本会话累计，不占用 `/context` 色带
+- 每轮结束默认打一行暗色 `tokens  入 …  缓存 …  出 …`（有标价才带 `¥`，否则 `未标价`）；标价默认 models.dev 换成人民币，主模型 / 子代理 / 标题 / Recap / 审批 / 压缩可各自定价。`/usage` 看本会话累计，不占用 `/context` 色带
 
 ## 一句话总结
 

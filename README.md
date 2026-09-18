@@ -64,7 +64,7 @@
 
 - `/context` 用色块标 system / tools / 对话 / 预留输出 / 空闲。
 - 一轮工具超过 6 次、或模型输出超过约 2400 字时，结束后打一条灰色 `recap`；**这一轮入库和后续上下文只留 recap**，需要细节请自行 grep。
-- 每轮结束打一行 `tokens`：入 / 缓存 / 出；没配单价就写 `未标价`。`/usage` 看本会话累计。
+- 每轮结束打一行 `tokens`：入 / 缓存 / 出；金额是人民币。默认按 models.dev 单价 × `usdCny` 汇率。Provider 可给主模型 / 子代理 / 标题 / Recap / 审批 / 压缩分别定价（元 / 百万 token）；角色模型留空则用主模型，审批留空则用 Recap。对不上模型就写 `未标价`。`/usage` 看本会话累计。
 - 进入工作区时自动创建 `.socode/sessions/`；对话 JSON 只落在本目录，`/session` 看不到别的仓库。`socode` 默认开新会话，空对话不落盘。
 - 生成中 Esc 中止当前轮：用户问题留下，半截回复不入库。连续三次同调用或同失败会停，避免空转。`/` 后有幽灵补全和 Tab。
 
@@ -97,23 +97,29 @@ npx socode
 # 开发时也可以 npm start
 ```
 
-把命令装到 PATH：`npm link`（先 `npm run build`）或 `npm install -g ./socode-0.1.4.tgz`。
+把命令装到 PATH：`npm link`（先 `npm run build`）或 `npm install -g ./socode-0.1.5.tgz`。
 
 没有保存过 Provider 时，交互式启动会进入向导，写入用户级 `~/.socode/providers.json`（所有工作区、所有对话共用）。也可以用 `--url` / `--api` / `--model` / `--name` 只覆盖本次进程。
 
-Harness 默认值在 `~/.socode/config.json`：`mode`、`systemPrompt`、`maxContextMessages`、`maxAgentSteps`、`maxAgentTokens`、`subagentSteps`、`judgeModel`、`longBudgetPolicy`（`dynamic` / `fixed` / `unlimited`）、`longBudgetDynamic`（`50-75` 或 `25-50`）、`modelPricing`（按模型 id，美元 / 百万 token：`input` / `output`，可选 `cacheRead` / `cacheWrite`）。没配单价时只显示 token，不编造金额。命令行 `--mode` / `--steps` / `--max` / `--budget` / `--system` 覆盖本次进程。`/mode` 只改当前会话，不写回 config。项目说明放 `AGENTS.md`。若目录里还有旧的 `.env`，第一次启动会一次性迁进 `~/.socode/`，之后不再读取。
+Harness 默认值在 `~/.socode/config.json`：`mode`、`systemPrompt`、`maxContextMessages`、`maxAgentSteps`、`maxAgentTokens`、`subagentSteps`、`judgeModel`、`longBudgetPolicy`（`dynamic` / `fixed` / `unlimited`）、`longBudgetDynamic`（`50-75` 或 `25-50`）、`usdCny`（把 models.dev 的美元单价换成人民币，默认 7.2）。没对上模型、Provider 也没自设单价时只显示 token，不编造金额。命令行 `--mode` / `--steps` / `--max` / `--budget` / `--system` 覆盖本次进程。`/mode` 只改当前会话，不写回 config。项目说明放 `AGENTS.md`。若目录里还有旧的 `.env`，第一次启动会一次性迁进 `~/.socode/`，之后不再读取。
 
-`modelPricing` 示例：
+Provider 可给每个角色自设模型和定价，单位都是 **人民币 / 百万 token**。`model` / `pricing` 是主模型（main_llm）；`llms` 里子代理、标题、Recap、压缩留空则用主模型。**审批**（Long 副作用）留空则用 Recap，再空才用主模型：
 
 ```json
 {
-  "modelPricing": {
-    "deepseek-chat": { "input": 0.27, "output": 1.1, "cacheRead": 0.07 }
+  "model": "deepseek-chat",
+  "pricing": { "input": 2, "cacheInput": 0.2, "output": 8 },
+  "llms": {
+    "subagent": { "model": "deepseek-flash", "pricing": { "input": 0.5, "output": 2 } },
+    "title": { "model": "deepseek-flash" },
+    "recap": { "pricing": { "input": 0.3, "output": 1 } },
+    "approve": { "model": "deepseek-flash" },
+    "compress": { "model": "deepseek-chat" }
   }
 }
 ```
 
-`THINKING_EFFORT` 可选：`none` / `minimal` / `low` / `medium` / `high` / `xhigh`，默认 `medium`。运行中请用 `/effort` 调整，不要走 `/provider edit`。审批器也会选用 `providers.json` 里名为 `judge` / `fast` / `cheap` / `mini` 的项。
+`THINKING_EFFORT` 可选：`none` / `minimal` / `low` / `medium` / `high` / `xhigh`，默认 `medium`。运行中请用 `/effort` 调整，不要走 `/provider edit`。
 
 ## 用法
 
@@ -157,7 +163,7 @@ Long **不会**在沙箱起不来时退回裸跑；密钥和 `sudo` 仍本地硬
 - `/new` 开新会话（空的不入库）
 - `/session` 或 `/chat` 恢复历史对话
 - `/context` 查看上下文占用
-- `/usage` 查看上一轮和本会话 token（含缓存）；配了 `modelPricing` 才估美元
+- `/usage` 查看上一轮和本会话 token（含缓存）；金额为人民币，来自 models.dev 或 Provider 自设单价
 - `/compress` 用当前模型压缩较早对话，保留最近两轮（并钉住 harness mode / TaskState / plan）
 - `/mode` 查看或切换：`full` / `ask` / `plan` / `long`（`长程`）
 - `/task` 查看长程状态；`/task goal …`、`/task milestone …`、`/task note …`、`/task clear`
@@ -234,7 +240,8 @@ Skills 来自各目录下的 `<name>/SKILL.md`（YAML frontmatter 的 `name` / `
 | `src/permissions.ts` | 按模式授权 |
 | `src/ask-diff.ts` | Ask 审批前的 unified diff |
 | `src/undo.ts` | 本轮写前快照与 `/undo`（落在 `.socode/undo/`） |
-| `src/usage.ts` | 解析 API usage、每轮 token 行、按标价估美元 |
+| `src/usage.ts` | 解析 API usage、每轮 token 行、按人民币标价估金额 |
+| `src/models-dev.ts` | 从 models.dev 拉模型单价并缓存 |
 | `src/doctor.ts` | `/doctor` 与 `--doctor` |
 | `src/sandbox.ts` | 路径 denylist、bash 分类、Codex 式 workspace-write OS 沙箱 |
 | `src/long-approve.ts` | Long 副作用的独立 JSON 审批器 |
@@ -265,7 +272,7 @@ Skills 来自各目录下的 `<name>/SKILL.md`（YAML frontmatter 的 `name` / `
 - 子代理再开子代理；不给 worker 做 git worktree，共享工作区，靠串行避免同时改同一文件
 - 云端 bash / 把密钥上传到 socode 云。远程开发是 SSH 工作区，见 [`docs/REMOTE.md`](docs/REMOTE.md)
 - 把 `/undo` 做成对话 rewind
-- 没配 `modelPricing` 时编造美元价格
+- 没对上 models.dev、Provider 也没自设单价时编造人民币价格
 
 ## 许可
 

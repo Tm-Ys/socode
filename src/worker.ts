@@ -1,16 +1,16 @@
 import { isTurnAborted, TurnAborted, TurnFailed } from "./abort.js";
 import { closeIncompleteTrace, runAgent } from "./agent.js";
 import { loadConfig, longBudgetFromConfig } from "./config.js";
+import { ensureModelsDevCatalog, lookupModelsDevUsd, usdToCny } from "./models-dev.js";
 import { formatDoctor, runDoctor } from "./doctor.js";
 import { beginUndoTurn, bindUndoStore, undoLastTurn } from "./undo.js";
 import type { TokenUsage } from "./chat.js";
 import {
   addTokenUsage,
   emptyTokenUsage,
-  estimateUsageUsd,
+  estimateUsageCny,
   formatSessionUsage,
   formatUsageLine,
-  lookupModelPrice,
   usageHasTokens,
 } from "./usage.js";
 import { canCompress, compressHistory, shouldAutoCompress } from "./compress.js";
@@ -47,8 +47,8 @@ import {
 import { createPolicy, type Policy } from "./permissions.js";
 import { useColor } from "./markdown.js";
 import { setPermissionGate, watchTurnAbort } from "./prompt.js";
-import type { Provider } from "./provider.js";
-import { recapLine, historyAfterTurn } from "./recap.js";
+import { providerForRole, providerModelPrice, type LlmRole, type Provider } from "./provider.js";
+import { recapLine, historyAfterTurn, historyAfterTurnAsync } from "./recap.js";
 import { formatSkillsCli, loadSkillBundle } from "./skills.js";
 import { activateBaseSkills, logSkillActivate } from "./skill-activate.js";
 import { createSubagentRunner, createSubagentStore } from "./subagent.js";
@@ -190,6 +190,7 @@ export function setplanUsageText() {
 export async function openLocalWorker(cfg: WorkerConfig): Promise<LocalWorker> {
   const host = cfg.host;
   const appCfg = loadConfig();
+  void ensureModelsDevCatalog();
   let workspace = cfg.workspace;
   let provider = cfg.provider;
   let mode = cfg.mode;
@@ -207,7 +208,13 @@ export async function openLocalWorker(cfg: WorkerConfig): Promise<LocalWorker> {
   const plans = createPlanStore(lastPlan(session.messages));
   const subagents = createSubagentStore();
   let mcp: McpHub = await openMcpHub(workspace);
-  const longApprove = createLongApprover(() => provider);
+  const longApprove = createLongApprover(
+    () => provider,
+    undefined,
+    (usage) => {
+      void addPricedUsage("approve", usage);
+    },
+  );
   const longRubric = createLongRubric(() => provider);
   const longBudget = longBudgetFromConfig(cfg.maxSteps);
   const policy: Policy = createPolicy(() => workspace, () => mode, tasks, {
@@ -221,7 +228,7 @@ export async function openLocalWorker(cfg: WorkerConfig): Promise<LocalWorker> {
     askQuestions: (questions, signal) => host.askQuestions(questions, signal),
   });
   policy.spawnSubagent = createSubagentRunner({
-    getProvider: () => provider,
+    getProvider: () => providerForRole(provider, "subagent"),
     getPolicy: () => policy,
     workspace,
     maxSteps: appCfg.subagentSteps,
@@ -230,6 +237,9 @@ export async function openLocalWorker(cfg: WorkerConfig): Promise<LocalWorker> {
     onBatch: (jobs) => host.subagent.startBatch(jobs),
     onJobStart: (job) => host.subagent.jobStart(job.id),
     onJobDone: (job) => host.subagent.jobDone(job),
+    onUsage: (usage) => {
+      void addPricedUsage("subagent", usage);
+    },
     onEvent: (meta, event) => {
       const live = host.subagent.record(meta.job.id, event);
       if (!live) {
@@ -243,28 +253,52 @@ export async function openLocalWorker(cfg: WorkerConfig): Promise<LocalWorker> {
 
   let lastUsage: TokenUsage | undefined;
   let sessionUsage = emptyTokenUsage();
-  let sessionUsd = 0;
+  let sessionCny = 0;
+  let turnCny = 0;
+  let turnPriced = false;
   let turnAbort: AbortController | undefined;
 
-  const currentPrice = () => lookupModelPrice(provider.model, loadConfig().modelPricing);
+  const rolePrice = (role: LlmRole) => {
+    const llm = providerForRole(provider, role);
+    const own = providerModelPrice(llm);
+    if (own) return own;
+    const usd = lookupModelsDevUsd(llm.model, `${llm.name} ${llm.url}`);
+    if (!usd) return undefined;
+    return usdToCny(usd, loadConfig().usdCny);
+  };
+
+  const beginTurnUsage = () => {
+    lastUsage = emptyTokenUsage();
+    turnCny = 0;
+    turnPriced = false;
+  };
+
+  const addPricedUsage = async (role: LlmRole, usage?: TokenUsage) => {
+    if (!usageHasTokens(usage)) return;
+    if (!lastUsage) lastUsage = emptyTokenUsage();
+    addTokenUsage(lastUsage, usage);
+    addTokenUsage(sessionUsage, usage);
+    const llm = providerForRole(provider, role);
+    if (!providerModelPrice(llm)) await ensureModelsDevCatalog();
+    const cny = estimateUsageCny(usage, rolePrice(role));
+    if (cny !== undefined) {
+      turnCny += cny;
+      sessionCny += cny;
+      turnPriced = true;
+    }
+  };
 
   const resetSessionUsage = () => {
     lastUsage = undefined;
     sessionUsage = emptyTokenUsage();
-    sessionUsd = 0;
-  };
-
-  const noteTurnUsage = (usage?: TokenUsage) => {
-    lastUsage = usage;
-    if (!usageHasTokens(usage)) return;
-    addTokenUsage(sessionUsage, usage);
-    const usd = estimateUsageUsd(usage, currentPrice());
-    if (usd !== undefined) sessionUsd += usd;
+    sessionCny = 0;
+    turnCny = 0;
+    turnPriced = false;
   };
 
   const usageLine = () => {
     if (!usageHasTokens(lastUsage)) return "";
-    return formatUsageLine(lastUsage, { price: currentPrice(), color: useColor() });
+    return formatUsageLine(lastUsage, { cny: turnPriced ? turnCny : undefined, color: useColor() });
   };
 
   const currentSystem = (activated: string[] = []) =>
@@ -355,7 +389,8 @@ export async function openLocalWorker(cfg: WorkerConfig): Promise<LocalWorker> {
         logSkillActivate(decision);
       }
       return await runAgent({
-        provider,
+        provider: providerForRole(provider, "main"),
+        compressProvider: providerForRole(provider, "compress"),
         stream: cfg.stream,
         maxSteps: cfg.maxSteps,
         maxTokens: mode === "long" ? cfg.maxTokens : undefined,
@@ -406,7 +441,7 @@ export async function openLocalWorker(cfg: WorkerConfig): Promise<LocalWorker> {
     let replied = false;
     try {
       const result = await compressHistory({
-        provider,
+        provider: providerForRole(provider, "compress"),
         history,
         signal: turn.signal,
         onDelta: (text) => {
@@ -419,6 +454,7 @@ export async function openLocalWorker(cfg: WorkerConfig): Promise<LocalWorker> {
       });
       await persistSession(store, session, provider.model);
       await replaceMessages(store, session.id, result.messages);
+      await addPricedUsage("compress", result.usage);
       return { history: result.messages, saved: result.saved };
     } finally {
       ttyAbort.signal.removeEventListener("abort", onTtyAbort);
@@ -436,15 +472,26 @@ export async function openLocalWorker(cfg: WorkerConfig): Promise<LocalWorker> {
     return result.history;
   };
 
-  const finishTurn = async (user: Message, titleText: string, reply: string, trace: Message[], usage?: TokenUsage) => {
-    noteTurnUsage(usage);
-    const stored = historyAfterTurn(user, trace);
+  const finishTurn = async (
+    user: Message,
+    titleText: string,
+    reply: string,
+    trace: Message[],
+    usage?: TokenUsage,
+    compressUsage?: TokenUsage,
+  ) => {
+    await addPricedUsage("main", usage);
+    await addPricedUsage("compress", compressUsage);
+    const recapped = await historyAfterTurnAsync(user, trace, provider);
+    await addPricedUsage("recap", recapped.usage);
+    const stored = recapped.messages;
     await persistSession(store, session, provider.model);
     await saveMessages(store, session.id, stored);
     session.messages.push(...stored);
     await rememberTaskState(store, session, tasks);
     await rememberPlan(store, session, plans);
-    await maybeNameSession(store, session, provider, titleText, reply, cfg.skipTitle);
+    const titleUsage = await maybeNameSession(store, session, provider, titleText, reply, cfg.skipTitle);
+    await addPricedUsage("title", titleUsage);
     const recap = recapLine(trace, { color: useColor() });
     return {
       reply,
@@ -507,13 +554,14 @@ export async function openLocalWorker(cfg: WorkerConfig): Promise<LocalWorker> {
         ? { requirePlan: true, forceSkills: prepared.forceSkills, skillPrompt: prepared.skillPrompt }
         : undefined;
       try {
+        beginTurnUsage();
         if (mode === "long") {
           session.messages = await maybeAutoCompress(session.messages);
           tasks.replace(seedGoalFromUser(tasks.get(), prepared.titleText));
           await rememberTaskState(store, session, tasks);
         }
-        const { reply, trace, usage } = await runAsk(session.messages, user, askOpts);
-        return await finishTurn(user, prepared.titleText, reply, trace, usage);
+        const { reply, trace, usage, compressUsage } = await runAsk(session.messages, user, askOpts);
+        return await finishTurn(user, prepared.titleText, reply, trace, usage, compressUsage);
       } catch (error) {
         return await failTurn(user, error);
       }
@@ -531,7 +579,7 @@ export async function openLocalWorker(cfg: WorkerConfig): Promise<LocalWorker> {
       const width = Math.max(16, Math.min(48, cols - 2));
       const lines = ["", formatContextReport(report, width, Boolean(process.stdout.isTTY))];
       if (usageHasTokens(lastUsage)) {
-        lines.push(formatUsageLine(lastUsage, { price: currentPrice(), color: useColor() }));
+        lines.push(formatUsageLine(lastUsage, { cny: turnPriced ? turnCny : undefined, color: useColor() }));
       }
       lines.push("");
       return lines.join("\n");
@@ -541,16 +589,19 @@ export async function openLocalWorker(cfg: WorkerConfig): Promise<LocalWorker> {
         return "\n还没有 API 用量。发一条消息后再看。\n";
       }
       const color = useColor();
-      const price = currentPrice();
       const lines: string[] = [""];
-      if (usageHasTokens(lastUsage)) lines.push(formatUsageLine(lastUsage, { price, color }));
-      if (usageHasTokens(sessionUsage)) {
-        lines.push(formatSessionUsage(sessionUsage, sessionUsd > 0 ? sessionUsd : undefined, color));
+      if (usageHasTokens(lastUsage)) {
+        lines.push(formatUsageLine(lastUsage, { cny: turnPriced ? turnCny : undefined, color }));
       }
-      if (!price) {
+      if (usageHasTokens(sessionUsage)) {
+        lines.push(formatSessionUsage(sessionUsage, sessionCny > 0 ? sessionCny : undefined, color));
+      }
+      if (!turnPriced && sessionCny <= 0) {
         const dim = color ? "\x1b[2m" : "";
         const reset = color ? "\x1b[0m" : "";
-        lines.push(`${dim}标价写在 ~/.socode/config.json 的 modelPricing（美元 / 百万 token）。没配就不估金额。${reset}`);
+        lines.push(
+          `${dim}标价默认从 models.dev 拉（美元 × usdCny 换成人民币 / 百万 token）。也可按主模型 / 子代理 / 标题 / Recap / 审批 / 压缩分别自设。对不上模型就不估金额。${reset}`,
+        );
       }
       return `${lines.join("\n")}\n`;
     },
@@ -595,6 +646,7 @@ export async function openLocalWorker(cfg: WorkerConfig): Promise<LocalWorker> {
       }
       try {
         host.emitEvent({ type: "notice", text: "正在压缩上下文…" });
+        beginTurnUsage();
         const result = await runCompress(session.messages);
         session.messages = result.history;
         await rememberMode(store, session, mode);
@@ -742,10 +794,15 @@ async function maybeNameSession(
   assistantText: string,
   skip?: boolean,
 ) {
-  if (skip || !isDefaultTitle(session.title) || !session.id) return;
-  const title = await generateTitle({ provider, userText, assistantText });
+  if (skip || !isDefaultTitle(session.title) || !session.id) return undefined;
+  const { title, usage } = await generateTitle({
+    provider: providerForRole(provider, "title"),
+    userText,
+    assistantText,
+  });
   await updateConversationTitle(store, session.id, title);
   session.title = title;
+  return usage;
 }
 
 function handleTask(store: TaskStore, arg: string) {

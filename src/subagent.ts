@@ -3,6 +3,7 @@ import { runAgent, type AgentEvent, type AgentOutcome } from "./agent.js";
 import type { Message } from "./db.js";
 import { createPolicy, type Policy } from "./permissions.js";
 import type { Provider } from "./provider.js";
+import type { TokenUsage } from "./usage.js";
 import {
   clipReply,
   formatSubagentBatch,
@@ -220,6 +221,7 @@ export async function runSubagent(params: {
   stream?: boolean;
   maxSteps?: number;
   onEvent?: (event: AgentEvent) => void;
+  onUsage?: (usage: TokenUsage) => void;
 }): Promise<string> {
   const prompt = params.prompt.trim();
   if (!prompt) throw new Error("缺少 prompt");
@@ -237,6 +239,8 @@ export async function runSubagent(params: {
       signal: params.signal,
       onEvent: params.onEvent,
     });
+    if (outcome.usage) params.onUsage?.(outcome.usage);
+    if (outcome.compressUsage) params.onUsage?.(outcome.compressUsage);
     return formatSubagentResult(params.kind, outcome, params.label);
   } catch (error) {
     if (isTurnAborted(error) || params.signal?.aborted) throw new TurnAborted();
@@ -264,6 +268,7 @@ export function createSubagentRunner(opts: {
   onJobDone?: (job: SubagentJob) => void;
   shouldStream?: (job: SubagentJob) => boolean;
   execute?: typeof runSubagent;
+  onUsage?: (usage: TokenUsage) => void;
 }) {
   return async (args: Record<string, unknown>, signal?: AbortSignal) => {
     const parent = opts.getPolicy();
@@ -301,6 +306,7 @@ export function createSubagentRunner(opts: {
         stream: opts.shouldStream?.(job) ?? (overlapping ? false : opts.stream),
         maxSteps: opts.maxSteps,
         onEvent: (event) => opts.onEvent?.(meta, event),
+        onUsage: opts.onUsage,
       })
         .then((result) => {
           const status: SubagentJob["status"] = result.startsWith("工具执行失败") ? "error" : "done";

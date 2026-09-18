@@ -1,12 +1,33 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import type { ModelPrice } from "./usage.js";
+import { lookupModelPrice } from "./usage.js";
 
 export const DEFAULT_CONTEXT_WINDOW = 128000;
 export const DEFAULT_MAX_OUTPUT = 8192;
 export const THINKING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"] as const;
 export type ThinkingEffort = (typeof THINKING_EFFORTS)[number];
 export const DEFAULT_THINKING_EFFORT: ThinkingEffort = "medium";
+
+export type ProviderPricing = {
+  /** 人民币 / 百万 token */
+  input: number;
+  cacheInput?: number;
+  output: number;
+};
+
+export const LLM_ROLES = ["main", "subagent", "title", "recap", "approve", "compress"] as const;
+export type LlmRole = (typeof LLM_ROLES)[number];
+export const AUX_LLM_ROLES = ["subagent", "title", "recap", "approve", "compress"] as const;
+export type AuxLlmRole = (typeof AUX_LLM_ROLES)[number];
+
+export type RoleLlm = {
+  model?: string;
+  pricing?: ProviderPricing;
+};
+
+export type ProviderLlms = Partial<Record<AuxLlmRole, RoleLlm>>;
 
 export type Provider = {
   name: string;
@@ -16,6 +37,8 @@ export type Provider = {
   contextWindow: number;
   maxOutput: number;
   thinkingEffort: ThinkingEffort;
+  pricing?: ProviderPricing;
+  llms?: ProviderLlms;
 };
 
 export type ProviderStore = {
@@ -78,6 +101,13 @@ export function listProviders(current?: Provider): Provider[] {
   return rows;
 }
 
+export type RoleLlmDraft = {
+  model?: string;
+  inputPrice?: string;
+  cacheInputPrice?: string;
+  outputPrice?: string;
+};
+
 export type ProviderDraft = {
   name: string;
   url: string;
@@ -86,6 +116,14 @@ export type ProviderDraft = {
   contextWindow: string;
   maxOutput: string;
   thinkingEffort: string;
+  inputPrice?: string;
+  cacheInputPrice?: string;
+  outputPrice?: string;
+  subagent?: RoleLlmDraft;
+  title?: RoleLlmDraft;
+  recap?: RoleLlmDraft;
+  approve?: RoleLlmDraft;
+  compress?: RoleLlmDraft;
 };
 
 export function emptyProvider(): Provider {
@@ -136,6 +174,14 @@ export function applyProviderDraft(draft: ProviderDraft, fallback?: Provider): P
   if (effortRaw && !isThinkingEffort(effortRaw)) {
     throw new Error("思考强度必须是 none | minimal | low | medium | high | xhigh");
   }
+  const pricing = parseProviderPricing(
+    {
+      input: draft.inputPrice,
+      cacheInput: draft.cacheInputPrice,
+      output: draft.outputPrice,
+    },
+    fallback?.pricing,
+  );
   return normalizeProvider({
     name: draft.name,
     url: draft.url,
@@ -144,6 +190,14 @@ export function applyProviderDraft(draft: ProviderDraft, fallback?: Provider): P
     contextWindow: numberOr(contextRaw, fallback?.contextWindow || DEFAULT_CONTEXT_WINDOW),
     maxOutput: numberOr(outputRaw, fallback?.maxOutput || DEFAULT_MAX_OUTPUT),
     thinkingEffort: isThinkingEffort(effortRaw) ? effortRaw : (fallback?.thinkingEffort ?? DEFAULT_THINKING_EFFORT),
+    pricing,
+    llms: {
+      subagent: parseRoleSlot(draft.subagent, fallback?.llms?.subagent),
+      title: parseRoleSlot(draft.title, fallback?.llms?.title),
+      recap: parseRoleSlot(draft.recap, fallback?.llms?.recap),
+      approve: parseRoleSlot(draft.approve, fallback?.llms?.approve),
+      compress: parseRoleSlot(draft.compress, fallback?.llms?.compress),
+    },
   });
 }
 
@@ -187,11 +241,72 @@ export function formatProvider(provider: Provider, maskKey = true) {
     `Provider: ${provider.name}`,
     `API URL: ${provider.url}`,
     `API: ${key}`,
-    `模型: ${provider.model}`,
+    `主模型: ${provider.model}`,
     `上下文窗口: ${provider.contextWindow}`,
     `最大输出: ${provider.maxOutput}`,
     `思考强度: ${provider.thinkingEffort}`,
+    `主定价: ${formatProviderPricing(provider.pricing)}`,
+    ...AUX_LLM_ROLES.map((role) => formatRoleLine(provider, role)),
   ].join("\n");
+}
+
+function formatRoleLine(provider: Provider, role: AuxLlmRole) {
+  const own = provider.llms?.[role];
+  const resolved = providerForRole(provider, role);
+  if (own?.model?.trim()) {
+    const pricing = own.pricing ? formatProviderPricing(own.pricing) : "models.dev（人民币 / 百万 token）";
+    return `${roleLabel(role)}: ${own.model.trim()}  ${pricing}`;
+  }
+  const inherited = role === "approve" ? inheritLabel(provider, "recap") : `同主模型（${provider.model}）`;
+  const pricing = own?.pricing ? formatProviderPricing(own.pricing) : formatProviderPricing(resolved.pricing);
+  return `${roleLabel(role)}: ${inherited}  ${pricing}`;
+}
+
+function inheritLabel(provider: Provider, role: AuxLlmRole) {
+  const model = provider.llms?.[role]?.model?.trim();
+  if (model) return `同${roleLabel(role)}（${model}）`;
+  return `同主模型（${provider.model}）`;
+}
+
+export function roleLabel(role: LlmRole) {
+  if (role === "main") return "主模型";
+  if (role === "subagent") return "子代理";
+  if (role === "title") return "标题";
+  if (role === "recap") return "Recap";
+  if (role === "approve") return "审批";
+  return "压缩";
+}
+
+/** 空角色用主模型；审批空则用 Recap，再空才用主模型。没自设单价时，模型若仍是回落模型则跟其定价，否则走 models.dev。 */
+export function providerForRole(provider: Provider, role: LlmRole): Provider {
+  const resolved = resolveRole(provider, role);
+  return { ...provider, model: resolved.model, pricing: resolved.pricing };
+}
+
+function resolveRole(provider: Provider, role: LlmRole): { model: string; pricing?: ProviderPricing } {
+  if (role === "main") return { model: provider.model, pricing: provider.pricing };
+  const slot = provider.llms?.[role as AuxLlmRole];
+  const parent = role === "approve" ? resolveRole(provider, "recap") : { model: provider.model, pricing: provider.pricing };
+  const model = slot?.model?.trim() || parent.model;
+  const pricing = slot?.pricing ?? (model === parent.model ? parent.pricing : undefined);
+  return { model, pricing };
+}
+
+export function formatProviderPricing(pricing?: ProviderPricing) {
+  if (!pricing) return "models.dev（人民币 / 百万 token）";
+  const cache = pricing.cacheInput !== undefined ? ` / 缓存入 ${pricing.cacheInput}` : "";
+  return `自设 入 ${pricing.input}${cache} / 出 ${pricing.output}  元/百万token`;
+}
+
+export function providerModelPrice(provider: Provider): ModelPrice | undefined {
+  if (!provider.pricing) return undefined;
+  return lookupModelPrice("own", {
+    own: {
+      input: provider.pricing.input,
+      output: provider.pricing.output,
+      cacheRead: provider.pricing.cacheInput,
+    },
+  });
 }
 
 export function maskApiKey(api: string) {
@@ -227,6 +342,7 @@ function normalizeProvider(input: Provider): Provider {
   const name =
     (rawName && rawName !== "default" ? rawName : "") || hostnameName(input.url) || "default";
   const thinking = isThinkingEffort(input.thinkingEffort) ? input.thinkingEffort : DEFAULT_THINKING_EFFORT;
+  const llms = normalizeLlms(input.llms);
   return {
     name,
     url: input.url.trim(),
@@ -235,6 +351,89 @@ function normalizeProvider(input: Provider): Provider {
     contextWindow: Math.max(1024, Math.floor(input.contextWindow || DEFAULT_CONTEXT_WINDOW)),
     maxOutput: Math.max(16, Math.floor(input.maxOutput || DEFAULT_MAX_OUTPUT)),
     thinkingEffort: thinking,
+    ...(normalizeSavedPricing(input.pricing) ? { pricing: normalizeSavedPricing(input.pricing) } : {}),
+    ...(llms ? { llms } : {}),
+  };
+}
+
+function parseRoleSlot(draft: RoleLlmDraft | undefined, fallback?: RoleLlm): RoleLlm | undefined {
+  if (!draft) return normalizeRoleLlm(fallback);
+  const model = parseOptionalModel(draft.model, fallback?.model);
+  const pricing = parseProviderPricing(
+    {
+      input: draft.inputPrice,
+      cacheInput: draft.cacheInputPrice,
+      output: draft.outputPrice,
+    },
+    fallback?.pricing,
+  );
+  return normalizeRoleLlm({ model, pricing });
+}
+
+function parseOptionalModel(raw: string | undefined, fallback?: string) {
+  if (raw === undefined) return fallback ?? "";
+  const text = raw.trim();
+  if (!text) return fallback ?? "";
+  if (text === "-" || text.toLowerCase() === "auto") return "";
+  return text;
+}
+
+function normalizeLlms(input?: ProviderLlms): ProviderLlms | undefined {
+  if (!input) return undefined;
+  const llms: ProviderLlms = {};
+  for (const role of AUX_LLM_ROLES) {
+    const slot = normalizeRoleLlm(input[role]);
+    if (slot) llms[role] = slot;
+  }
+  return Object.keys(llms).length ? llms : undefined;
+}
+
+function normalizeRoleLlm(slot?: RoleLlm): RoleLlm | undefined {
+  if (!slot || typeof slot !== "object") return undefined;
+  const model = slot.model?.trim() ?? "";
+  const pricing = normalizeSavedPricing(slot.pricing);
+  if (!model && !pricing) return undefined;
+  return {
+    ...(model ? { model } : {}),
+    ...(pricing ? { pricing } : {}),
+  };
+}
+
+function parseProviderPricing(
+  fields: { input?: string; cacheInput?: string; output?: string },
+  fallback?: ProviderPricing,
+): ProviderPricing | undefined {
+  const input = parseYuanField(fields.input, fallback?.input);
+  const output = parseYuanField(fields.output, fallback?.output);
+  const cacheInput = parseYuanField(fields.cacheInput, fallback?.cacheInput);
+  if (input === undefined && output === undefined) return undefined;
+  if (input === undefined || output === undefined) {
+    throw new Error("自设定价需要同时填输入和输出（人民币 / 百万 token）；缓存输入可空。用 - 表示跟 models.dev");
+  }
+  return {
+    input,
+    output,
+    ...(cacheInput !== undefined ? { cacheInput } : {}),
+  };
+}
+
+function parseYuanField(raw: string | undefined, fallback?: number) {
+  const text = (raw ?? "").trim();
+  if (!text) return fallback;
+  if (text === "-" || text.toLowerCase() === "auto") return undefined;
+  const n = Number(text);
+  if (!Number.isFinite(n) || n < 0) throw new Error("单价必须是 ≥ 0 的数字，单位是人民币 / 百万 token");
+  return n;
+}
+
+function normalizeSavedPricing(pricing?: ProviderPricing): ProviderPricing | undefined {
+  if (!pricing || typeof pricing !== "object") return undefined;
+  if (!Number.isFinite(pricing.input) || pricing.input < 0) return undefined;
+  if (!Number.isFinite(pricing.output) || pricing.output < 0) return undefined;
+  return {
+    input: pricing.input,
+    output: pricing.output,
+    ...(pricing.cacheInput !== undefined && pricing.cacheInput >= 0 ? { cacheInput: pricing.cacheInput } : {}),
   };
 }
 
