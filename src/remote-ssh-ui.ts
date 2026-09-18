@@ -9,7 +9,9 @@ import {
   type SshSession,
 } from "./connect.js";
 import { useColor } from "./markdown.js";
-import { restoreTerminal } from "./prompt.js";
+import { printErr } from "./display.js";
+import { stopLoadUi } from "./load-ui.js";
+import { drainStdin, restoreTerminal, setQuitBlocked } from "./prompt.js";
 import { findSshHost, matchSshHosts, parseSshDestination, rememberSshHost } from "./ssh-history.js";
 import { isForcedQuit } from "./remote-client.js";
 import { parentDir, normalizeAbsPath } from "./remote-install.js";
@@ -19,9 +21,13 @@ const RESET = "\x1b[0m";
 const DIM = "\x1b[2m";
 const BOLD = "\x1b[1m";
 const CYAN = "\x1b[36m";
-const CLEAR = "\x1b[2J\x1b[H";
+const HOME = "\x1b[H";
+const ERASE_DOWN = "\x1b[J";
+const VIEWPORT_CLEAR = "\x1b[H\x1b[2J";
 const HIDE = "\x1b[?25l";
 const SHOW = "\x1b[?25h";
+const ALT_ENTER = "\x1b[?1049h";
+const ALT_LEAVE = "\x1b[?1049l";
 export type RemoteSshFocus = "host" | "user" | "auth" | "secret";
 export type RemoteSshPhase = "form" | "pick" | "path" | "install";
 
@@ -218,16 +224,37 @@ function prevFocus(focus: RemoteSshFocus): RemoteSshFocus {
 
 export function formatRemoteSshScreen(view: RemoteSshView, opts?: { cols?: number; rows?: number; color?: boolean }) {
   const cols = Math.max(48, opts?.cols ?? 80);
-  const rows = Math.max(16, opts?.rows ?? 24);
+  const rows = Math.max(8, opts?.rows ?? 24);
   const color = opts?.color ?? false;
-  const formHeight = Math.max(10, Math.floor(rows / 2));
-  const logHeight = Math.max(6, rows - formHeight);
+  const formHeight = Math.max(5, Math.min(Math.floor(rows / 2), rows - 5));
+  const logHeight = rows - formHeight;
   const inner = cols - 4;
-  const form = view.phase === "pick" || view.phase === "path" ? workspaceLines(view, inner, color) : formLines(view, inner, color);
-  const logs = logLines(view, inner, logHeight - 2, color);
+  const form =
+    view.phase === "pick" || view.phase === "path"
+      ? workspaceLines(view, inner, color)
+      : view.phase === "install"
+        ? installLines(view, inner, color)
+        : formLines(view, inner, color);
+  const logs = logLines(view, inner, Math.max(1, logHeight - 2), color);
   const top = drawBox("/remote-ssh", form, cols, formHeight, color);
   const bottom = drawBox("日志", logs, cols, logHeight, color);
-  return `${top}\n${bottom}`;
+  const lines = `${top}\n${bottom}`.split("\n");
+  while (lines.length < rows) lines.push("");
+  return lines.slice(0, rows).join("\n");
+}
+
+function installLines(view: RemoteSshView, inner: number, color: boolean) {
+  const workspace = selectedWorkspace(view);
+  return [
+    "正在把 worker 装到对方机器，装完会进远程会话。",
+    "",
+    `主机    ${view.user}@${view.host}`,
+    workspace ? `工作区  ${workspace}` : "",
+    "",
+    dim("安装时密码不再显示。不要按键，等握手完成。", color),
+  ]
+    .filter((line, index) => line || index === 0)
+    .map((line) => clip(line, inner));
 }
 
 function formLines(view: RemoteSshView, inner: number, color: boolean) {
@@ -402,13 +429,36 @@ function viewLogger(view: RemoteSshView, redraw: () => void): ConnectLogger {
   };
 }
 
-function paintScreen(view: RemoteSshView) {
+function paintOverlay(view: RemoteSshView, overlay: { open: boolean }) {
+  if (!overlay.open) return;
   const cols = output.columns ?? 80;
   const rows = output.rows ?? 24;
-  output.write(`${HIDE}${CLEAR}${formatRemoteSshScreen(view, { cols, rows, color: useColor() })}`);
+  const frame = formatRemoteSshScreen(view, { cols, rows, color: useColor() });
+  output.write(`${HIDE}${HOME}${frame}${ERASE_DOWN}`);
 }
 
-export async function runRemoteSshCommand(target = "") {
+function enterRemoteSshUi(overlay: { open: boolean }) {
+  overlay.open = true;
+  if (input.isTTY) input.setRawMode(true);
+  input.resume();
+  output.write(`${ALT_ENTER}${HIDE}`);
+}
+
+function leaveRemoteSshUi(overlay: { open: boolean }, opts?: { clearViewport?: boolean }) {
+  const wasOpen = overlay.open;
+  overlay.open = false;
+  if (wasOpen) output.write(`${SHOW}${ALT_LEAVE}`);
+  if (opts?.clearViewport) output.write(VIEWPORT_CLEAR);
+  restoreTerminal();
+}
+
+function resumeRemoteSshRaw() {
+  drainStdin();
+  if (input.isTTY) input.setRawMode(true);
+  input.resume();
+}
+
+export async function runRemoteSshCommand(target = ""): Promise<"sshquit" | undefined> {
   if (!input.isTTY || !output.isTTY) {
     output.write("请在 TTY 里使用 /remote-ssh，或：socode connect user@host:/abs/path\n");
     return;
@@ -422,9 +472,11 @@ export async function runRemoteSshCommand(target = "") {
       : "填写对方 IP、用户名，再选密码或 SSH 密钥。tab 可补全历史主机。",
   });
   let session: SshSession | undefined;
-  const redraw = () => paintScreen(view);
-  const log = viewLogger(view, redraw);
-  paintScreen(view);
+  const overlay = { open: false };
+  const paint = () => paintOverlay(view, overlay);
+  const log = viewLogger(view, paint);
+  enterRemoteSshUi(overlay);
+  paint();
 
   try {
     while (true) {
@@ -437,28 +489,25 @@ export async function runRemoteSshCommand(target = "") {
       if (action === "connect") {
         const started = await beginSession(view, log);
         session = started.session;
-        if (!started.ok) {
-          paintScreen(view);
-          continue;
-        }
-        paintScreen(view);
+        resumeRemoteSshRaw();
+        paint();
         continue;
       }
       if (action === "enter-dir") {
         if (!session) {
           log.err("还没有 SSH 会话");
-          paintScreen(view);
+          paint();
           continue;
         }
         const item = workspacePickItems(view)[view.dirIndex];
         if (!item || item.kind === "path") {
           view.phase = "path";
-          paintScreen(view);
+          paint();
           continue;
         }
         if (item.kind === "cwd") {
           log.info("已经在这个目录。用 → 进入子目录，enter 选定当前目录。");
-          paintScreen(view);
+          paint();
           continue;
         }
         try {
@@ -466,18 +515,19 @@ export async function runRemoteSshCommand(target = "") {
         } catch (error) {
           log.err(error instanceof Error ? error.message : String(error));
         }
-        paintScreen(view);
+        resumeRemoteSshRaw();
+        paint();
         continue;
       }
       if (action === "parent") {
         if (!session) {
           log.err("还没有 SSH 会话");
-          paintScreen(view);
+          paint();
           continue;
         }
         if (!view.cwd || view.cwd === "/") {
           log.info("已经在根目录");
-          paintScreen(view);
+          paint();
           continue;
         }
         try {
@@ -485,23 +535,24 @@ export async function runRemoteSshCommand(target = "") {
         } catch (error) {
           log.err(error instanceof Error ? error.message : String(error));
         }
-        paintScreen(view);
+        resumeRemoteSshRaw();
+        paint();
         continue;
       }
       if (action === "pick") {
         const path = selectedWorkspace(view);
         if (!path) {
           view.phase = "path";
-          paintScreen(view);
+          paint();
           continue;
         }
         if (!session) {
           log.err("还没有 SSH 会话");
-          paintScreen(view);
+          paint();
           continue;
         }
         view.phase = "install";
-        paintScreen(view);
+        paint();
         rememberSshHost({
           user: view.user,
           host: view.host,
@@ -510,29 +561,37 @@ export async function runRemoteSshCommand(target = "") {
           lastWorkspace: path,
         });
         try {
-          await attachRemoteWorker(session, path, {
+          const attached = await attachRemoteWorker(session, path, {
             log,
             beforeRepl: () => {
-              restoreTerminal();
-              output.write(`${SHOW}${CLEAR}`);
+              setQuitBlocked(true);
+              stopLoadUi();
+              drainStdin();
+              leaveRemoteSshUi(overlay, { clearViewport: true });
             },
           });
+          return attached.sshQuit ? "sshquit" : undefined;
         } catch (error) {
           if (isForcedQuit(error)) return;
+          stopLoadUi();
+          if (!overlay.open) {
+            restoreTerminal();
+            printErr(error);
+            return;
+          }
           view.phase = "pick";
           view.confirmPath = "";
+          drainStdin();
           log.err(error instanceof Error ? error.message : String(error));
-          paintScreen(view);
+          paint();
           continue;
         }
-        return;
       }
-      paintScreen(view);
+      paint();
     }
   } finally {
     session?.close();
-    restoreTerminal();
-    output.write(`${SHOW}\n`);
+    leaveRemoteSshUi(overlay);
   }
 }
 
@@ -611,21 +670,39 @@ async function beginSession(view: RemoteSshView, log: ConnectLogger) {
   }
 }
 
-function readKey() {
-  return new Promise<string>((resolve, reject) => {
-    input.setRawMode(true);
-    input.resume();
+function readChunk(timeoutMs?: number) {
+  return new Promise<string | null>((resolve, reject) => {
+    const timer =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            cleanup();
+            resolve(null);
+          }, timeoutMs);
     const onData = (chunk: Buffer | string) => {
-      input.off("data", onData);
-      input.off("error", onError);
+      cleanup();
       resolve(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
     };
     const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
       input.off("data", onData);
       input.off("error", onError);
-      reject(error);
     };
     input.once("data", onData);
     input.once("error", onError);
   });
+}
+
+async function readKey() {
+  if (input.isTTY) input.setRawMode(true);
+  input.resume();
+  const first = await readChunk();
+  if (first == null) return "";
+  if (first !== "\x1b") return first;
+  const rest = await readChunk(40);
+  return rest ? `${first}${rest}` : first;
 }

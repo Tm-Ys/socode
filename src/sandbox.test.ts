@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -254,12 +254,19 @@ describe("Codex-style workspace-write sandbox", () => {
         assert.match(blob, /deny network\*/);
         assert.match(blob, /\/tmp/);
         assert.match(blob, /\.git/);
+        assert.match(blob, /\/dev\/null/);
+        assert.match(blob, /file-write\*/);
         assert.doesNotMatch(blob, /allow network-outbound\)/);
       }
       if (process.platform === "linux") {
-        assert.equal(spec.file, "/usr/bin/bwrap");
-        assert.equal(spec.args.includes("--unshare-net"), true);
-        assert.equal(spec.args.includes("/tmp"), true);
+        if (existsSync("/usr/bin/bwrap")) {
+          assert.equal(spec.file, "/usr/bin/bwrap");
+          assert.equal(spec.args.includes("--unshare-net"), true);
+          assert.equal(spec.args.includes("/tmp"), true);
+        } else {
+          assert.equal(spec.file, "/bin/bash");
+          assert.equal(spec.unavailable, undefined);
+        }
       }
     } finally {
       rmSync(root, { recursive: true, force: true });

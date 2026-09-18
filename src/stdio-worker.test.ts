@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
+import { createConnection } from "node:net";
+import { setTimeout as sleep } from "node:timers/promises";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { TurnAborted } from "./abort.js";
-import { pairedPeers } from "./jsonrpc-peer.js";
+import { JsonRpcPeer, pairedPeers } from "./jsonrpc-peer.js";
 import { emptyProvider } from "./provider.js";
 import { payloadHasSecrets, SOCODE_REMOTE_PROTOCOL } from "./remote-protocol.js";
-import { attachWorkerServer, createRpcHost } from "./stdio-worker.js";
+import { waitForPushedHello } from "./remote-client.js";
+import { attachWorkerServer, createRpcHost, parseListenBind, runWorkerListen, workerHelloPayload } from "./stdio-worker.js";
 import { openLocalWorker } from "./worker.js";
 
 const provider = {
@@ -98,6 +101,38 @@ describe("stdio worker protocol", () => {
     }
   });
 
+  it("pushes hello so a client can handshake without writing stdin", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "socode-rpc-"));
+    const { left: client, right: server } = pairedPeers();
+    const worker = await openLocalWorker({
+      host: createRpcHost(server),
+      workspace: dir,
+      provider,
+      mode: "ask",
+      agentEnabled: false,
+      skipSkills: true,
+      skipTitle: true,
+      maxMessages: 20,
+      maxSteps: 8,
+      stream: false,
+      complete: async () => ({ content: "ok", toolCalls: [] }),
+    });
+    attachWorkerServer(server, async () => worker);
+    try {
+      const hello = waitForPushedHello(client);
+      server.notify("hello", workerHelloPayload(worker));
+      const got = await hello;
+      assert.equal(got.protocol, SOCODE_REMOTE_PROTOCOL);
+      assert.equal(got.workspace, dir);
+      assert.equal(payloadHasSecrets(got), null);
+    } finally {
+      await worker.close();
+      client.close();
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the file unchanged when Ask denies, then undoes an allowed write", async () => {
     const dir = mkdtempSync(join(tmpdir(), "socode-rpc-"));
     const file = join(dir, "note.txt");
@@ -159,6 +194,51 @@ describe("stdio worker protocol", () => {
       assert.equal(result.aborted, true);
     } finally {
       await pair.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("listen worker", () => {
+  it("parses loopback binds only", () => {
+    assert.deepEqual(parseListenBind("127.0.0.1:0"), { host: "127.0.0.1", port: 0 });
+    assert.equal("error" in parseListenBind("0.0.0.0:80"), true);
+    assert.equal("error" in parseListenBind("127.0.0.1"), true);
+  });
+
+  it("pushes hello over a loopback socket", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "socode-listen-"));
+    const portFile = join(dir, "rpc.port");
+    const running = runWorkerListen({
+      workspace: dir,
+      flags: { "no-stream": "true", "no-agent": "true" },
+      provider,
+      bind: "127.0.0.1:0",
+      portFile,
+      skipSkills: true,
+      skipTitle: true,
+    });
+    try {
+      let port = 0;
+      for (let i = 0; i < 50; i++) {
+        try {
+          port = Number(readFileSync(portFile, "utf8").trim());
+          if (port > 0) break;
+        } catch {
+          /* not yet */
+        }
+        await sleep(50);
+      }
+      assert.equal(port > 0, true);
+      const socket = createConnection({ host: "127.0.0.1", port });
+      const peer = new JsonRpcPeer(socket, socket);
+      const hello = await waitForPushedHello(peer);
+      assert.equal(hello.protocol, SOCODE_REMOTE_PROTOCOL);
+      assert.equal(hello.workspace, dir);
+      peer.close();
+      socket.end();
+    } finally {
+      await Promise.race([running, sleep(2000)]);
       rmSync(dir, { recursive: true, force: true });
     }
   });

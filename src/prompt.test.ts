@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { clipToWidth, paintPromptStatus, promptStatusLine, visualRows } from "./prompt.js";
+import {
+  clipToWidth,
+  confirmQuit,
+  paintPromptStatus,
+  promptStatusLine,
+  setQuitBlocked,
+  takeForcedQuit,
+  visualRows,
+} from "./prompt.js";
 
 describe("slash menu layout", () => {
   it("clips hints to a single terminal row", () => {
@@ -52,6 +60,19 @@ describe("prompt status", () => {
     assert.ok(line.length <= 78);
     assert.ok(line.startsWith("deepseek-flash · medium"));
     assert.ok(line.endsWith("context 0%(4.5K / 1M)"));
+  });
+});
+
+describe("remote quit guard", () => {
+  it("never confirms quit while a remote session is open", () => {
+    setQuitBlocked(true);
+    try {
+      assert.equal(confirmQuit(), false);
+      assert.equal(confirmQuit(), false);
+      assert.equal(takeForcedQuit(), false);
+    } finally {
+      setQuitBlocked(false);
+    }
   });
 });
 

@@ -97,7 +97,7 @@ npx socode
 # 开发时也可以 npm start
 ```
 
-把命令装到 PATH：`npm link`（先 `npm run build`）或 `npm install -g ./socode-0.1.3-fix2.tgz`。
+把命令装到 PATH：`npm link`（先 `npm run build`）或 `npm install -g ./socode-0.1.4.tgz`。
 
 没有保存过 Provider 时，交互式启动会进入向导，写入用户级 `~/.socode/providers.json`（所有工作区、所有对话共用）。也可以用 `--url` / `--api` / `--model` / `--name` 只覆盖本次进程。
 
@@ -169,8 +169,10 @@ Long **不会**在沙箱起不来时退回裸跑；密钥和 `sudo` 仍本地硬
 - `/doctor` 检查 Node、密钥是否已配、sandbox-exec/bwrap、用户目录和工作区会话目录能不能写。启动也可用 `npm start -- --doctor`
 - `/setplan <说明>` 本轮强制按说明调用 `plan` 拆目标，并激活 grill-me 追问
 - `/setworkarea` 空对话时弹出系统文件夹选择器；也可 `/setworkarea /绝对路径`。输入行空着时灰色显示 `on 路径`
-- `/exit` 或 `/quit` 退出
-- `Ctrl+C` 第一次红字提示，再按一次退出
+- `/ssh` Tab 补全为 `/remote-ssh`；`/remote-ssh` 连远端 worker
+- `/sshquit` 远程会话里先删远端注入的 Provider，再断开 SSH，本机开新对话。连着 SSH 时 `/quit` 和 Ctrl+C 不能退出
+- `/exit` 或 `/quit` 退出（仅本机会话）
+- `Ctrl+C` 第一次红字提示，再按一次退出（远程会话无效）
 - 生成中 `Esc` 中止当前轮
 
 ## 工具

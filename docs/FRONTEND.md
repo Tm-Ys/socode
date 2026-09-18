@@ -9,7 +9,7 @@ socode 没有 web 界面。所谓前端就是终端里的这一层 TUI：全是�
 `socode`（或仓库里 `npm start`）后先打一块欢迎框，每次随机抽一条指令说明：
 
 ```
-╭─ socode @ 0.1.3-fix2 presented by Tm-Ys ───────────╮
+╭─ socode @ 0.1.4 presented by Tm-Ys ───────────╮
 │                                               │
 │  你知道吗？输入 / 会按前缀列出命令，Tab 补全。 │
 │                                               │
@@ -141,7 +141,7 @@ Ask 模式下，写文件或跑命令前弹提问，等一个按键：
 
 ## Remote-SSH
 
-`/remote-ssh` 清屏后上下对半：上半填对方 IP、用户名、密码或密钥路径，连上后浏览远端目录（↑↓ 移动，→ 进入，← 返回）。enter 第一次询问「确定选择该目录为工作目录？」，再按一次才进入。主机栏和主提示符里的 `/remote-ssh` 都可用 Tab 补全历史主机（`~/.socode/ssh-hosts.json`，不存密码）。`/remote-ssh user@host` 会预填用户和地址，密码仍要手输。下半是连接日志，成功绿色、失败红色。连上之后输入行占位变成 `on ssh@ip workspace ~/example`；会把本机 Provider 注入到远端会话文件，断开前删掉。没配模型时状态行显示 `未配置模型`。也可以继续用 CLI：`socode connect user@host:/abs/path`。实现：`src/remote-ssh-ui.ts`、`src/connect.ts`、`src/ssh-history.ts`。
+`/remote-ssh` 清屏后上下对半：上半填对方 IP、用户名、密码或密钥路径，连上后浏览远端目录（↑↓ 移动，→ 进入，← 返回）。enter 第一次询问「确定选择该目录为工作目录？」，再按一次才进入。主机栏和主提示符里的 `/remote-ssh` 都可用 Tab 补全历史主机（`~/.socode/ssh-hosts.json`，不存密码）。打 `/ssh` 再 Tab 会补成 `/remote-ssh`；`/ssh user@host` 与 `/remote-ssh user@host` 一样预填。密码仍要手输。下半是连接日志，成功绿色、失败红色。连上之后输入行占位变成 `on ssh@ip workspace ~/example`；会把本机 Provider 注入到远端会话文件。远程会话里 `/quit` 和 Ctrl+C 不能退出，必须 `/sshquit`：先删远端 `providers.json`，再断开 SSH，本机开新对话。没配模型时状态行显示 `未配置模型`。也可以继续用 CLI：`socode connect user@host:/abs/path`。实现：`src/remote-ssh-ui.ts`、`src/connect.ts`、`src/ssh-history.ts`。
 
 ## 子代理
 

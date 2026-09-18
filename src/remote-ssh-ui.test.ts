@@ -30,6 +30,7 @@ describe("remote-ssh screen", () => {
     assert.match(text, /日志/);
     assert.match(text, /ok .*密码登录成功/);
     assert.match(text, /err .*工作区不存在/);
+    assert.equal(text.split("\n").length, 24);
     const green = paintConnectLog("ok", "握手成功", true);
     const red = paintConnectLog("err", "失败", true);
     assert.match(green, /\x1b\[32m/);
@@ -89,5 +90,24 @@ describe("remote-ssh screen", () => {
       else process.env.SOCODE_HOME = prev;
       rmSync(home, { recursive: true, force: true });
     }
+  });
+
+  it("hides the password while installing the remote worker", () => {
+    const view = emptyRemoteSshView();
+    view.host = "106.53.55.161";
+    view.user = "root";
+    view.secret = "plain-password";
+    view.phase = "install";
+    view.cwd = "/root/server";
+    view.confirmPath = "/root/server";
+    const text = formatRemoteSshScreen(view, { cols: 72, rows: 20, color: false });
+    assert.match(text, /正在把 worker 装到对方机器/);
+    assert.match(text, /root@106\.53\.55\.161/);
+    assert.match(text, /\/root\/server/);
+    assert.doesNotMatch(text, /plain-password/);
+    assert.doesNotMatch(text, /输入密码/);
+    assert.match(text, /不要按键/);
+    assert.equal(text.split("\n").length, 20);
+    assert.doesNotMatch(text, /\n{3,}/);
   });
 });

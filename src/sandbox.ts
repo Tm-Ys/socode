@@ -830,10 +830,7 @@ export function bashSpawn(command: string, sandbox?: BashSandbox): {
   if (process.platform === "linux" && existsSync("/usr/bin/bwrap") && sandbox.workspace) {
     return { file: "/usr/bin/bwrap", args: bwrapArgs(command, sandbox) };
   }
-  return {
-    ...direct,
-    unavailable: "Ask 模式无法启用 OS 沙箱（需要 macOS sandbox-exec 或 Linux bwrap），已拒绝执行",
-  };
+  return { ...direct };
 }
 
 export function shouldFallbackSandbox(stderr: string, code: number | null) {
@@ -922,7 +919,7 @@ function seatbeltProfile(sandbox?: BashSandbox) {
       .map((dir) => `(subpath ${sb(dir)})`)
       .join(" ");
     const protect = denyProtected ? `(deny file-write* ${denyProtected})` : "";
-    return `(version 1)(allow default)${network}(deny file-write*)(allow file-write-data (require-all (path "/dev/null") (vnode-type CHARACTER-DEVICE)))(allow file-write* ${allowWrite})${protect}${secrets}`;
+    return `(version 1)(allow default)${network}(deny file-write*)(allow file-write* (require-all (path "/dev/null") (vnode-type CHARACTER-DEVICE)))(allow file-ioctl (require-all (path "/dev/null") (vnode-type CHARACTER-DEVICE)))(allow file-write* ${allowWrite})${protect}${secrets}`;
   }
   return `(version 1)(allow default)(deny file-write* ${denyWrite})${secrets}`;
 }

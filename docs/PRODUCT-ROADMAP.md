@@ -2,7 +2,7 @@
 
 本文是对 **socode 现状的产品盘点**，不是实现清单。对照实现以仓库当前代码为准（`src/`、`README.md`、`docs/LONG-MODE.md`、`docs/FRONTEND.md`、`docs/REMOTE.md`）。下文不夸大已有能力，也不把尚未落地的能力写成「已经有了」。
 
-版本锚点：本文按 **0.1.1** 重写能力盘点；**0.1.2**（2026-09-17）补上 Provider 退避重试、思考/工具流的 stable+tail 重绘；**0.1.3** 落地 Remote-SSH；**0.1.3-fix2** 把 Ask/Long bash 收成 Codex workspace-write（可写工作区+`/tmp`、默认断网、`.git` 只读）。此前文本仍写「没有 doctor / 没有 Ask diff / 启动依赖 Postgres」，那些已经落地，不再当缺口立项。
+版本锚点：本文按 **0.1.1** 重写能力盘点；**0.1.2**（2026-09-17）补上 Provider 退避重试、思考/工具流的 stable+tail 重绘；**0.1.3** 落地 Remote-SSH；**0.1.3-fix2** 把 Ask/Long bash 收成 Codex workspace-write（可写工作区+`/tmp`、默认断网、`.git` 只读）；**0.1.4** 稳住 Remote-SSH 会话（listen + `ssh -W`、备用屏、`/ssh` Tab、`/sshquit`）。此前文本仍写「没有 doctor / 没有 Ask diff / 启动依赖 Postgres」，那些已经落地，不再当缺口立项。
 
 ---
 

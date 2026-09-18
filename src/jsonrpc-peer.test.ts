@@ -32,6 +32,14 @@ describe("JsonRpcPeer", () => {
     right.close();
   });
 
+  it("notifies onClose listeners", async () => {
+    const { left, right } = pairedPeers();
+    const closed = new Promise<string>((resolve) => left.onClose((error) => resolve(error.message)));
+    right.close(new Error("gone"));
+    assert.match(await closed, /gone|已关闭/);
+    left.close();
+  });
+
   it("returns method-not-found for unknown requests", async () => {
     const { left, right } = pairedPeers();
     await assert.rejects(left.request("nope"), /未知方法/);

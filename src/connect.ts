@@ -6,27 +6,30 @@ import { stdin as input, stderr } from "node:process";
 import { JsonRpcPeer } from "./jsonrpc-peer.js";
 import { useColor } from "./markdown.js";
 import { dumpProviderStore } from "./provider.js";
-import { handshakeRemote, isForcedQuit, runRemoteRepl } from "./remote-client.js";
+import { isForcedQuit, runRemoteRepl, waitForPushedHello } from "./remote-client.js";
 import {
-  extractScript,
   installNodeScript,
+  killRemoteWorkersScript,
   listWorkspacesScript,
+  parseListenStart,
   parseNodeInstall,
   parseProbe,
   parseWorkspaceList,
   probeScript,
   normalizeAbsPath,
+  replaceRuntimeScript,
   resolveWorkerNode,
+  runtimeEntryReadyScript,
   runtimeRoot,
   scpArgs,
   sessionProviderPath,
   shQuote,
   sshBatchArgs,
   sshDestination,
-  sshExecArgs,
+  sshForwardArgs,
   sshMasterArgs,
+  startListenWorkerScript,
   wipeSessionProviderScript,
-  workerScript,
   type ProbeResult,
   type SshMux,
 } from "./remote-install.js";
@@ -92,6 +95,8 @@ export type SshSession = {
   user: string;
   host: string;
   mux: SshMux;
+  identityFile?: string;
+  password?: string;
   close: () => void;
 };
 
@@ -317,6 +322,7 @@ export async function openSshSession(opts: {
   }
 
   log.info(`连接 ${dest}…`);
+  let password: string | undefined;
   if (identity) {
     log.info(`使用密钥 ${identity}`);
     const keyed = openMaster(dest, controlPath, undefined, { identityFile: identity });
@@ -325,7 +331,8 @@ export async function openSshSession(opts: {
     }
     log.ok(`密钥登录成功 ${dest}`);
   } else if (opts.auth?.preferPassword && opts.auth.password) {
-    await passwordLogin(dest, controlPath, opts.auth.password, log);
+    password = opts.auth.password;
+    await passwordLogin(dest, controlPath, password, log);
   } else {
     log.info("尝试默认公钥…");
     const keyed = openMaster(dest, controlPath);
@@ -333,7 +340,7 @@ export async function openSshSession(opts: {
       log.ok(`公钥登录成功 ${dest}`);
     } else {
       log.info("公钥不可用，改用密码登录…");
-      const password = opts.auth?.password || (await promptSshPassword(dest));
+      password = opts.auth?.password || (await promptSshPassword(dest));
       await passwordLogin(dest, controlPath, password, log);
     }
   }
@@ -343,6 +350,8 @@ export async function openSshSession(opts: {
     user: opts.user,
     host: opts.host,
     mux: { controlPath, batch: true, master: "no" },
+    identityFile: identity || undefined,
+    password,
     close: () => closeMaster(dest, controlPath),
   };
 }
@@ -385,17 +394,21 @@ async function ensureRemoteNode(dest: string, probe: ProbeResult, mux: SshMux, l
 }
 
 function waitForHello(child: ChildProcess, peer: JsonRpcPeer, stamp: string) {
-  return new Promise<Awaited<ReturnType<typeof handshakeRemote>>>((resolve, reject) => {
+  return new Promise<Awaited<ReturnType<typeof waitForPushedHello>>>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("远端 worker 握手超时")), 60_000);
     const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
       clearTimeout(timer);
       reject(new Error(`远端 worker 退出 (${code ?? signal ?? "?"})`));
     };
     child.once("exit", onExit);
-    handshakeRemote(peer, stamp).then(
+    waitForPushedHello(peer).then(
       (hello) => {
         clearTimeout(timer);
         child.off("exit", onExit);
+        if (stamp && hello.runtimeStamp && hello.runtimeStamp !== stamp) {
+          reject(new Error(`远端 runtime 不匹配: ${hello.runtimeStamp} ≠ ${stamp}`));
+          return;
+        }
         resolve(hello);
       },
       (error) => {
@@ -476,33 +489,58 @@ export async function attachRemoteWorker(
   if (!probe.workspaceOk) throw new Error(`远端工作区不存在或不是目录: ${workspace}`);
   log.ok(`工作区可用 ${workspace}`);
   const nodePath = await ensureRemoteNode(session.dest, probe, session.mux, log);
-  if (probe.runtimeStamp === packed.stamp) {
-    log.ok(`使用缓存 runtime ${packed.stamp}`);
+  const entryCheck = sshRun(session.dest, runtimeEntryReadyScript(probe.home, packed.stamp), session.mux);
+  const entryReady = probe.runtimeStamp === packed.stamp && /RUNTIME_ENTRY ok/.test(entryCheck.stdout);
+  if (entryReady) {
+    log.ok(`远端 runtime ${packed.stamp} 已是本机这份`);
+    sshRun(session.dest, killRemoteWorkersScript(probe.home), session.mux);
   } else {
-    log.info(`上传 runtime ${packed.stamp}…`);
+    if (probe.runtimeStamp && probe.runtimeStamp !== packed.stamp) {
+      log.info(`远端 runtime ${probe.runtimeStamp} 过期，摧毁后安装 ${packed.stamp}`);
+    } else {
+      log.info(`上传 runtime ${packed.stamp}…`);
+    }
     const remoteTar = `${probe.home}/.socode-server/runtime/${runtimeTarName(packed.stamp)}`;
     const mkdir = sshRun(session.dest, `mkdir -p ${shQuote(`${probe.home}/.socode-server/runtime`)}`, session.mux, { log });
     if (mkdir.code !== 0) throw new Error(mkdir.stderr || "无法创建 ~/.socode-server");
     const copied = scpFile(packed.tarPath, session.dest, remoteTar, session.mux);
     if (copied.code !== 0) throw new Error(copied.stderr || `scp 失败: ${packed.tarPath}`);
-    const extracted = sshRun(session.dest, extractScript(probe.home, packed.stamp, runtimeTarName(packed.stamp)), session.mux, { log });
-    if (extracted.code !== 0) throw new Error(extracted.stderr || "解压 socode-runtime 失败");
-    log.ok(`runtime ${packed.stamp} 已安装`);
+    const replaced = sshRun(
+      session.dest,
+      replaceRuntimeScript(probe.home, packed.stamp, runtimeTarName(packed.stamp)),
+      session.mux,
+      { log },
+    );
+    if (replaced.code !== 0) throw new Error(replaced.stderr || replaced.stdout || "安装 socode-runtime 失败");
+    log.ok(`runtime ${packed.stamp} 已覆盖安装`);
   }
   let remoteHome = "";
   let child: ChildProcess | undefined;
   let peer: JsonRpcPeer | undefined;
+  let workerPid = 0;
   try {
     remoteHome = probe.home;
     const injected = injectSessionProvider(session, probe.home, log);
-    const launch = workerScript({
-      nodePath,
-      runtimeRoot: runtimeRoot(probe.home, packed.stamp),
-      workspace,
-      env: injected ? { SOCODE_PROVIDER_STORE: sessionProviderPath(probe.home) } : undefined,
-    });
     log.info("启动远端 worker…");
-    child = spawn("ssh", sshExecArgs(session.dest, launch, session.mux), {
+    const started = sshRun(
+      session.dest,
+      startListenWorkerScript({
+        nodePath,
+        runtimeRoot: runtimeRoot(probe.home, packed.stamp),
+        workspace,
+        home: probe.home,
+        env: injected ? { SOCODE_PROVIDER_STORE: sessionProviderPath(probe.home) } : undefined,
+      }),
+      session.mux,
+      { log },
+    );
+    const listen = parseListenStart(started.stdout);
+    if ("error" in listen) {
+      throw new Error(`${listen.error}\nstderr=${started.stderr}\nstdout=${started.stdout}`);
+    }
+    workerPid = listen.pid;
+    log.ok(`远端 worker pid ${listen.pid} 听 127.0.0.1:${listen.port}`);
+    child = spawn("ssh", sshForwardArgs(session.dest, listen.port, session.mux), {
       env: nodeWorkerEnv(),
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -524,17 +562,29 @@ export async function attachRemoteWorker(
     log.ok(`握手成功 protocol=${hello.protocol} node=${hello.node} workspace=${hello.workspace}`);
     if (opts?.handshakeOnly) {
       await peer.request("shutdown", {}).catch(() => undefined);
-      return hello;
+      return { hello };
     }
     opts?.beforeRepl?.();
     replStarted = true;
-    await runRemoteRepl(peer, hello, { host: session.host, home: probe.home });
-    log.info("远程会话已结束");
-    return hello;
+    const ended = await runRemoteRepl(peer, hello, { host: session.host, home: probe.home });
+    if (ended === "sshquit") log.info("已 /sshquit，正在清远端 Provider 并断开");
+    else log.info("远程会话已结束");
+    return { hello, sshQuit: ended === "sshquit" };
   } finally {
     peer?.close();
     if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
     if (remoteHome) {
+      try {
+        sshRun(
+          session.dest,
+          workerPid > 0
+            ? `kill ${workerPid} 2>/dev/null || true; ${killRemoteWorkersScript(remoteHome)}`
+            : killRemoteWorkersScript(remoteHome),
+          session.mux,
+        );
+      } catch {
+        /* still wipe provider */
+      }
       try {
         wipeSessionProvider(session, remoteHome, log);
       } catch (error) {

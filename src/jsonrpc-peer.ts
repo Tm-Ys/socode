@@ -26,6 +26,11 @@ export class JsonRpcPeer {
   private handlers = new Map<string, JsonRpcHandler>();
   private closed = false;
   private fallback?: JsonRpcHandler;
+  private closeListeners = new Set<(error: Error) => void>();
+
+  get isClosed() {
+    return this.closed;
+  }
 
   constructor(
     private readonly input: NodeJS.ReadableStream,
@@ -46,6 +51,18 @@ export class JsonRpcPeer {
 
   fallbackHandle(fn: JsonRpcHandler) {
     this.fallback = fn;
+  }
+
+  onClose(fn: (error: Error) => void) {
+    if (this.closed) {
+      const fail = new Error("JSON-RPC 连接已关闭");
+      queueMicrotask(() => fn(fail));
+      return () => undefined;
+    }
+    this.closeListeners.add(fn);
+    return () => {
+      this.closeListeners.delete(fn);
+    };
   }
 
   async request(method: string, params?: unknown) {
@@ -84,6 +101,15 @@ export class JsonRpcPeer {
     const fail = error ?? new Error("JSON-RPC 连接已关闭");
     for (const pending of this.pending.values()) pending.reject(fail);
     this.pending.clear();
+    const listeners = [...this.closeListeners];
+    this.closeListeners.clear();
+    for (const fn of listeners) {
+      try {
+        fn(fail);
+      } catch {
+        // ignore
+      }
+    }
     try {
       this.output.end();
     } catch {

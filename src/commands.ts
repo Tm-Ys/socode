@@ -33,6 +33,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/setplan", hint: "强制本轮按说明建 Plan，并激活 grill-me" },
   { name: "/setworkarea", hint: "空对话时设置工作区（选文件夹或绝对路径）" },
   { name: "/remote-ssh", hint: "Remote-SSH：本机显示器 + 远端 worker" },
+  { name: "/ssh", hint: "Tab 到 /remote-ssh" },
+  { name: "/sshquit", hint: "清掉远端 Provider，断开 SSH，回到本机新对话" },
   { name: "/undo", hint: "撤回最近一轮 write/edit/delete（落盘，不管 bash，不是 rewind）" },
   { name: "/doctor", hint: "检查 Node、密钥、沙箱、目录是否可写" },
   { name: "/exit", hint: "退出" },
@@ -75,6 +77,11 @@ export function resolveCommand(input: string) {
 }
 
 export function completeCommand(input: string) {
+  if (input === "/ssh" || input === "/ssh ") return "/remote-ssh";
+  if (isSshAlias(input)) {
+    const mapped = mapSshAliasToRemote(input);
+    return completeRemoteSsh(mapped) ?? mapped;
+  }
   const ssh = completeRemoteSsh(input);
   if (ssh) return ssh;
   const matches = matchCommands(input);
@@ -82,6 +89,15 @@ export function completeCommand(input: string) {
   if (matches.length === 1) return matches[0].name;
   const prefix = longestCommonPrefix(matches.map((item) => item.name));
   return prefix.length > input.length ? prefix : input;
+}
+
+function isSshAlias(input: string) {
+  return input === "/ssh" || (input.startsWith("/ssh ") && !input.startsWith("/sshquit"));
+}
+
+function mapSshAliasToRemote(input: string) {
+  if (input === "/ssh" || input === "/ssh ") return "/remote-ssh";
+  return `/remote-ssh ${input.slice("/ssh ".length)}`;
 }
 
 function sshHistoryCommands(): SlashCommand[] {
@@ -121,13 +137,18 @@ function completeRemoteSsh(input: string) {
   return prefix.length > input.length ? prefix : matches[0];
 }
 
+const REMOTE_SSH_NAMES = ["/remote-ssh", "/ssh"] as const;
+
 export function parseRemoteSshCommand(input: string) {
   const trimmed = input.trim();
-  if (trimmed === "/remote-ssh") return { ok: true as const, target: "" };
-  if (!trimmed.startsWith("/remote-ssh ")) return null;
-  const rest = trimmed.slice("/remote-ssh ".length).trim();
-  if (!rest) return { ok: true as const, target: "" };
-  const parsed = parseSshDestination(rest);
-  if (!parsed?.host) return { ok: false as const, error: "用法: /remote-ssh 或 /remote-ssh user@host" };
-  return { ok: true as const, target: rest };
+  for (const name of REMOTE_SSH_NAMES) {
+    if (trimmed === name) return { ok: true as const, target: "" };
+    if (!trimmed.startsWith(`${name} `)) continue;
+    const rest = trimmed.slice(name.length + 1).trim();
+    if (!rest) return { ok: true as const, target: "" };
+    const parsed = parseSshDestination(rest);
+    if (!parsed?.host) return { ok: false as const, error: `用法: ${name} 或 ${name} user@host` };
+    return { ok: true as const, target: rest };
+  }
+  return null;
 }

@@ -6,20 +6,22 @@ socode 是 **本机 Unix 上的终端 Agent**：工作区、bash、OS 沙箱、�
 
 ---
 
-## 现状（0.1.3-fix2）
+## 现状（0.1.4）
 
 **协议 B 已落地**：本机是显示器，远端跑 worker。
 
 ```bash
 # 会话里
+/ssh
 /remote-ssh
 /remote-ssh user@host
+/sshquit   # 先删远端 Provider，再断开，本机开新对话
 
 # CLI
 socode connect user@host:/abs/path
 ```
 
-连上后注入 `socode-runtime`；远端若无 Node 22 会用对方网络下载。本机 Provider 拷到远端会话文件，断开前删除。主机历史在 `~/.socode/ssh-hosts.json`（不存密码）。实现见 [`REMOTE-B.md`](./REMOTE-B.md)。
+连上后注入 `socode-runtime`；远端若无 Node 22 会用对方网络下载。本机 Provider 拷到远端会话文件。远程会话里不能 `/quit` / Ctrl+C，必须 `/sshquit` 先删这份文件再断开。主机历史在 `~/.socode/ssh-hosts.json`（不存密码）。实现见 [`REMOTE-B.md`](./REMOTE-B.md)。
 
 没有 `socode ssh`（那是 A：`ssh -t` 整进程包装），没有 `socode serve`，没有把本机仓库同步到远端。
 

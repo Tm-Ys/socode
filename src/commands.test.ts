@@ -35,4 +35,20 @@ describe("remote-ssh command complete", () => {
       assert.equal(parsed && parsed.ok && parsed.target, "root@10.0.0.1");
     });
   });
+
+  it("tabs /ssh onto /remote-ssh and parses the same target", () => {
+    withHome(() => {
+      rememberSshHost({ user: "root", host: "10.0.0.1" });
+      assert.equal(completeCommand("/ssh"), "/remote-ssh");
+      assert.equal(completeCommand("/ssh r"), "/remote-ssh root@10.0.0.1");
+      assert.equal(
+        matchCommands("/ssh").some((item) => item.name === "/ssh"),
+        true,
+      );
+      assert.equal(matchCommands("/sshquit")[0]?.name, "/sshquit");
+      const parsed = parseRemoteSshCommand("/ssh root@10.0.0.1");
+      assert.equal(parsed && parsed.ok && parsed.target, "root@10.0.0.1");
+      assert.equal(parseRemoteSshCommand("/sshquit"), null);
+    });
+  });
 });

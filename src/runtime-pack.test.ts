@@ -160,14 +160,6 @@ describe("packRuntime", () => {
     child.stdout?.setEncoding("utf8");
     child.stderr?.on("data", (chunk) => stderr.push(String(chunk)));
     child.stdout?.on("data", (chunk) => stdout.push(String(chunk)));
-    child.stdin?.write(
-      `${JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: { protocol: SOCODE_REMOTE_PROTOCOL, clientVersion: "test" },
-      })}\n`,
-    );
     try {
       const hello = await new Promise<Record<string, unknown>>((resolve, reject) => {
         const timer = setTimeout(() => {
@@ -189,20 +181,33 @@ describe("packRuntime", () => {
           );
         });
         const onData = () => {
-          const line = stdout.join("").split("\n").find((item) => item.trim().startsWith("{"));
-          if (!line) return;
-          try {
-            const parsed = JSON.parse(line) as { result?: Record<string, unknown>; error?: { message?: string } };
-            if (parsed.error) {
-              fail(new Error(parsed.error.message || "rpc error"));
-              return;
+          for (const line of stdout.join("").split("\n")) {
+            const text = line.trim();
+            if (!text.startsWith("{")) continue;
+            try {
+              const parsed = JSON.parse(text) as {
+                method?: string;
+                params?: Record<string, unknown>;
+                result?: Record<string, unknown>;
+                error?: { message?: string };
+              };
+              if (parsed.error) {
+                fail(new Error(parsed.error.message || "rpc error"));
+                return;
+              }
+              if (parsed.method === "hello" && parsed.params) {
+                clearTimeout(timer);
+                resolve(parsed.params);
+                return;
+              }
+              if (parsed.result) {
+                clearTimeout(timer);
+                resolve(parsed.result);
+                return;
+              }
+            } catch (error) {
+              fail(error instanceof Error ? error : new Error(String(error)));
             }
-            if (parsed.result) {
-              clearTimeout(timer);
-              resolve(parsed.result);
-            }
-          } catch (error) {
-            fail(error instanceof Error ? error : new Error(String(error)));
           }
         };
         child.stdout?.on("data", onData);

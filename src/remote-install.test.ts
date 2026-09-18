@@ -23,6 +23,11 @@ import {
   wrapRemoteScript,
   sessionProviderPath,
   sshExecArgs,
+  sshWorkerArgs,
+  sshForwardArgs,
+  startListenWorkerScript,
+  parseListenStart,
+  replaceRuntimeScript,
   wipeSessionProviderScript,
   workerScript,
 } from "./remote-install.js";
@@ -127,8 +132,45 @@ describe("remote scripts", () => {
     assert.match(wipeSessionProviderScript("/home/me"), /rm -f /);
     assert.match(wipeSessionProviderScript("/home/me"), /session\/providers\.json/);
     const execArgs = sshExecArgs("me@box", launch);
-    assert.equal(execArgs.at(-1), launch);
+    assert.equal(execArgs.at(-1), `bash --noprofile --norc -c ${shQuote(launch)}`);
+    assert.match(execArgs.at(-1) ?? "", /exec env SOCODE_PROVIDER_STORE=/);
     assert.equal(execArgs.includes("-T"), true);
+    const workerArgs = sshWorkerArgs("me@box", launch, { password: true });
+    assert.equal(workerArgs.includes("ControlPath=none"), true);
+    assert.equal(workerArgs.includes("ControlMaster=no"), true);
+    assert.equal(workerArgs.some((arg) => arg.startsWith("ControlPath=/")), false);
+    assert.equal(workerArgs.includes("BatchMode=yes"), false);
+    assert.equal(workerArgs.includes("PreferredAuthentications=password,keyboard-interactive"), true);
+    assert.equal(workerArgs.at(-1), `bash --noprofile --norc -c ${shQuote(launch)}`);
+    const workerKeyed = sshWorkerArgs("me@box", launch, { identityFile: "/tmp/id" });
+    assert.equal(workerKeyed.includes("BatchMode=yes"), true);
+    assert.equal(workerKeyed.includes("/tmp/id"), true);
+    const forward = sshForwardArgs("me@box", 43123, { controlPath: "/tmp/mux", batch: true, master: "no" });
+    assert.equal(forward.includes("-W"), true);
+    assert.equal(forward.includes("127.0.0.1:43123"), true);
+    assert.equal(forward.includes("ControlPath=/tmp/mux"), true);
+    const replaced = replaceRuntimeScript("/root", "0.1.3-fix2+abc", "socode-runtime-0.1.3-fix2+abc.tar.gz");
+    assert.match(replaced, /pkill -f/);
+    assert.match(replaced, /rm -rf/);
+    assert.match(replaced, /SOCODE_RUNTIME_REPLACED/);
+    assert.match(replaced, /0\.1\.3-fix2\+abc/);
+    assert.equal(replaced.includes("socode-runtime-0.1.3-fix2+abc.tar.gz"), true);
+    const listen = startListenWorkerScript({
+      nodePath: "/usr/bin/node",
+      runtimeRoot: "/root/.socode-server/runtime/0.1.3-fix2+abc",
+      workspace: "/root/server",
+      home: "/root",
+      env: { SOCODE_PROVIDER_STORE: "/root/.socode-server/session/providers.json" },
+    });
+    assert.match(listen, /--listen 127\.0\.0\.1:0/);
+    assert.match(listen, /--port-file/);
+    assert.match(listen, /nohup /);
+    assert.match(listen, /SOCODE_LISTEN_V1/);
+    const parsed = parseListenStart(["SOCODE_LISTEN_V1", "PID 42", "PORT 43123"].join("\n"));
+    assert.equal("error" in parsed, false);
+    if ("error" in parsed) return;
+    assert.equal(parsed.pid, 42);
+    assert.equal(parsed.port, 43123);
   });
 
   it("parses probe stdout", () => {

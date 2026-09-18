@@ -69,6 +69,44 @@ export function sshMuxArgs(mux?: SshMux) {
   return args;
 }
 
+export function sshWorkerArgs(
+  dest: string,
+  command: string,
+  opts?: { identityFile?: string; password?: boolean },
+) {
+  const args = [
+    "-o",
+    "ClearAllForwardings=yes",
+    "-T",
+    "-o",
+    "ControlMaster=no",
+    "-o",
+    "ControlPath=none",
+    "-o",
+    "ControlPersist=no",
+    "-o",
+    "ServerAliveInterval=30",
+    "-o",
+    "ServerAliveCountMax=6",
+  ];
+  if (!opts?.password) args.push("-o", "BatchMode=yes");
+  if (opts?.identityFile) {
+    args.push("-i", opts.identityFile, "-o", "IdentitiesOnly=yes");
+  }
+  if (opts?.password) {
+    args.push(
+      "-o",
+      "PreferredAuthentications=password,keyboard-interactive",
+      "-o",
+      "PubkeyAuthentication=no",
+      "-o",
+      "NumberOfPasswordPrompts=1",
+    );
+  }
+  args.push(dest, `bash --noprofile --norc -c ${shQuote(command)}`);
+  return args;
+}
+
 export function sshMasterArgs(dest: string, controlPath: string, opts?: { batch?: boolean; password?: boolean; identityFile?: string }) {
   const args = sshMuxArgs({
     controlPath,
@@ -98,10 +136,10 @@ export function sshBatchArgs(dest: string, script: string, mux?: SshMux) {
   return args;
 }
 
-/** 单行远端命令，不再套一层 bash 文件。worker 需要把 stdin 留给 JSON-RPC。 */
+/** 单行 exec。套 noprofile bash，避免登录壳吃掉 stdin；不要再走写临时文件的 wrapRemoteScript。 */
 export function sshExecArgs(dest: string, command: string, mux?: SshMux) {
   const args = sshMuxArgs(mux);
-  args.push(dest, command);
+  args.push(dest, `bash --noprofile --norc -c ${shQuote(command)}`);
   return args;
 }
 
@@ -309,6 +347,125 @@ export function extractScript(home: string, stamp: string, tarName: string) {
     `tar -xzf ${shQuote(`${home}/.socode-server/runtime/${tarName}`)} -C ${shQuote(root)}`,
     `printf %s ${shQuote(stamp)} > ${shQuote(`${home}/.socode-server/runtime/current-stamp`)}`,
   ].join("\n");
+}
+
+export function killRemoteWorkersScript(home: string) {
+  const pidFile = `${home}/.socode-server/session/worker.pid`;
+  const runtime = `${home}/.socode-server/runtime/`;
+  return [
+    `pidf=${shQuote(pidFile)}`,
+    'if [ -f "$pidf" ]; then kill "$(cat "$pidf")" 2>/dev/null || true; rm -f "$pidf"; fi',
+    `pkill -f ${shQuote(runtime)} 2>/dev/null || true`,
+    "sleep 0.2 2>/dev/null || true",
+  ].join("\n");
+}
+
+export function replaceRuntimeScript(home: string, stamp: string, tarName: string) {
+  const runtime = `${home}/.socode-server/runtime`;
+  const root = `${runtime}/${stamp}`;
+  const tar = `${runtime}/${tarName}`;
+  return [
+    killRemoteWorkersScript(home),
+    `runtime=${shQuote(runtime)}`,
+    `keep=${shQuote(tarName)}`,
+    `root=${shQuote(root)}`,
+    `tar=${shQuote(tar)}`,
+    'mkdir -p "$runtime"',
+    'for item in "$runtime"/* "$runtime"/.[!.]*; do',
+    '  [ -e "$item" ] || continue',
+    '  [ "$(basename "$item")" = "$keep" ] && continue',
+    '  rm -rf "$item"',
+    "done",
+    'mkdir -p "$root"',
+    'tar -xzf "$tar" -C "$root"',
+    `printf %s ${shQuote(stamp)} > ${shQuote(`${runtime}/current-stamp`)}`,
+    `echo SOCODE_RUNTIME_REPLACED ${shQuote(stamp)}`,
+  ].join("\n");
+}
+
+export function runtimeEntryReadyScript(home: string, stamp: string) {
+  const root = runtimeRoot(home, stamp);
+  return `if [ -f ${shQuote(`${root}/bin/worker-entry.mjs`)} ] && [ -f ${shQuote(`${root}/dist/stdio-worker.js`)} ]; then echo RUNTIME_ENTRY ok; else echo RUNTIME_ENTRY missing; fi`;
+}
+
+export function parseListenStart(stdout: string): { pid: number; port: number } | { error: string } {
+  const lines = stdout.split(/\r?\n/).map((line) => line.trim());
+  if (!lines.includes("SOCODE_LISTEN_V1")) {
+    return { error: "远端 worker 没有听端口（没有 listen 标记）。" };
+  }
+  const value = (key: string) => {
+    const line = lines.find((item) => item.startsWith(`${key} `) || item === key);
+    if (!line) return "";
+    return line.slice(key.length).trim();
+  };
+  const failed = value("ERROR");
+  if (failed) return { error: `远端 worker 启动失败: ${failed}` };
+  const pid = Number(value("PID"));
+  const port = Number(value("PORT"));
+  if (!Number.isInteger(pid) || pid <= 0) return { error: "远端 worker pid 无效" };
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return { error: "远端 worker 端口无效" };
+  return { pid, port };
+}
+
+export function startListenWorkerScript(opts: {
+  nodePath: string;
+  runtimeRoot: string;
+  workspace: string;
+  home: string;
+  env?: Record<string, string>;
+}) {
+  const session = `${opts.home}/.socode-server/session`;
+  const portFile = `${session}/rpc.port`;
+  const pidFile = `${session}/worker.pid`;
+  const logFile = `${session}/worker.log`;
+  const assigns = Object.entries(opts.env ?? {})
+    .map(([key, value]) => `${key}=${shQuote(value)}`)
+    .join(" ");
+  const prefix = assigns ? `env ${assigns} ` : "";
+  const launch = `${prefix}${shQuote(opts.nodePath)} ${shQuote(`${opts.runtimeRoot}/bin/worker-entry.mjs`)} --listen 127.0.0.1:0 --port-file ${shQuote(portFile)} --workspace ${shQuote(opts.workspace)}`;
+  return [
+    killRemoteWorkersScript(opts.home),
+    `session=${shQuote(session)}`,
+    `portf=${shQuote(portFile)}`,
+    `pidf=${shQuote(pidFile)}`,
+    `logf=${shQuote(logFile)}`,
+    'mkdir -p "$session"',
+    'rm -f "$portf"',
+    `nohup ${launch} > "$logf" 2>&1 &`,
+    'echo $! > "$pidf"',
+    "i=0",
+    'while [ "$i" -lt 100 ]; do',
+    '  if [ -s "$portf" ]; then',
+    "    echo SOCODE_LISTEN_V1",
+    '    echo PID $(cat "$pidf")',
+    '    echo PORT $(cat "$portf")',
+    "    exit 0",
+    "  fi",
+    '  if ! kill -0 "$(cat "$pidf")" 2>/dev/null; then',
+    "    echo SOCODE_LISTEN_V1",
+    "    echo ERROR worker-exited",
+    '    echo LOG',
+    '    tail -n 40 "$logf" 2>/dev/null || true',
+    "    exit 1",
+    "  fi",
+    "  sleep 0.1",
+    '  i=$((i+1))',
+    "done",
+    "echo SOCODE_LISTEN_V1",
+    "echo ERROR listen-timeout",
+    "echo LOG",
+    'tail -n 40 "$logf" 2>/dev/null || true',
+    "exit 1",
+  ].join("\n");
+}
+
+export function sshForwardArgs(dest: string, port: number, mux?: SshMux) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`无效转发端口 ${port}`);
+  }
+  const args = sshMuxArgs(mux);
+  args.push("-W", `127.0.0.1:${port}`, dest);
+  return args;
 }
 
 export function extractNodeScript(home: string, tarName: string) {

@@ -111,7 +111,7 @@ SSH 模式里本机等于 VS Code 的窗口，远端等于 `vscode-server`。仓
   → client:  打 token 行，恢复输入
 ```
 
-斜杠命令（`/undo` `/mode` `/doctor` `/session` `/compress` `/mcp` `/skills` `/new` …）几乎全是 `command { line }` 给 worker。`/quit` 只关本机并 `shutdown`。`/setworkarea` v1 禁用（连的时候已经指定路径）。
+斜杠命令（`/undo` `/mode` `/doctor` `/session` `/compress` `/mcp` `/skills` `/new` …）几乎全是 `command { line }` 给 worker。远程会话禁止 `/quit` 和 Ctrl+C；`/sshquit` 先 `shutdown`，再由本机 `finally` 删掉远端会话 `providers.json` 并断开，回到本机新对话。`/setworkarea` v1 禁用（连的时候已经指定路径）。
 
 ---
 

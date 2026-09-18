@@ -25,7 +25,7 @@ for (let i = 0; i < args.length; i++) {
   flags[rawKey] = asBoolean ? "true" : (inlineValue ?? args[++i] ?? "");
 }
 
-if (flags.stdio !== "true" || !flags.workspace) {
+if (!flags.workspace || (flags.stdio !== "true" && !flags.listen)) {
   process.stderr.write("用法: worker-entry --stdio --workspace /abs/path\n");
   process.exit(2);
 }
@@ -33,7 +33,16 @@ if (flags.stdio !== "true" || !flags.workspace) {
 process.stderr.write("socode-runtime: starting\n");
 
 async function main() {
-  const { runWorkerStdio } = await import(pathToFileURL(compiled).href);
+  const { runWorkerListen, runWorkerStdio } = await import(pathToFileURL(compiled).href);
+  if (flags.listen) {
+    await runWorkerListen({
+      workspace: flags.workspace,
+      flags,
+      bind: flags.listen,
+      portFile: flags["port-file"],
+    });
+    return;
+  }
   await runWorkerStdio({ workspace: flags.workspace, flags });
 }
 

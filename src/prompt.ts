@@ -21,11 +21,45 @@ const SHOW_CURSOR = "\x1b[?25h";
 const QUIT_CONFIRM_MS = 2000;
 
 export const USER_PROMPT = "> ";
+export const REMOTE_QUIT_HINT = "远程会话请先 /sshquit：会清掉远端 Provider 再断开，回到本机新对话。";
 
 let quitArmedAt = 0;
 let quitConfirmed = false;
+let quitBlocked = false;
+
+export function setQuitBlocked(blocked: boolean) {
+  quitBlocked = blocked;
+  quitArmedAt = 0;
+  if (blocked) {
+    quitConfirmed = false;
+    keepRawIfBlocked();
+  }
+}
+
+export function isQuitBlocked() {
+  return quitBlocked;
+}
+
+function keepRawIfBlocked() {
+  if (!quitBlocked || !stdin.isTTY) return;
+  try {
+    stdin.setRawMode(true);
+    stdin.resume();
+  } catch {
+    // already closed or not a TTY
+  }
+}
 
 export function confirmQuit() {
+  if (quitBlocked) {
+    keepRawIfBlocked();
+    const now = Date.now();
+    if (!quitArmedAt || now - quitArmedAt > 50) {
+      stdout.write(stdout.isTTY ? `\n${RED}${REMOTE_QUIT_HINT}${RESET}\n` : `\n${REMOTE_QUIT_HINT}\n`);
+    }
+    quitArmedAt = now;
+    return false;
+  }
   const now = Date.now();
   if (quitArmedAt && now - quitArmedAt <= 50) return false;
   if (quitArmedAt && now < quitArmedAt + QUIT_CONFIRM_MS) {
@@ -52,7 +86,7 @@ export function takeForcedQuit() {
 export function restoreTerminal() {
   stopLoadUi();
   try {
-    if (stdin.isTTY) stdin.setRawMode(false);
+    if (stdin.isTTY && !quitBlocked) stdin.setRawMode(false);
   } catch {
     // already closed or not a TTY
   }
@@ -93,7 +127,30 @@ export function paintPromptStatus(text: string, color = false) {
   return `${ORANGE}${text}${RESET}`;
 }
 
-export async function promptYou(label = USER_PROMPT, opts?: { hint?: string; status?: string }) {
+export function drainStdin() {
+  try {
+    stdin.pause();
+  } catch {
+    // ignore
+  }
+  try {
+    while (stdin.readable && stdin.read() != null) {
+      /* leftover keys from the previous TTY UI */
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function abortReason(signal?: AbortSignal) {
+  const reason = signal?.reason;
+  if (reason instanceof Error) return reason;
+  if (typeof reason === "string" && reason.trim()) return new Error(reason);
+  return new Error("已取消");
+}
+
+export async function promptYou(label = USER_PROMPT, opts?: { hint?: string; status?: string; signal?: AbortSignal }) {
+  if (opts?.signal?.aborted) throw abortReason(opts.signal);
   if (!stdin.isTTY || !stdout.isTTY) {
     return await readPlainLine(label);
   }
@@ -106,9 +163,15 @@ export async function promptYou(label = USER_PROMPT, opts?: { hint?: string; sta
     stdin.resume();
 
     function cleanup() {
+      opts?.signal?.removeEventListener("abort", onAbort);
       stdin.off("data", onData);
       stdin.off("error", onError);
       restoreTerminal();
+    }
+
+    function onAbort() {
+      cleanup();
+      reject(abortReason(opts?.signal));
     }
 
     function onError(error: Error) {
@@ -135,6 +198,11 @@ export async function promptYou(label = USER_PROMPT, opts?: { hint?: string; sta
     const onData = (chunk: Buffer | string) => {
       const key = typeof chunk === "string" ? chunk : chunk.toString("utf8");
       if (key === "\x03") {
+        if (quitBlocked) {
+          confirmQuit();
+          render();
+          return;
+        }
         if (confirmQuit()) {
           cleanup();
           stdout.write("\n");
@@ -166,7 +234,14 @@ export async function promptYou(label = USER_PROMPT, opts?: { hint?: string; sta
       }
       if (key.startsWith("\x1b")) return;
       if (key === "\x04") {
-        if (!buffer) finish("/quit");
+        if (!buffer) {
+          if (quitBlocked) {
+            confirmQuit();
+            render();
+            return;
+          }
+          finish("/quit");
+        }
         return;
       }
       if (![...key].every((ch) => ch >= " " || ch === "\t")) return;
@@ -185,6 +260,11 @@ export async function promptYou(label = USER_PROMPT, opts?: { hint?: string; sta
 
     stdin.on("data", onData);
     stdin.once("error", onError);
+    opts?.signal?.addEventListener("abort", onAbort, { once: true });
+    if (opts?.signal?.aborted) {
+      onAbort();
+      return;
+    }
     render();
   });
 }
@@ -279,6 +359,10 @@ export function watchTurnAbort(opts?: { onCommand?: (line: string) => void }) {
     if (paused) return;
     const key = typeof chunk === "string" ? chunk : chunk.toString("utf8");
     if (key === "\x03") {
+      if (quitBlocked) {
+        confirmQuit();
+        return;
+      }
       command = "";
       confirmQuit();
       controller.abort();

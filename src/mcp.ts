@@ -165,7 +165,7 @@ async function connectServer(config: McpServerConfig, workspace: string): Promis
       {
         protocolVersion: "2024-11-05",
         capabilities: {},
-        clientInfo: { name: "socode", version: "0.1.3-fix2" },
+        clientInfo: { name: "socode", version: "0.1.4" },
       },
       15_000,
     );

@@ -81,6 +81,8 @@ describe("formatBanner", () => {
     });
     assert.match(text, /ssh@106\.53\.55\.161/);
     assert.match(text, /~\/example/);
+    assert.match(text, /\/sshquit 断开远程/);
+    assert.doesNotMatch(text, /Ctrl\+C 两次退出/);
   });
 });
 

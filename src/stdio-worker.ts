@@ -1,5 +1,6 @@
-import { existsSync, lstatSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { existsSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
+import { createServer, type Socket } from "node:net";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { loadConfig } from "./config.js";
 import { JsonRpcPeer, RpcError } from "./jsonrpc-peer.js";
 import { parseMode } from "./mode.js";
@@ -58,19 +59,7 @@ export function attachWorkerServer(peer: JsonRpcPeer, getWorker: () => Promise<L
   peer.handle("initialize", async (_method, params) => {
     const hs = handshakeResult(params);
     if (!hs.ok) throw new RpcError(hs.code, hs.message);
-    const worker = await getWorker();
-    const snap = publicSnapshot(worker.snapshot());
-    const hello: RemoteHello = {
-      protocol: SOCODE_REMOTE_PROTOCOL,
-      runtimeStamp: readRuntimeStamp(),
-      node: process.versions.node,
-      platform: process.platform,
-      workspace: snap.workspace,
-    };
-    const payload = { ...hello, ...snap };
-    const secret = payloadHasSecrets(payload);
-    if (secret) throw new RpcError(REMOTE_ERROR.protocol, `握手载荷含密钥字段 ${secret}`);
-    return payload;
+    return workerHelloPayload(await getWorker());
   });
 
   peer.handle("session/open", async () => {
@@ -157,7 +146,74 @@ export function redirectConsoleToStderr() {
   console.warn = write;
 }
 
+export function parseListenBind(raw: string): { host: string; port: number } | { error: string } {
+  const trimmed = raw.trim();
+  const sep = trimmed.lastIndexOf(":");
+  if (sep <= 0 || sep === trimmed.length - 1) return { error: "listen 必须是 127.0.0.1:端口" };
+  const host = trimmed.slice(0, sep);
+  const port = Number(trimmed.slice(sep + 1));
+  if (host !== "127.0.0.1" && host !== "::1") return { error: "listen 只允许 127.0.0.1" };
+  if (!Number.isInteger(port) || port < 0 || port > 65535) return { error: "listen 端口无效" };
+  return { host, port };
+}
+
 export async function runWorkerStdio(opts: { workspace: string; flags: Record<string, string>; provider?: Provider }) {
+  process.stdin.resume();
+  process.stdin.ref?.();
+  const peer = new JsonRpcPeer(process.stdin, process.stdout);
+  await bootWorkerPeer(peer, opts);
+  if (process.stdin.readableEnded) {
+    process.stderr.write("socode-runtime: stdin closed after handshake\n");
+    return;
+  }
+  await waitStreamEnd(process.stdin, "stdin closed");
+}
+
+export async function runWorkerListen(opts: {
+  workspace: string;
+  flags: Record<string, string>;
+  provider?: Provider;
+  bind?: string;
+  portFile?: string;
+  skipSkills?: boolean;
+  skipTitle?: boolean;
+}) {
+  const parsed = parseListenBind(opts.bind ?? opts.flags.listen ?? "127.0.0.1:0");
+  if ("error" in parsed) throw new Error(parsed.error);
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(parsed.port, parsed.host, () => resolve());
+  });
+  const addr = server.address();
+  const port = typeof addr === "object" && addr ? addr.port : parsed.port;
+  const portFile = opts.portFile ?? opts.flags["port-file"];
+  if (portFile) {
+    mkdirSync(dirname(portFile), { recursive: true });
+    writeFileSync(portFile, `${port}\n`, { encoding: "utf8", mode: 0o600 });
+  }
+  process.stderr.write(`socode-runtime: listen ${parsed.host}:${port}\n`);
+  const socket = await new Promise<Socket>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("等待本机转发超时")), 60_000);
+    server.once("connection", (sock) => {
+      clearTimeout(timer);
+      resolve(sock);
+    });
+    server.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+  server.close();
+  const peer = new JsonRpcPeer(socket, socket);
+  await bootWorkerPeer(peer, opts);
+  await waitStreamEnd(socket, "rpc socket closed");
+}
+
+async function bootWorkerPeer(
+  peer: JsonRpcPeer,
+  opts: { workspace: string; flags: Record<string, string>; provider?: Provider; skipSkills?: boolean; skipTitle?: boolean },
+) {
   redirectConsoleToStderr();
   let workspace: string;
   try {
@@ -170,8 +226,6 @@ export async function runWorkerStdio(opts: { workspace: string; flags: Record<st
   }
   const cfg = loadConfig();
   const provider = opts.provider ?? loadProvider();
-  process.stdin.resume();
-  const peer = new JsonRpcPeer(process.stdin, process.stdout);
   const host = createRpcHost(peer);
   const workerPromise = openLocalWorker({
     host,
@@ -180,6 +234,8 @@ export async function runWorkerStdio(opts: { workspace: string; flags: Record<st
     mode: parseMode(opts.flags.mode ?? "") ?? cfg.mode,
     userSystem: opts.flags.system ?? cfg.systemPrompt,
     agentEnabled: opts.flags["no-agent"] !== "true",
+    skipSkills: opts.skipSkills,
+    skipTitle: opts.skipTitle ?? opts.skipSkills,
     maxMessages: Number(opts.flags.max) || cfg.maxContextMessages,
     maxSteps: Number(opts.flags.steps) || cfg.maxAgentSteps,
     maxTokens: Number(opts.flags.budget) || cfg.maxAgentTokens,
@@ -189,12 +245,34 @@ export async function runWorkerStdio(opts: { workspace: string; flags: Record<st
     fresh: opts.flags.new === "true",
   });
   attachWorkerServer(peer, () => workerPromise);
-  await workerPromise;
-  if (process.stdin.readableEnded) return;
-  await new Promise<void>((resolve) => {
-    process.stdin.once("end", () => resolve());
-    process.stdin.once("close", () => resolve());
+  const worker = await workerPromise;
+  if (!peer.isClosed) peer.notify("hello", workerHelloPayload(worker));
+}
+
+function waitStreamEnd(stream: NodeJS.ReadableStream, message: string) {
+  return new Promise<void>((resolve) => {
+    const done = () => resolve();
+    stream.once("end", () => {
+      process.stderr.write(`socode-runtime: ${message}\n`);
+      done();
+    });
+    stream.once("close", done);
   });
+}
+
+export function workerHelloPayload(worker: LocalWorker) {
+  const snap = publicSnapshot(worker.snapshot());
+  const hello: RemoteHello = {
+    protocol: SOCODE_REMOTE_PROTOCOL,
+    runtimeStamp: readRuntimeStamp(),
+    node: process.versions.node,
+    platform: process.platform,
+    workspace: snap.workspace,
+  };
+  const payload = { ...hello, ...snap };
+  const secret = payloadHasSecrets(payload);
+  if (secret) throw new RpcError(REMOTE_ERROR.protocol, `握手载荷含密钥字段 ${secret}`);
+  return payload;
 }
 
 function resolveWorkspace(raw: string) {

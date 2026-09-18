@@ -33,6 +33,8 @@ export const WELCOME_LINES = [
   "你知道吗？/seeplan 看当前任务勾选板；/setplan 说明 会强制本轮先拆计划。",
   "你知道吗？空对话时 /setworkarea 可选文件夹，或写成 /setworkarea /绝对路径。",
   "你知道吗？/remote-ssh 连过的主机可以 Tab 补全；密码每次都要重新输入。",
+  "你知道吗？打 /ssh 再按 Tab 会补成 /remote-ssh。",
+  "你知道吗？连着 SSH 时请用 /sshquit 断开，它会先删掉远端注入的 Provider。",
   "你知道吗？生成中按 Esc 中止当前轮；用户那句还在，半截回复不会入库。",
   "你知道吗？Ctrl+C 第一次只是提醒，再按一次才退出；平时用 /quit 更干净。",
 ];
@@ -101,7 +103,9 @@ export function formatBanner(params: {
 
   const paint = { dim, reset };
   const box = drawBox(wordmark, rows, width, paint, inner);
-  const hint = `${dim}  / 看命令 · Esc 中止 · Ctrl+C 两次退出${reset}`;
+  const hint = params.remoteHost
+    ? `${dim}  / 看命令 · Esc 中止 · /sshquit 断开远程${reset}`
+    : `${dim}  / 看命令 · Esc 中止 · Ctrl+C 两次退出${reset}`;
   return `${box}\n${hint}`;
 }
 

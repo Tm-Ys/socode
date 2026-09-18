@@ -8,7 +8,14 @@ import { runConnect } from "./connect.js";
 import { runRemoteSshCommand } from "./remote-ssh-ui.js";
 import { runWorkerStdio } from "./stdio-worker.js";
 import { loadMode, userPrefix } from "./mode.js";
-import { promptYou, promptStatusLine, restoreTerminal, confirmQuit, takeForcedQuit } from "./prompt.js";
+import {
+  promptYou,
+  promptStatusLine,
+  restoreTerminal,
+  confirmQuit,
+  isQuitBlocked,
+  takeForcedQuit,
+} from "./prompt.js";
 import {
   addProvider,
   applyProviderDraft,
@@ -90,13 +97,13 @@ function usage() {
   socode --resume
   socode --id <conversation-uuid>
   socode connect user@host:/abs/path   本机显示器 + 远端 worker（可用密码或公钥）
-  会话里 /remote-ssh [user@host]       分屏填写；Tab 补全历史主机，密码每次重输
+  会话里 /ssh 或 /remote-ssh [user@host]  Tab 把 /ssh 补成 /remote-ssh；远程用 /sshquit 断开
   socode worker --stdio --workspace /abs/path
   socode --url/--api/--model/--name/--context/--output/--effort/--steps/--max/--mode/--budget
   socode --doctor                     检查 Node、密钥、沙箱、目录是否可写
 
 OpenAI 兼容 Provider 存在 ~/.socode/providers.json；默认值在 ~/.socode/config.json
-权限模式：--mode full | ask | plan | long（也可用 /mode 切换，长程可用 长程）。Esc 中止当前轮，/quit 退出。`;
+权限模式：--mode full | ask | plan | long（也可用 /mode 切换，长程可用 长程）。Esc 中止当前轮，本机 /quit 退出；远程会话必须 /sshquit。`;
 }
 
 function parseSlash(prompt: string) {
@@ -605,6 +612,10 @@ async function main() {
     await worker.close();
   };
   const forceExit = (code: number) => {
+    if (isQuitBlocked()) {
+      confirmQuit();
+      return;
+    }
     restoreTerminal();
     try {
       rl?.close();
@@ -613,9 +624,14 @@ async function main() {
     }
     process.exit(code);
   };
-  process.on("SIGINT", () => {
+  const onSigint = () => {
+    if (isQuitBlocked()) {
+      confirmQuit();
+      return;
+    }
     if (confirmQuit()) forceExit(130);
-  });
+  };
+  process.on("SIGINT", onSigint);
   process.once("SIGTERM", () => forceExit(143));
 
   try {
@@ -631,6 +647,7 @@ async function main() {
 
     const sessionRl = readline.createInterface({ input, output });
     rl = sessionRl;
+    sessionRl.on("SIGINT", onSigint);
     if (!providerReady(worker.provider)) {
       worker.setProvider(await promptProviderForm(sessionRl, "setup", worker.provider));
       console.log("");
@@ -696,15 +713,23 @@ async function main() {
           await handleWorkarea(worker, prompt);
           continue;
         }
-        if (prompt === "/remote-ssh" || prompt.startsWith("/remote-ssh ")) {
-          const parsed = parseRemoteSshCommand(prompt);
-          if (parsed && parsed.ok === false) {
-            console.log(`\n${parsed.error}\n`);
+        const remoteSsh = parseRemoteSshCommand(prompt);
+        if (remoteSsh) {
+          if (remoteSsh.ok === false) {
+            console.log(`\n${remoteSsh.error}\n`);
             continue;
           }
           restoreTerminal();
-          await runRemoteSshCommand(parsed && parsed.ok ? parsed.target : "");
+          const outcome = await runRemoteSshCommand(remoteSsh.target);
+          if (outcome === "sshquit") {
+            await worker.newSession();
+            console.log("\n已断开远程。远端会话 Provider 已删除。本机开了新对话。\n");
+          }
           printSessionChrome(worker);
+          continue;
+        }
+        if (prompt === "/sshquit" || prompt.startsWith("/sshquit ")) {
+          console.log("\n当前不是远程会话。连上之后才能 /sshquit。\n");
           continue;
         }
         if (prompt === "/compress") {
