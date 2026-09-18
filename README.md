@@ -1,8 +1,8 @@
 # socode
 
-本机终端里的编程 Agent。OpenAI 兼容模型、流式输出、工具循环。会话存在当前工作区的 `.socode/sessions/`，换目录互不可见。
+本机终端里的编程 Agent：OpenAI 兼容模型、流式输出，跑在工具循环上。会话存在当前工作区的 `.socode/sessions/`，换目录互不可见。
 
-默认 **Ask**：能改仓库，写入先问你；密钥和系统路径始终碰不到。不是套壳框架——运行时没有数据库依赖，其余是一组可直接审的 TypeScript 模块。
+默认 **Ask** 模式：能改仓库，但写入前先问你；密钥和系统路径始终碰不到。
 
 ## 亮点
 
@@ -15,25 +15,58 @@
 | **Full** | 你已经信任这次会话 | 直接改文件、跑命令；系统目录和密钥仍禁 |
 | **Long / 长程** | 跨很多步的任务 | 只读预授权；副作用由**独立 LLM 审批**，**不会变成 Full** |
 
-Long 的审批器拿一份干净上下文、只输出 JSON；解析失败、超时、缺字段一律拒绝。密钥、`sudo` 在问审批器之前就被本地硬拒绝；git 和工作区外会问用户。设计说明见 [`docs/LONG-MODE.md`](docs/LONG-MODE.md)。
+**Long 的副作用由独立 LLM 审批。** 审批器拿一份干净上下文、只输出 JSON；解析失败、超时、缺字段一律拒绝。密钥和 `sudo` 在问审批器之前就被本地硬拒绝，git 和工作区外会问用户。设计说明见 [`docs/LONG-MODE.md`](docs/LONG-MODE.md)。
 
-**失败即拒绝，OS 沙箱和应用层叠在一起。** Ask / Long 下 `bash` 对齐 Codex workspace-write：macOS `sandbox-exec`、Linux `bwrap`；可读大部分磁盘，只允许写工作区 + `/tmp`；`.git` 和会话目录只读；默认断网（`curl` / `npm install` / `git fetch` 等才开网）。沙箱起不来就拒绝执行，Full 才会警告后裸跑。批准 git 或工作区外路径时只加那块可写根，不再整段摘沙箱。bash 不再靠整句正则：拆成 argv，剥掉 `env` / `timeout` / `xargs` / `bash -c`，按每一段管道分类——`ls | wc` 仍只读，`ls | tee out` / `find | xargs rm` 会升级；`$()` 和进程替换解析不了就当有副作用。另有：`.env` / `providers.json` / `~/.ssh` 等 denylist、symlink `realpath`、`git status` 的 `a` 不会扩成 `sudo`。bash 和 MCP 子进程都剥掉密钥。每次授权追加到工作区 `.socode-audit.jsonl`。非 TTY（脚本、`--input`）在 Ask 下无法弹窗，写入直接拒绝。
+**失败即拒绝，OS 沙箱和应用层叠在一起。** Ask / Long 下 `bash` 对齐 Codex workspace-write：
 
-**长任务能接着做，但不扩大权限。** Long 把目标记在 TaskState 里（会话中的 `【task state】` 消息，不另建表）。上下文挤到约 82% 会自动压缩（轮次之间、工具步之间、以及 `context_compress`），压缩时把最新模式、TaskState 和 plan **钉在保留区**。步数默认 Dynamic P50→P75：先给一半，工具后提醒还剩几步；本段有写入/里程碑/验证才延期一次，纯 read 或 doom 不加。里程碑写入 `done` 时 harness **强制**跑白名单 `verifyCommands`，并可再过一道 fail-closed rubric（四轴、权重 3 必须全过、加权 ≥ 0.7）。失败则撤回这次 done。步数 / token 用尽或 Esc 中止会留下 `【checkpoint】`。Ask / Full 步数用尽仍报错，只有 Long 优雅停。
+- macOS 用 `sandbox-exec`，Linux 用 `bwrap`；沙箱起不来就拒绝执行，只有 Full 才会警告后裸跑。
+- 可读大部分磁盘，只允许写工作区 + `/tmp`；`.git` 和会话目录只读；默认断网（`curl` / `npm install` / `git fetch` 等才开网）。
+- 批准 git 或工作区外路径时只加那块可写根，不再整段摘沙箱。
+- bash 不靠整句正则：拆成 argv，剥掉 `env` / `timeout` / `xargs` / `bash -c`，按每一段管道分类。`ls | wc` 仍只读，`ls | tee out` / `find | xargs rm` 会升级；`$()` 和进程替换解析不了就当有副作用。
+- `.env` / `providers.json` / `~/.ssh` 等走 denylist，symlink 走 `realpath`；`git status` 的 `a` 不会扩成 `sudo`。
+- bash 和 MCP 子进程都剥掉密钥；每次授权追加到工作区 `.socode-audit.jsonl`。
+- 非 TTY（脚本、`--input`）在 Ask 下无法弹窗，写入直接拒绝。
 
-**子代理是干净上下文，只读并行、写入串行。** Ask / Full / Long 可先 `subagent_plan` 再 `subagent`。Long 推荐 `localize` / `edit` / `verify`（Ask/Full 仍可用 explorer/worker）：localize 并行（Long 同时最多 2 个），edit/worker 一个接一个，verify 等写入完成后再跑。交回 JSON：edit 的 `ok` 必须真有改文件，verify 的 `ok` 由退出码覆盖。过程默认隐藏，`/seesubagent [序号]` 查看某一个。子代理看不到父对话，不能再开子代理。Plan 模式没有这两个工具。
+**长任务能接着做，但不扩大权限。**
 
-**多步骤任务用 `plan` 勾着做。** 模型和权限模式无关：非平凡请求先拆成 2–8 个目标，做完一项勾一项，全部勾完必须再 `plan` 写入 review，然后才给最终结果。勾选板会打在终端上，`/seeplan` 随时看进度。`/setplan <说明>` 强制本轮必须写出计划，并激活 grill-me（未达成共识前不改代码）。计划钉在会话里的 `【plan】` 消息，压缩时和 harness mode / TaskState 一起保留。这和 Plan **模式**（只读）不是一回事，也和 Long 的 TaskState 分开。
+- Long 把目标记在 TaskState 里（会话中的 `【task state】` 消息，不另建表）。
+- 上下文挤到约 82% 会自动压缩（轮次之间、工具步之间，以及 `context_compress`），压缩时把最新模式、TaskState 和 plan 钉在保留区。
+- 步数默认 Dynamic P50→P75：先给一半，工具后提醒还剩几步；只有本段有写入 / 里程碑 / 验证才延期一次，纯 read 或 doom 不加。
+- 里程碑写 `done` 时强制跑白名单 `verifyCommands`，可选再过一道 fail-closed rubric（四轴，权重 3 必须全过、加权 ≥ 0.7）；失败则撤回这次 done。
+- 步数 / token 用尽或 Esc 中止会留下 `【checkpoint】`。Ask / Full 步数用尽仍报错，只有 Long 优雅停。
+
+**子代理是干净上下文：只读并行，写入串行。**
+
+- Ask / Full / Long 可先 `subagent_plan` 再 `subagent`；Long 推荐 `localize` / `edit` / `verify`，Ask/Full 仍可用 explorer/worker。
+- localize 并行（Long 同时最多 2 个），edit/worker 一个接一个，verify 等写入完成后再跑。
+- 交回 JSON：edit 的 `ok` 必须真有改文件，verify 的 `ok` 由退出码覆盖。
+- 过程默认隐藏，`/seesubagent [序号]` 查看某一个。子代理看不到父对话，不能再开子代理；Plan 模式没有这两个工具。
+
+**多步骤任务用 `plan` 勾着做。**
+
+- 和权限模式无关：非平凡请求先拆成 2–8 个目标，做完一项勾一项；全部勾完必须再 `plan` 写入 review，然后才给最终结果。
+- 勾选板会打在终端上，`/seeplan` 随时看进度。
+- `/setplan <说明>` 强制本轮必须写出计划，并激活 grill-me（未达成共识前不改代码）。
+- 计划钉在会话里的 `【plan】` 消息，压缩时和 harness mode / TaskState 一起保留。这和 Plan **模式**（只读）不是一回事，也和 Long 的 TaskState 分开。
 
 **多个决策一次问完。** 模型有一组互斥或可选项要确认时调用 `question`：每题带预设答案，并追加 Type your own answer（单选在最后，多选在倒数第二，多选最后一项是提交答案）。↑↓ / j k 移动，1–9 快捷，Enter 确认或勾选，Tab 切题，Esc 取消。多题最后还有 Confirm。和 Ask 审批一样让出 TTY，子代理不能弹问卷。
 
-**MCP 和 Skills 进同一套循环。** 读 Claude/Cursor 风格的 `.mcp.json`（stdio JSON-RPC），把服务器工具挂进同一套权限，名字是 `mcp__服务器__工具`。`readOnlyHint` 为真的 MCP 在 Plan 里也能用；有副作用的走 Ask / Long / Full。HTTP MCP 暂不支持。`/mcp` 看连接状态。
+**MCP 和 Skills 进同一套循环。**
 
-项目说明从用户目录到 git 根再到工作区加载 `AGENTS.md` / `CLAUDE.md`（同层 AGENTS 在前、CLAUDE 更具体）。内置基础 skill（`brainstorm` / `grill-me` / `ponytail` / `superpowers`）默认不灌全文：每轮用一次短 JSON 询问当前用户话该激活哪几个，最多 2 个，闲聊和解析失败都不注入。`/skills` 查看实际加载结果。
+- 读 Claude / Cursor 风格的 `.mcp.json`（stdio JSON-RPC），把服务器工具挂进同一套权限，名字是 `mcp__服务器__工具`。
+- `readOnlyHint` 为真的 MCP 在 Plan 里也能用；有副作用的走 Ask / Long / Full。HTTP MCP 暂不支持，`/mcp` 看连接状态。
 
-**终端自己就是前端。** 没有 React / Ink：流式 Markdown 差量重绘（标题、代码块、列表、粗体），思考块暗色斜体和正文分开，工具行和失败红色，Ask 审批，问卷（`question`），子代理默认藏过程、右下角 HUD。说明见 [`docs/FRONTEND.md`](docs/FRONTEND.md)。
+**项目说明和基础 skill 按需加载。** 说明文件从用户目录到 git 根再到工作区加载 `AGENTS.md` / `CLAUDE.md`（同层 AGENTS 在前、CLAUDE 更具体）。内置四个基础 skill（`brainstorm` / `grill-me` / `ponytail` / `superpowers`）默认不灌全文：每轮用一次短 JSON 判断该激活哪几个，最多 2 个，闲聊和解析失败都不注入。`/skills` 查看实际加载结果。
 
-**上下文看得见、会话回得去。** `/context` 用色块标 system / tools / 对话 / 预留输出 / 空闲。一轮工具超过 6 次、或模型输出超过约 2400 字时，结束后打一条灰色 `recap`；**这一轮入库和后续上下文只留 recap**，需要细节请自行 grep。每轮结束再打一行 `tokens`：入 / 缓存 / 出；没配单价就写 `未标价`。`/usage` 看本会话累计。进入工作区时自动创建 `.socode/sessions/`；对话 JSON 只落在本目录，`/session` 看不到别的仓库。`socode` 默认开新会话，空对话不落盘。生成中 Esc 中止当前轮：用户问题留下，半截回复不入库。连续三次同调用或同失败会停，避免空转。`/` 后有幽灵补全和 Tab。
+**终端自己就是前端。** 没有 React / Ink：流式 Markdown 差量重绘（标题、代码块、列表、粗体），思考块暗色斜体、和正文分开，工具行失败标红，加上 Ask 审批、`question` 问卷、子代理默认藏过程与右下角 HUD。说明见 [`docs/FRONTEND.md`](docs/FRONTEND.md)。
+
+**上下文看得见、会话回得去。**
+
+- `/context` 用色块标 system / tools / 对话 / 预留输出 / 空闲。
+- 一轮工具超过 6 次、或模型输出超过约 2400 字时，结束后打一条灰色 `recap`；**这一轮入库和后续上下文只留 recap**，需要细节请自行 grep。
+- 每轮结束打一行 `tokens`：入 / 缓存 / 出；没配单价就写 `未标价`。`/usage` 看本会话累计。
+- 进入工作区时自动创建 `.socode/sessions/`；对话 JSON 只落在本目录，`/session` 看不到别的仓库。`socode` 默认开新会话，空对话不落盘。
+- 生成中 Esc 中止当前轮：用户问题留下，半截回复不入库。连续三次同调用或同失败会停，避免空转。`/` 后有幽灵补全和 Tab。
 
 **小到能审。** 大约 50 个 TypeScript 文件、运行时没有数据库依赖。权限、沙箱、Long 审批、预算、rubric、MCP、Skills、压缩、验证、子代理、计划、问卷、recap 都有测试（`npm test`）。策略写在代码里，不藏在框架配置后面。
 
@@ -112,7 +145,7 @@ npm test
 - **Plan**（`/mode plan`）：只能看、写计划和向用户提问。只读 MCP 可用。
 - **Long**（`/mode long` 或 `/mode 长程`）：Ask 的权限边界 + 长程编排 + LLM 审批副作用。进入后维护 TaskState（`/task`）。
 
-Long **不会**在沙箱起不来时 fallback 裸跑；密钥、sudo 仍本地硬拒绝，不会丢给审批器。git 和工作区外会问用户。
+Long **不会**在沙箱起不来时退回裸跑；密钥和 `sudo` 仍本地硬拒绝，不会丢给审批器，git 和工作区外会问用户。
 
 ## 交互命令
 
