@@ -1,5 +1,5 @@
 import { runBash } from "./fs-tools.js";
-import { bashEscapesWorkspace, bashHardDenied, bashTouchesOutside } from "./sandbox.js";
+import { bashEscapesWorkspace, bashHardDenied, bashTouchesOutside, resolveBashSandbox } from "./sandbox.js";
 
 export const VERIFY_TIMEOUT_MS = 60_000;
 
@@ -69,11 +69,7 @@ export async function runVerifyCommands(params: {
       continue;
     }
     try {
-      const output = await runBash(cmd, params.workspace, VERIFY_TIMEOUT_MS, params.signal, {
-        workspace: params.workspace,
-        cwd: params.workspace,
-        confineWrites: true,
-      });
+      const output = await runBash(cmd, params.workspace, VERIFY_TIMEOUT_MS, params.signal, resolveBashSandbox("long", params.workspace, params.workspace, cmd));
       const failed = !/^exit=0(\n|$)/.test(output);
       if (failed) ok = false;
       lines.push(`$ ${cmd}\n${clip(output, 4_000)}`);

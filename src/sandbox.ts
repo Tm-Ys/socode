@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import type { AgentMode } from "./mode.js";
@@ -120,6 +120,50 @@ const SHELL_KEYWORDS = new Set([
   "[[",
 ]);
 
+const NETWORK_BINS = new Set([
+  "curl",
+  "wget",
+  "nc",
+  "ncat",
+  "netcat",
+  "ssh",
+  "scp",
+  "sftp",
+  "ftp",
+  "rsync",
+  "npm",
+  "pnpm",
+  "yarn",
+  "bun",
+  "pip",
+  "pip3",
+  "cargo",
+  "brew",
+  "apt",
+  "apk",
+  "docker",
+  "gh",
+  "huggingface-cli",
+]);
+const GIT_NETWORK_SUBCOMMANDS = new Set([
+  "clone",
+  "fetch",
+  "pull",
+  "push",
+  "ls-remote",
+  "submodule",
+  "remote",
+]);
+const PACKAGE_LOCAL_SUBCOMMANDS = new Set([
+  "test",
+  "tests",
+  "run",
+  "exec",
+  "lint",
+  "typecheck",
+  "fmt",
+  "format",
+]);
 const HARD_DENY_BINS = new Set(["sudo", "su", "dd", "mkfs", "reboot", "shutdown"]);
 const NEVER_ALWAYS_BINS = new Set([
   "sudo",
@@ -678,8 +722,86 @@ export function opLabel(op: FileOp) {
 export type BashSandbox = {
   workspace?: string;
   cwd?: string;
+  /** Codex workspace-write: only these roots are writable. Ask/Long default true. */
   confineWrites?: boolean;
+  /** Codex workspace-write keeps network off unless the command needs it. */
+  allowNetwork?: boolean;
+  extraWritable?: string[];
+  /** Keep workspace `.git` read-only unless an approved git command needs it. */
+  protectGit?: boolean;
 };
+
+export function tmpWritableRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  const roots = ["/tmp", "/var/tmp"];
+  if (process.platform === "darwin") {
+    roots.push("/private/tmp", "/private/var/tmp");
+  }
+  const tmpdir = env.TMPDIR?.trim();
+  if (tmpdir && isAbsolute(tmpdir)) roots.push(normalize(tmpdir));
+  return uniquePaths(roots);
+}
+
+export function bashNeedsNetwork(command: string): boolean {
+  const parsed = parseBash(command);
+  if (!parsed.ok) return true;
+  for (const argv of parsed.commands) {
+    if (argvNeedsNetwork(unwrapArgv(argv))) return true;
+  }
+  return false;
+}
+
+export function resolveBashSandbox(
+  mode: AgentMode,
+  workspace: string,
+  cwd: string,
+  command: string,
+): BashSandbox {
+  if (mode === "full") {
+    return { workspace, cwd, confineWrites: false, allowNetwork: true, protectGit: false };
+  }
+  const git = commandHead(command) === "git";
+  return {
+    workspace,
+    cwd,
+    confineWrites: true,
+    allowNetwork: bashNeedsNetwork(command),
+    extraWritable: extraWritableRoots(workspace, cwd, command),
+    protectGit: !git,
+  };
+}
+
+export function extraWritableRoots(workspace: string, cwd: string, command: string): string[] {
+  const roots: string[] = [];
+  if (!isInsideWorkspace(workspace, cwd) && !isTmpWritablePath(cwd)) addWritableRoot(roots, cwd);
+  for (const path of extractAbsolutePaths(command, cwd)) {
+    const real = realExistingPath(path);
+    if (denyReason(real)) continue;
+    if (isInsideWorkspace(workspace, real)) continue;
+    if (isTmpWritablePath(real)) continue;
+    addWritableRoot(roots, writableTarget(real));
+  }
+  return uniquePaths(roots);
+}
+
+export function writableRoots(sandbox?: BashSandbox): string[] {
+  const roots = [...tmpWritableRoots()];
+  if (sandbox?.workspace) roots.unshift(normalize(resolve(sandbox.workspace)));
+  for (const extra of sandbox?.extraWritable ?? []) addWritableRoot(roots, extra);
+  return uniquePaths(roots);
+}
+
+export function protectedWritePaths(sandbox?: BashSandbox): string[] {
+  if (!sandbox?.workspace) return [];
+  const root = normalize(resolve(sandbox.workspace));
+  const out: string[] = [];
+  const sessions = join(root, ".socode", "sessions");
+  if (existsSync(sessions)) out.push(sessions);
+  if (sandbox.protectGit !== false) {
+    const gitPath = join(root, ".git");
+    if (existsSync(gitPath)) out.push(gitPath);
+  }
+  return out;
+}
 
 export function bashSpawn(command: string, sandbox?: BashSandbox): {
   file: string;
@@ -706,30 +828,7 @@ export function bashSpawn(command: string, sandbox?: BashSandbox): {
     };
   }
   if (process.platform === "linux" && existsSync("/usr/bin/bwrap") && sandbox.workspace) {
-    const root = normalize(resolve(sandbox.workspace));
-    const cwd = sandbox.cwd ?? root;
-    return {
-      file: "/usr/bin/bwrap",
-      args: [
-        "--die-with-parent",
-        "--new-session",
-        "--ro-bind",
-        "/",
-        "/",
-        "--dev",
-        "/dev",
-        "--proc",
-        "/proc",
-        "--bind",
-        root,
-        root,
-        "--chdir",
-        cwd,
-        "/bin/bash",
-        "-c",
-        command,
-      ],
-    };
+    return { file: "/usr/bin/bwrap", args: bwrapArgs(command, sandbox) };
   }
   return {
     ...direct,
@@ -756,6 +855,50 @@ export function scrubEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEn
   return out;
 }
 
+function argvNeedsNetwork(argv: string[]): boolean {
+  if (!argv.length) return false;
+  if (argv[0] === "__script__") {
+    const inner = parseBash(argv[1] ?? "");
+    if (!inner.ok) return true;
+    return inner.commands.some((cmd) => argvNeedsNetwork(unwrapArgv(cmd)));
+  }
+  const bin = argv[0].replace(/^.*\//, "") || "sh";
+  const sub = argv[1] ?? "";
+  if (bin === "git") return GIT_NETWORK_SUBCOMMANDS.has(sub);
+  if (["npm", "pnpm", "yarn", "bun"].includes(bin)) {
+    const name = sub === "run" ? (argv[2] ?? "") : sub.replace(/^-/, "");
+    if (!sub || sub.startsWith("-")) return true;
+    return !PACKAGE_LOCAL_SUBCOMMANDS.has(name);
+  }
+  return NETWORK_BINS.has(bin);
+}
+
+function bwrapArgs(command: string, sandbox: BashSandbox): string[] {
+  const root = normalize(resolve(sandbox.workspace ?? "/"));
+  const cwd = sandbox.cwd ?? root;
+  const args = [
+    "--die-with-parent",
+    "--new-session",
+    "--ro-bind",
+    "/",
+    "/",
+    "--dev",
+    "/dev",
+    "--proc",
+    "/proc",
+  ];
+  if (!sandbox.allowNetwork) args.push("--unshare-net");
+  for (const dir of writableRoots(sandbox)) {
+    if (!existsSync(dir)) continue;
+    args.push("--bind", dir, dir);
+  }
+  for (const dir of protectedWritePaths(sandbox)) {
+    args.push("--ro-bind", dir, dir);
+  }
+  args.push("--chdir", cwd, "/bin/bash", "-c", command);
+  return args;
+}
+
 function seatbeltProfile(sandbox?: BashSandbox) {
   const home = homedir();
   const secretDirs = secretUserDirs(home);
@@ -768,11 +911,46 @@ function seatbeltProfile(sandbox?: BashSandbox) {
     .join(" ");
   const denySecretFiles = secretFiles.map((file) => `(literal ${sb(file)})`).join(" ");
   const secrets = `(deny file-read* ${denySecretDirs} ${denySecretFiles})(deny file-write* ${denySecretFiles})`;
+  const network = sandbox?.allowNetwork
+    ? ""
+    : "(deny network*)(allow network-outbound (remote unix-socket))";
   if (sandbox?.confineWrites && sandbox.workspace) {
-    const root = normalize(resolve(sandbox.workspace));
-    return `(version 1)(allow default)(deny file-write*)(allow file-write* (subpath ${sb(root)}))${secrets}`;
+    const allowWrite = writableRoots(sandbox)
+      .map((dir) => `(subpath ${sb(dir)})`)
+      .join(" ");
+    const denyProtected = protectedWritePaths(sandbox)
+      .map((dir) => `(subpath ${sb(dir)})`)
+      .join(" ");
+    const protect = denyProtected ? `(deny file-write* ${denyProtected})` : "";
+    return `(version 1)(allow default)${network}(deny file-write*)(allow file-write-data (require-all (path "/dev/null") (vnode-type CHARACTER-DEVICE)))(allow file-write* ${allowWrite})${protect}${secrets}`;
   }
   return `(version 1)(allow default)(deny file-write* ${denyWrite})${secrets}`;
+}
+
+function isTmpWritablePath(path: string) {
+  const target = normalize(path);
+  return tmpWritableRoots().some((root) => target === root || target.startsWith(`${root}${sep}`));
+}
+
+function addWritableRoot(roots: string[], path: string) {
+  const target = normalize(resolve(path));
+  if (!target || target === "/") return;
+  if (DENY_WRITE_DIRS.some((dir) => target === dir || target.startsWith(`${dir}${sep}`))) return;
+  if (denyReason(target)) return;
+  roots.push(target);
+}
+
+function uniquePaths(paths: string[]) {
+  return [...new Set(paths.map((path) => normalize(path)).filter(Boolean))];
+}
+
+function writableTarget(path: string) {
+  try {
+    if (existsSync(path) && statSync(path).isDirectory()) return path;
+  } catch {
+    /* missing path → treat as a file that will be created */
+  }
+  return dirname(path);
 }
 
 function sb(path: string) {

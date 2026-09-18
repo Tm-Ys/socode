@@ -17,7 +17,7 @@
 
 Long 的审批器拿一份干净上下文、只输出 JSON；解析失败、超时、缺字段一律拒绝。密钥、`sudo` 在问审批器之前就被本地硬拒绝；git 和工作区外会问用户。设计说明见 [`docs/LONG-MODE.md`](docs/LONG-MODE.md)。
 
-**失败即拒绝，OS 沙箱和应用层叠在一起。** Ask / Long 下 `bash` 在 macOS 走 `sandbox-exec`（只允许写工作区），Linux 走 `bwrap`。沙箱起不来就拒绝执行，Full 才会警告后裸跑。bash 不再靠整句正则：拆成 argv，剥掉 `env` / `timeout` / `xargs` / `bash -c`，按每一段管道分类——`ls | wc` 仍只读，`ls | tee out` / `find | xargs rm` 会升级；`$()` 和进程替换解析不了就当有副作用。另有：`.env` / `providers.json` / `~/.ssh` 等 denylist、symlink `realpath`、`git status` 的 `a` 不会扩成 `sudo`。bash 和 MCP 子进程都剥掉密钥。每次授权追加到工作区 `.socode-audit.jsonl`。非 TTY（脚本、`--input`）在 Ask 下无法弹窗，写入直接拒绝。
+**失败即拒绝，OS 沙箱和应用层叠在一起。** Ask / Long 下 `bash` 对齐 Codex workspace-write：macOS `sandbox-exec`、Linux `bwrap`；可读大部分磁盘，只允许写工作区 + `/tmp`；`.git` 和会话目录只读；默认断网（`curl` / `npm install` / `git fetch` 等才开网）。沙箱起不来就拒绝执行，Full 才会警告后裸跑。批准 git 或工作区外路径时只加那块可写根，不再整段摘沙箱。bash 不再靠整句正则：拆成 argv，剥掉 `env` / `timeout` / `xargs` / `bash -c`，按每一段管道分类——`ls | wc` 仍只读，`ls | tee out` / `find | xargs rm` 会升级；`$()` 和进程替换解析不了就当有副作用。另有：`.env` / `providers.json` / `~/.ssh` 等 denylist、symlink `realpath`、`git status` 的 `a` 不会扩成 `sudo`。bash 和 MCP 子进程都剥掉密钥。每次授权追加到工作区 `.socode-audit.jsonl`。非 TTY（脚本、`--input`）在 Ask 下无法弹窗，写入直接拒绝。
 
 **长任务能接着做，但不扩大权限。** Long 把目标记在 TaskState 里（会话中的 `【task state】` 消息，不另建表）。上下文挤到约 82% 会自动压缩（轮次之间、工具步之间、以及 `context_compress`），压缩时把最新模式、TaskState 和 plan **钉在保留区**。步数默认 Dynamic P50→P75：先给一半，工具后提醒还剩几步；本段有写入/里程碑/验证才延期一次，纯 read 或 doom 不加。里程碑写入 `done` 时 harness **强制**跑白名单 `verifyCommands`，并可再过一道 fail-closed rubric（四轴、权重 3 必须全过、加权 ≥ 0.7）。失败则撤回这次 done。步数 / token 用尽或 Esc 中止会留下 `【checkpoint】`。Ask / Full 步数用尽仍报错，只有 Long 优雅停。
 
@@ -41,7 +41,7 @@ Long 的审批器拿一份干净上下文、只输出 JSON；解析失败、超�
 
 ## 安装
 
-需要 Node 22+（macOS 或 Linux）。Windows 不是支持平台：用 WSL2，或 `ssh -t` 到一台 Unix 再跑 `socode`，见 [`docs/REMOTE.md`](docs/REMOTE.md)。
+需要 Node 22+（macOS 或 Linux）。Windows 不是支持平台：用 WSL2，或本机 `/remote-ssh` / `socode connect` 连到一台 Unix，见 [`docs/REMOTE.md`](docs/REMOTE.md)。
 
 **macOS 安装包**（GitHub Release 里的 `.dmg` / `.pkg`，或 `socode-*-macos.tar.gz`）：
 
@@ -64,7 +64,7 @@ npx socode
 # 开发时也可以 npm start
 ```
 
-把命令装到 PATH：`npm link`（先 `npm run build`）或 `npm install -g ./socode-0.1.3.tgz`。
+把命令装到 PATH：`npm link`（先 `npm run build`）或 `npm install -g ./socode-0.1.2-fix2.tgz`。
 
 没有保存过 Provider 时，交互式启动会进入向导，写入用户级 `~/.socode/providers.json`（所有工作区、所有对话共用）。也可以用 `--url` / `--api` / `--model` / `--name` 只覆盖本次进程。
 
@@ -107,7 +107,7 @@ npm test
 
 默认 **Ask**（`~/.socode/config.json` 的 `mode`，或 `--mode ask`）。工作区内创建、修改、删除，以及有副作用的命令，会先询问：`y` 允许、`n` 或回车拒绝、`a` 本会话同类一律允许。`write` / `edit` / `delete` 审批时打出完整 unified diff，不只是短预览。Esc 视为拒绝。git 和工作区外的读写也会问你，不是直接拒绝；`.env`、系统路径、`sudo` 仍硬拒绝。
 
-- **Ask**：写、`edit`、删、有副作用的 `bash` 和所有 `git` 先审批；工作区内只读管道（`ls` / `pwd` / `cat | rg`）不打断。工作区外的路径同样先问。批准 git 或区外 bash 后，这一次会放开 OS 写隔离。
+- **Ask**：写、`edit`、删、有副作用的 `bash` 和所有 `git` 先审批；工作区内只读管道（`ls` / `pwd` / `cat | rg`）不打断。工作区外的路径同样先问。批准 git 或区外 bash 后只给那块额外可写根（`.git` 或目标目录），OS 沙箱仍在；本地命令默认断网。
 - **Full**（`/mode full`）：直接改文件和执行命令，仍禁止 `/etc`、`/usr`、`~/.ssh`、`~/.aws`、工作区 `.env` 等。
 - **Plan**（`/mode plan`）：只能看、写计划和向用户提问。只读 MCP 可用。
 - **Long**（`/mode long` 或 `/mode 长程`）：Ask 的权限边界 + 长程编排 + LLM 审批副作用。进入后维护 TaskState（`/task`）。
@@ -201,7 +201,7 @@ Skills 来自各目录下的 `<name>/SKILL.md`（YAML frontmatter 的 `name` / `
 | `src/undo.ts` | 本轮写前快照与 `/undo`（落在 `.socode/undo/`） |
 | `src/usage.ts` | 解析 API usage、每轮 token 行、按标价估美元 |
 | `src/doctor.ts` | `/doctor` 与 `--doctor` |
-| `src/sandbox.ts` | 路径 denylist、bash 解析/分类、OS 沙箱 |
+| `src/sandbox.ts` | 路径 denylist、bash 分类、Codex 式 workspace-write OS 沙箱 |
 | `src/long-approve.ts` | Long 副作用的独立 JSON 审批器 |
 | `src/task-state.ts` | 长程状态（活在对话消息里） |
 | `src/plan.ts` | 可勾选任务计划，`/seeplan` 查看 |

@@ -12,7 +12,7 @@ import {
 import type { AgentMode } from "./mode.js";
 import { isMcpTool } from "./mcp.js";
 import type { Policy } from "./permissions.js";
-import { bashTouchesOutside, commandHead } from "./sandbox.js";
+import { resolveBashSandbox } from "./sandbox.js";
 import { formatSubagentPlan, isReadonlyKind, isVerifyKind, parseSubagentPlan, type SubagentKind } from "./subagent-plan.js";
 import { formatTaskStateCli, patchFromToolArgs } from "./task-state.js";
 import { formatPlanCli, patchFromPlanArgs, planNeedsReview } from "./plan.js";
@@ -529,15 +529,7 @@ export async function executeTool(
       const cwd = str(args, "cwd");
       const command = str(args, "command");
       const workspace = policy?.workspace ?? process.cwd();
-      const lift =
-        policy?.mode === "full" ||
-        commandHead(command) === "git" ||
-        bashTouchesOutside(workspace, cwd, command);
-      return await runBash(command, cwd, 30_000, signal, {
-        workspace,
-        cwd,
-        confineWrites: !lift,
-      });
+      return await runBash(command, cwd, 30_000, signal, resolveBashSandbox(policy?.mode ?? "ask", workspace, cwd, command));
     }
     if (isMcpTool(name) || policy?.mcp?.has(name)) {
       if (!policy?.mcp?.has(name)) return `工具执行失败: 未知 MCP 工具: ${name}`;

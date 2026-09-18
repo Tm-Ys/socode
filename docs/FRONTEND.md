@@ -9,7 +9,7 @@ socode 没有 web 界面。所谓前端就是终端里的这一层 TUI：全是�
 `socode`（或仓库里 `npm start`）后先打一块欢迎框，每次随机抽一条指令说明：
 
 ```
-╭─ socode @ 0.1.3 presented by Tm-Ys ───────────╮
+╭─ socode @ 0.1.2-fix2 presented by Tm-Ys ───────────╮
 │                                               │
 │  你知道吗？输入 / 会按前缀列出命令，Tab 补全。 │
 │                                               │

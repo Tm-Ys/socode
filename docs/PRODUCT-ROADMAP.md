@@ -2,7 +2,7 @@
 
 本文是对 **socode 现状的产品盘点**，不是实现清单。对照实现以仓库当前代码为准（`src/`、`README.md`、`docs/LONG-MODE.md`、`docs/FRONTEND.md`、`docs/REMOTE.md`）。下文不夸大已有能力，也不把尚未落地的能力写成「已经有了」。
 
-版本锚点：本文按 **0.1.1** 重写能力盘点；**0.1.2**（2026-09-17）补上 Provider 退避重试、思考/工具流的 stable+tail 重绘；**0.1.3** 落地 Remote-SSH（本机显示器 + 远端 worker、会话注入 Provider、SSH 主机历史）。此前文本仍写「没有 doctor / 没有 Ask diff / 启动依赖 Postgres」，那些已经落地，不再当缺口立项。
+版本锚点：本文按 **0.1.1** 重写能力盘点；**0.1.2**（2026-09-17）补上 Provider 退避重试、思考/工具流的 stable+tail 重绘；**0.1.3** 落地 Remote-SSH；**0.1.2-fix2** 把 Ask/Long bash 收成 Codex workspace-write（可写工作区+`/tmp`、默认断网、`.git` 只读）。此前文本仍写「没有 doctor / 没有 Ask diff / 启动依赖 Postgres」，那些已经落地，不再当缺口立项。
 
 ---
 
@@ -14,7 +14,7 @@ socode 的产品形状最接近 **Claude Code**：本机终端里的编程 Agent
 
 它 **不像 Pi**。Pi 的核心是可扩展 harness 平台。socode 的核心是 **一种具体的本机编程产品**：权限边界写死在代码里。这条路建议继续走。
 
-一句话：**产品形态学 Claude Code，运行时气质靠近 Codex 的沙箱与会话，不要学 Pi 做平台。** 0.1.1 已经能装上、能问着改、能 doctor、能撤本轮文件写入。还没到「每天打开不会心疼」：补丁协议不够、undo 太浅、网络失败不重试、短轮不默认测、费用几乎看不见。
+一句话：**产品形态学 Claude Code，运行时气质靠近 Codex 的沙箱与会话，不要学 Pi 做平台。** 0.1.1 已经能装上、能问着改、能 doctor、能撤本轮文件写入。还没到「每天打开不会心疼」：补丁协议不够、undo 太浅（不管 bash、不是 rewind）、短轮不默认测。
 
 对标时不要按功能清单打勾。Claude Code 赢在手术刀式改文件、Checkpoint / rewind、安装路径、TUI / IDE 一体。Codex CLI 赢在沙箱默认和审批完成度。socode 已经有权限模式、OS 沙箱、Long 编排、stdio MCP、Skills、Ask 完整 diff、文件会话，这些是真的。
 
@@ -57,7 +57,7 @@ Long 审批器只输出 JSON；解析失败、超时、缺字段一律拒绝。�
 
 ### 2.5 沙箱、审计、审批 UX
 
-Ask / Long 的 bash：macOS `sandbox-exec` 只允许写工作区；Linux `bwrap`。沙箱起不来则拒绝；Full 才警告后裸跑。git 和工作区外改为询问，批准后这一次放开 `confineWrites`。密钥路径仍硬拒绝。授权追加 `.socode-audit.jsonl`。非 TTY 在 Ask 下无法弹窗，写入直接拒绝。
+Ask / Long 的 bash：macOS `sandbox-exec`、Linux `bwrap`，对齐 Codex **workspace-write**：读广、写只限工作区 + `/tmp`（及 `TMPDIR`）；`.git` 和 `.socode/sessions` 只读；默认断网（Unix socket 仍可）；`curl` / `npm install` / `git fetch` 等需要出网的命令才开网。用户批准 git 或工作区外路径时，只给那块额外可写根，**不再整段摘掉沙箱**。沙箱起不来则拒绝；Full 才警告后裸跑。git 和工作区外改为询问。密钥路径仍硬拒绝。授权追加 `.socode-audit.jsonl`。非 TTY 在 Ask 下无法弹窗，写入直接拒绝。
 
 Ask 对 `write` / `edit` / `delete` 在 `y/n/a` 之前打完整 unified diff（`src/ask-diff.ts`）。bash 仍是命令摘要。
 
@@ -96,7 +96,7 @@ Long 的 `【task state】` 活在会话消息里。里程碑 `done` 时强制�
 5. **中断不是灾难。** 工具有超时；网络抖动会重试；半截写入可清理；失败时停下来的语义清楚。
 6. **看得见自己在干什么、花了多少。** 审批能看 diff（已有）；token / 步数 / 子代理花费有默认展示和 `/usage`。
 
-P0 对应还没做完的 1、2、4、5 和 6 的用量部分。P1 补交互面、扩展点、记忆、评测。P2 才是多表面、远程协议 B、更强多 Agent、云端和发行信任。
+P0 对应还没做完的 1、2、4。5 的 Provider 重试和 6 的最小用量行已落地。P1 补交互面、扩展点、记忆、评测。P2 才是多表面、更强多 Agent、云端和发行信任。远程协议 B（`/remote-ssh` / `socode connect`）已在 0.1.3 落地，不再当 P2 缺口。
 
 ---
 
@@ -195,9 +195,9 @@ stdio MCP 已落地。缺口是 HTTP / SSE（可选）和项目级 hooks（PreTo
 
 没有可靠 patch 和更硬的 undo 就做云端执行，只是把风险搬到别人的机器上。
 
-### 6.1 多表面与远程会话协议
+### 6.1 多表面
 
-把 `runAgent`、权限、会话存储抽成稳定协议。现在 `src/index.ts` 把 REPL、斜杠命令、持久化缠在一起。远程开发的产品决策见 [`REMOTE.md`](./REMOTE.md)：**先 A（ssh -t 整进程在远端），再 B（本地 TUI + 远端 worker）**。B 才是这条「远程会话协议」。90 天若做远程，只允许 A 的入口糖，不做完整 B。
+把 `runAgent`、权限、会话存储抽成稳定协议。本地 TUI 仍在 `src/index.ts`。远程工作区的 **B（本机显示器 + 远端 worker）已在 0.1.3 落地**：`/remote-ssh` 与 `socode connect user@host:/abs/path`，见 [`REMOTE.md`](./REMOTE.md) 与 [`REMOTE-B.md`](./REMOTE-B.md)。A（`socode ssh` 的 `ssh -t` 包装）仍然没有，也不再挡 B。P2 剩下的是 IDE 薄封装，不是再做一遍 SSH。
 
 ### 6.2 更强的多 Agent
 
@@ -230,7 +230,7 @@ stdio MCP 已落地。缺口是 HTTP / SSE（可选）和项目级 hooks（PreTo
 [小型回归 eval]
 ```
 
-Provider 429/5xx 退避已在 `src/retry.ts`。远程：文档已在 [`REMOTE.md`](./REMOTE.md)。实现最多穿插 **A：`socode ssh` 包装**。不要插入云沙箱，不要和 eval 抢。
+Provider 429/5xx 退避已在 `src/retry.ts`。远程 B 已在 0.1.3（`/remote-ssh`、`socode connect`）。不要插入云沙箱，不要和 eval 抢。A 的 `socode ssh` 包装仍可做，不是当前必达。
 
 P1 其余（MCP HTTP、hooks、分层记忆、TUI 折叠、usage 分项）和全部 P2 **不进当前必达**。
 
@@ -261,12 +261,11 @@ P1 其余（MCP HTTP、hooks、分层记忆、TUI 折叠、usage 分项）和全
 | 没有 glob | 有 `glob` |
 | `edit` 只能精确匹配、write 非原子 | CRLF/trim、`atomicWrite`、edit 结果带 diff |
 | 没有本轮文件 undo | 有 `/undo`，快照在 `.socode/undo/`；不管 bash，不是 rewind |
-| 会话在 `~/.socode/sessions/` | **不是**。会话在工作区 `.socode/sessions/`；用户级 `~/.socode/` 只放 Provider / config / MCP |
+| 没有远程连接 / 只有自己 `ssh -t` | **不是**。0.1.3 有 `/remote-ssh` 与 `socode connect`（协议 B）。没有的是 A 的 `socode ssh` 包装 |
 
 ### 8.3 当前窗口明确不做
 
 - 云端执行、远程开发容器、把密钥上传到 socode 云。
-- 完整远程协议 B（本地 TUI + 远端 worker）——文档可以写，实现排在 A 之后。
 - 对话 rewind、多 worker 并行写、自动 merge。
 - 签名发布、自动更新、默认遥测。
 - 完整 VS Code/Cursor 对标、LSP / 全语言 AST。
@@ -289,7 +288,8 @@ P1 其余（MCP HTTP、hooks、分层记忆、TUI 折叠、usage 分项）和全
 | `/undo` | 已有，能力见 §4.3 |
 | `/usage` | 已有最小集：每轮 token 行 + 会话累计；单价可选 |
 | `/rewind` | **没有**；若做，不要叫 undo |
-| `socode ssh` | **没有**；见 [`REMOTE.md`](./REMOTE.md) |
+| `socode connect` / `/remote-ssh` | **已有**（0.1.3，协议 B） |
+| `socode ssh` | **没有**（A 的 `ssh -t` 包装，可继续不做） |
 | `/memory` | 没有 |
 | `/checkpoint`（文件快照列表） | 没有；勿与 Long `【checkpoint】` 混名 |
 
@@ -315,6 +315,7 @@ P1 其余（MCP HTTP、hooks、分层记忆、TUI 折叠、usage 分项）和全
 | `src/ask-diff.ts` | Ask 审批 diff |
 | `src/retry.ts` | Provider 429/5xx/网络抖动退避 |
 | `src/usage.ts` | API usage 解析、每轮 token 行、按标价估美元 |
+| `src/sandbox.ts` | 路径 denylist、bash 分类、Codex 式 workspace-write OS 沙箱 |
 | `docs/REMOTE.md` | 远程开发决策 |
 
 ### 9.4 路径

@@ -1,17 +1,25 @@
 import assert from "node:assert/strict";
-import { homedir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
   bashAlwaysAsk,
   bashEscapesWorkspace,
   bashHardDenied,
+  bashNeedsNetwork,
+  bashSpawn,
   bashTouchesOutside,
   classifyBash,
   denyReason,
+  extraWritableRoots,
   isInsideWorkspace,
   mutationDenied,
+  protectedWritePaths,
+  resolveBashSandbox,
   scrubEnv,
+  tmpWritableRoots,
+  writableRoots,
 } from "./sandbox.js";
 
 const ws = "/Users/demo/proj";
@@ -163,5 +171,98 @@ describe("scrubEnv", () => {
     assert.equal(out.OPENAI_API_KEY, undefined);
     assert.equal(out.DATABASE_URL, undefined);
     assert.equal(out.MY_TOKEN, undefined);
+  });
+});
+
+describe("Codex-style workspace-write sandbox", () => {
+  it("treats tmp as a writable root", () => {
+    assert.equal(tmpWritableRoots().includes("/tmp"), true);
+    assert.equal(writableRoots({ workspace: ws, confineWrites: true }).includes("/tmp"), true);
+    assert.equal(writableRoots({ workspace: ws, confineWrites: true }).includes(ws), true);
+  });
+
+  it("keeps network off for local commands and on for curl/git fetch/npm install", () => {
+    assert.equal(bashNeedsNetwork("ls"), false);
+    assert.equal(bashNeedsNetwork("npm test"), false);
+    assert.equal(bashNeedsNetwork("npm run lint"), false);
+    assert.equal(bashNeedsNetwork("curl https://example.test"), true);
+    assert.equal(bashNeedsNetwork("git fetch origin"), true);
+    assert.equal(bashNeedsNetwork("git status"), false);
+    assert.equal(bashNeedsNetwork("npm install"), true);
+    assert.equal(bashNeedsNetwork("bash -c 'curl https://example.test'"), true);
+  });
+
+  it("Ask/Long stay confined; git and /tmp do not unsandbox the whole command", () => {
+    const askLs = resolveBashSandbox("ask", ws, ws, "ls");
+    assert.equal(askLs.confineWrites, true);
+    assert.equal(askLs.allowNetwork, false);
+    assert.equal(askLs.protectGit, true);
+
+    const askGit = resolveBashSandbox("ask", ws, ws, "git commit -m x");
+    assert.equal(askGit.confineWrites, true);
+    assert.equal(askGit.protectGit, false);
+    assert.equal(askGit.allowNetwork, false);
+
+    const askCurl = resolveBashSandbox("long", ws, ws, "curl -o out https://example.test");
+    assert.equal(askCurl.confineWrites, true);
+    assert.equal(askCurl.allowNetwork, true);
+
+    const askTmp = resolveBashSandbox("ask", ws, ws, "echo hi > /tmp/x");
+    assert.equal(askTmp.confineWrites, true);
+    assert.deepEqual(askTmp.extraWritable, []);
+
+    const full = resolveBashSandbox("full", ws, ws, "curl https://example.test");
+    assert.equal(full.confineWrites, false);
+    assert.equal(full.allowNetwork, true);
+  });
+
+  it("adds an approved outside directory without using / as a writable root", () => {
+    const roots = extraWritableRoots(ws, ws, `echo hi > ${homedir()}/outside-socode-test.txt`);
+    assert.equal(roots.includes("/"), false);
+    assert.equal(roots.includes(homedir()), true);
+  });
+
+  it("re-mounts .git and sessions read-only unless git is approved", () => {
+    const root = mkdtempSync(join(tmpdir(), "socode-sbx-"));
+    try {
+      mkdirSync(join(root, ".git"));
+      mkdirSync(join(root, ".socode", "sessions"), { recursive: true });
+      writeFileSync(join(root, "a.ts"), "export {}\n");
+      const protectedPaths = protectedWritePaths({ workspace: root, confineWrites: true, protectGit: true });
+      assert.equal(protectedPaths.includes(join(root, ".git")), true);
+      assert.equal(protectedPaths.includes(join(root, ".socode", "sessions")), true);
+      assert.equal(protectedWritePaths({ workspace: root, protectGit: false }).includes(join(root, ".git")), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("emits a confined seatbelt/bwrap policy with tmp, no network, and git carveout", () => {
+    const root = mkdtempSync(join(tmpdir(), "socode-sbx-"));
+    try {
+      mkdirSync(join(root, ".git"));
+      const spec = bashSpawn("ls", {
+        workspace: root,
+        cwd: root,
+        confineWrites: true,
+        allowNetwork: false,
+        protectGit: true,
+      });
+      const blob = spec.args.join(" ");
+      if (process.platform === "darwin") {
+        assert.equal(spec.file, "/usr/bin/sandbox-exec");
+        assert.match(blob, /deny network\*/);
+        assert.match(blob, /\/tmp/);
+        assert.match(blob, /\.git/);
+        assert.doesNotMatch(blob, /allow network-outbound\)/);
+      }
+      if (process.platform === "linux") {
+        assert.equal(spec.file, "/usr/bin/bwrap");
+        assert.equal(spec.args.includes("--unshare-net"), true);
+        assert.equal(spec.args.includes("/tmp"), true);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
