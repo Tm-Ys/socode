@@ -25,8 +25,8 @@ describe("prompt status", () => {
       "deepseek-flash · medium · new",
     );
     assert.equal(
-      promptStatusLine("deepseek-flash", "medium", { session: "初次问候与询问需求" }),
-      "deepseek-flash · medium · 初次问候与询问需求",
+      promptStatusLine("", "medium", { session: "new" }),
+      "未配置模型 · medium · new",
     );
     assert.match(paintPromptStatus("deepseek-flash · medium", true), /\x1b\[38;5;208mdeepseek-flash · medium\x1b\[0m/);
     assert.equal(paintPromptStatus("deepseek-flash · medium", false), "deepseek-flash · medium");

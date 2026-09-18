@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 export const DEFAULT_CONTEXT_WINDOW = 128000;
 export const DEFAULT_MAX_OUTPUT = 8192;
@@ -18,7 +18,7 @@ export type Provider = {
   thinkingEffort: ThinkingEffort;
 };
 
-type ProviderStore = {
+export type ProviderStore = {
   active: string;
   providers: Provider[];
 };
@@ -29,6 +29,8 @@ export function userSocodeDir() {
 }
 
 export function providerStorePath() {
+  const override = process.env.SOCODE_PROVIDER_STORE?.trim();
+  if (override) return override;
   return join(userSocodeDir(), "providers.json");
 }
 
@@ -253,6 +255,7 @@ function numberOr(value: string | undefined, fallback: number) {
 function readStore(): ProviderStore | null {
   const path = providerStorePath();
   if (existsSync(path)) return parseStoreFile(path);
+  if (!shouldMigrateLegacyCwdStore()) return null;
   const legacy = legacyProviderStorePath();
   if (!existsSync(legacy)) return null;
   const migrated = parseStoreFile(legacy);
@@ -261,9 +264,25 @@ function readStore(): ProviderStore | null {
   return migrated;
 }
 
+function shouldMigrateLegacyCwdStore() {
+  if (process.env.SOCODE_PROVIDER_STORE?.trim()) return false;
+  if (process.env.SOCODE_HOME?.trim()) return false;
+  return true;
+}
+
 function writeStore(store: ProviderStore) {
-  mkdirSync(userSocodeDir(), { recursive: true });
-  writeFileSync(providerStorePath(), `${JSON.stringify(store, null, 2)}\n`, "utf8");
+  const path = providerStorePath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+}
+
+export function dumpProviderStore(dir?: string): ProviderStore | null {
+  const store = dir ? parseStoreFile(join(dir, "providers.json")) : readStore();
+  if (!store?.providers.length) return null;
+  return {
+    active: store.active,
+    providers: store.providers.map((item) => normalizeProvider(item)),
+  };
 }
 
 function parseStoreFile(path: string): ProviderStore | null {

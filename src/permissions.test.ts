@@ -8,6 +8,22 @@ import { createPolicy } from "./permissions.js";
 const ws = process.cwd();
 
 describe("createPolicy", () => {
+  it("uses injected askPermission instead of the TTY prompt", async () => {
+    const titles: string[] = [];
+    const policy = createPolicy(ws, () => "ask", undefined, {
+      askPermission: async (title) => {
+        titles.push(title);
+        return "allow";
+      },
+    });
+    assert.equal(
+      await policy.authorize("write", { path: `${ws}/src/mode.ts`, content: "x" }),
+      null,
+    );
+    assert.equal(titles.length, 1);
+    assert.match(titles[0] ?? "", /写入|修改/);
+  });
+
   it("asks Ask writes outside the workspace instead of hard-denying", async () => {
     const policy = createPolicy(ws, () => "ask");
     const denied = await policy.authorize("write", {

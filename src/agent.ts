@@ -1,6 +1,7 @@
 import { isTurnAborted, throwIfAborted, TurnAborted, TurnFailed } from "./abort.js";
 import { compressAgentMessages, LONG_COMPRESS_RATIO, splitLiveToolTurn } from "./compress.js";
-import { completeChat, type ChatResult, type TokenUsage } from "./chat.js";
+import { completeChat, type ChatResult } from "./chat.js";
+import { addTokenUsage, emptyTokenUsage, usageHasTokens, type TokenUsage } from "./usage.js";
 import { messageTokens } from "./context.js";
 import type { Policy } from "./permissions.js";
 import {
@@ -134,7 +135,7 @@ export async function runAgent(params: {
     role: params.policy?.role,
     extra: params.policy?.mcp?.specs({ mode: params.policy?.mode, role: params.policy?.role }),
   });
-  const usage: TokenUsage = { promptTokens: 0, completionTokens: 0 };
+  const usage = emptyTokenUsage();
   const longHorizon = params.policy?.mode === "long";
   const parentLong = longHorizon && !params.policy?.nested;
   const budget: LongBudgetPlan = params.policy?.longBudget ?? resolveLongBudget(maxSteps);
@@ -437,12 +438,9 @@ function stopForBudget(
 }
 
 function addUsage(total: TokenUsage, next?: TokenUsage) {
-  if (!next) return;
-  total.promptTokens += next.promptTokens;
-  total.completionTokens += next.completionTokens;
+  addTokenUsage(total, next);
 }
 
 function nonemptyUsage(usage: TokenUsage): TokenUsage | undefined {
-  if (usage.promptTokens <= 0 && usage.completionTokens <= 0) return undefined;
-  return usage;
+  return usageHasTokens(usage) ? usage : undefined;
 }

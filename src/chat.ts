@@ -12,12 +12,9 @@ import {
 } from "./retry.js";
 import { absorbChatDelta, finishThinkStream, newThinkStream, type ThinkStream } from "./think.js";
 
-export type { ToolCall };
+import { parseTokenUsage, type TokenUsage } from "./usage.js";
 
-export type TokenUsage = {
-  promptTokens: number;
-  completionTokens: number;
-};
+export type { TokenUsage, ToolCall };
 
 export type ChatResult = {
   content: string;
@@ -378,18 +375,6 @@ function emitChatParts(
   }
 }
 
-function parseUsage(raw?: {
-  prompt_tokens?: number;
-  completion_tokens?: number;
-  total_tokens?: number;
-}): TokenUsage | undefined {
-  if (!raw) return undefined;
-  const promptTokens = Number(raw.prompt_tokens ?? 0);
-  const completionTokens = Number(raw.completion_tokens ?? 0);
-  if (!Number.isFinite(promptTokens) && !Number.isFinite(completionTokens)) return undefined;
-  if (promptTokens <= 0 && completionTokens <= 0) return undefined;
-  return {
-    promptTokens: Math.max(0, promptTokens),
-    completionTokens: Math.max(0, completionTokens),
-  };
+function parseUsage(raw?: unknown) {
+  return parseTokenUsage(raw);
 }

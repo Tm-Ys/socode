@@ -30,6 +30,7 @@ describe("workspace session store", () => {
       const storeB = await openSessionStore(b);
       assert.equal(existsSync(join(a, ".socode", ".gitignore")), true);
       assert.match(readFileSync(join(a, ".socode", ".gitignore"), "utf8"), /sessions/);
+      assert.match(readFileSync(join(a, ".socode", ".gitignore"), "utf8"), /undo/);
       assert.equal(existsSync(join(sessionsDir(a), ".gitignore")), true);
 
       const session = emptySession();

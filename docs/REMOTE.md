@@ -37,20 +37,21 @@ ssh -t user@host 'cd /path/to/repo && socode'
 
 代价：密钥在远端；流式 Markdown 差量重绘对 SSH 延迟敏感；本机没有仓库副本。权限、undo、doctor 的语义不变，因为执行侧仍是「这一台 Unix」。
 
-### B. 本地 TUI + 远端 worker（真正的「远程连接」）
+### B. 本机显示器 + 远端 worker（真正的「远程连接」）
+
+当前对齐接近 VS Code Remote-SSH，**不是**「本机跑模型、远端只跑工具」。完整草案：[`REMOTE-B.md`](./REMOTE-B.md)。
 
 ```
-本机 socode（TUI、Ask、providers.json）
-        │  JSON-RPC over SSH 隧道或 `ssh host socode serve --stdio`
-远端 socode serve
-        └─ read / write / edit / bash / MCP，会话、审计、沙箱
+本机 socode（TTY：画流式事件、Ask、问卷、收 prompt）
+        │  ① 注入 socode-runtime + 如需则注入 Node 22 到 ~/.socode-server
+        │  ② JSON-RPC over SSH stdio（不要 ssh -t）
+远端 worker
+        └─ 拼上下文、调 API、工具、会话、沙箱
 ```
 
-模型调用留在笔记本，工具留在仓库那台机器。`runAgent` 语义不变，`executeTool` 换成 RPC。问不问人在本地 TTY；路径 / 沙箱 / git 仍在执行侧判定。
+本机没有仓库副本。问不问人在本地 TTY；路径 / 沙箱 / git / 模型请求都在执行侧。传输只走 SSH，先不要公网 HTTP。会话仍写远端工作区 `.socode/sessions/`。
 
-现在不要做：`src/index.ts` 把 REPL、工具、持久化缠在一起。要做 B，先把「问人的 TTY」和「改文件的 workspace」拆开。A 不需要拆。
-
-传输只走 SSH（端口转发或 stdio），先不要公网 HTTP。会话仍写远端工作区 `.socode/sessions/`。
+要做 B，先把「问人的 TTY」和「worker」拆开。A 不需要拆。
 
 ### C. 不要做：云沙箱 / 同步工作区
 
@@ -64,16 +65,18 @@ ssh -t user@host 'cd /path/to/repo && socode'
 
 1. **先当 SSH 应用打磨。** 文档即本文。确认 raw mode、Esc、窗口缩放、Ask 审批、流式重绘在 `ssh -t` 下能用。Windows 用户走 WSL2 或这条 SSH，不移植 cmd / PowerShell。
 2. **入口糖。** `socode ssh host:/path`：连上后在远端跑 doctor（Node / socode / 沙箱）。缺了只提示，不自动灌密钥。
-3. **TUI 过 SSH 太卡、或密钥必须留在本机时，再拆 serve。** 协议保持小：现成的 `AgentEvent`（`delta` / `thinking` / `tool_call` / `tool_result`）加上 `ask` / `question`。Ask diff 在本地画，文件内容按现有截断走。
+3. **要本机抗延迟重绘、又不必预装 socode 时，做 B。** 协议保持小：现成的 `AgentEvent`（`delta` / `thinking` / `tool_call` / `tool_result`）加上 `ask` / `question`，以及只含本轮用户输入的 `turn/start`。Ask diff 在本地画，文件内容按现有截断走。API 在远端；本机 Provider 注入到远端会话文件，断开前删除。不进环境变量里的密钥、不进 runtime 包。
 
 ---
 
 ## 约束（做的时候不要破）
 
 - 执行侧 `workspace` 必须是远端仓库的绝对路径。权限、沙箱、`.socode-audit.jsonl` 跟今天一样绑在那个目录。
-- `/undo` 若仍是进程内快照，远程重启或断线后一样没了。持久 undo 是路线图缺口，不是远程协议该先发明的功能。
+- `/undo` 快照在远端工作区 `.socode/undo/`。SSH 会话断了再连上，只要还是同一个仓库目录，仍可撤最近一轮 socode 文件写入。换机器或换目录不行。
 - 不要在 Windows 上假一个 bash 来「适配远程」。远端必须是 Linux 或 macOS。
-- 不要把 Provider 密钥写进环境变量再 ssh 转发。A 用远端 `~/.socode`；B 用本机 `~/.socode`，请求从本机出网。
-- Long 审批器若走 B，应在持有密钥的那一侧调模型；工具结果过隧道即可。
+- 不要把 Provider 密钥写进环境变量再 ssh 转发，也不要打进 runtime 包或 JSON-RPC。A 用远端自己的 `~/.socode`。B 把本机 Provider 拷到远端 `~/.socode-server/session/providers.json`，断开前删掉，不覆盖远端 `~/.socode/providers.json`。请求从远端出网。
+- Long 审批器和对话模型在同一侧（远端 worker）；Ask / 问卷的按键仍回本机 TTY。
 
 验收（A）：从一台没有仓库副本的机器 `socode ssh user@host:/repo`，Ask 改一个文件、审批能看见 diff、`/doctor` 为绿。验收（B）另开，不和 A 混在一个里程碑里。
+
+B 的实现草案（对齐前不写代码）：[`REMOTE-B.md`](./REMOTE-B.md)。

@@ -1,3 +1,5 @@
+import { matchSshHosts, parseSshDestination } from "./ssh-history.js";
+
 export type SlashCommand = {
   name: string;
   hint: string;
@@ -15,6 +17,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/model", hint: "在已保存的 Provider / 模型之间切换" },
   { name: "/effort", hint: "从 API 读取并用方向键调整思考强度" },
   { name: "/context", hint: "查看上下文占用" },
+  { name: "/usage", hint: "本轮与本会话 token / 缓存 / 价格" },
   { name: "/compress", hint: "压缩对话上下文" },
   { name: "/mode", hint: "查看权限模式" },
   { name: "/mode full", hint: "Full Access，直接改文件" },
@@ -29,7 +32,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/seeplan", hint: "查看当前任务计划勾选进度" },
   { name: "/setplan", hint: "强制本轮按说明建 Plan，并激活 grill-me" },
   { name: "/setworkarea", hint: "空对话时设置工作区（选文件夹或绝对路径）" },
-  { name: "/undo", hint: "只撤本轮 write/edit/delete，不管 bash，不是 rewind" },
+  { name: "/remote-ssh", hint: "Remote-SSH：本机显示器 + 远端 worker" },
+  { name: "/undo", hint: "撤回最近一轮 write/edit/delete（落盘，不管 bash，不是 rewind）" },
   { name: "/doctor", hint: "检查 Node、密钥、沙箱、目录是否可写" },
   { name: "/exit", hint: "退出" },
   { name: "/quit", hint: "退出" },
@@ -37,7 +41,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
 
 export function matchCommands(input: string) {
   if (!input.startsWith("/")) return [];
-  return SLASH_COMMANDS.filter((command) => command.name.startsWith(input));
+  return [...SLASH_COMMANDS, ...sshHistoryCommands()].filter((command) => command.name.startsWith(input));
 }
 
 export function longestCommonPrefix(values: string[]) {
@@ -71,9 +75,59 @@ export function resolveCommand(input: string) {
 }
 
 export function completeCommand(input: string) {
+  const ssh = completeRemoteSsh(input);
+  if (ssh) return ssh;
   const matches = matchCommands(input);
   if (matches.length === 0) return input;
   if (matches.length === 1) return matches[0].name;
   const prefix = longestCommonPrefix(matches.map((item) => item.name));
   return prefix.length > input.length ? prefix : input;
+}
+
+function sshHistoryCommands(): SlashCommand[] {
+  return matchSshHosts("").map((item) => ({
+    name: `/remote-ssh ${item.user}@${item.host}`,
+    hint: item.lastWorkspace ? `上次 ${item.lastWorkspace}` : item.auth === "key" ? "密钥登录" : "需重新输入密码",
+  }));
+}
+
+let sshCycleKey = "";
+let sshCycleIndex = -1;
+
+function completeRemoteSsh(input: string) {
+  if (input !== "/remote-ssh" && !input.startsWith("/remote-ssh ")) return null;
+  const names = sshHistoryCommands().map((item) => item.name);
+  if (!names.length) return null;
+  if (input === "/remote-ssh" || input === "/remote-ssh ") {
+    if (sshCycleKey !== "/remote-ssh") {
+      sshCycleKey = "/remote-ssh";
+      sshCycleIndex = 0;
+    } else {
+      sshCycleIndex = (sshCycleIndex + 1) % names.length;
+    }
+    return names[sshCycleIndex] ?? input;
+  }
+  const exact = names.indexOf(input);
+  if (exact >= 0 && names.length > 1) {
+    sshCycleKey = "/remote-ssh";
+    sshCycleIndex = (exact + 1) % names.length;
+    return names[sshCycleIndex] ?? input;
+  }
+  const rest = input.slice("/remote-ssh".length).trim();
+  const matches = matchSshHosts(rest).map((item) => `/remote-ssh ${item.user}@${item.host}`);
+  if (!matches.length) return null;
+  if (matches.length === 1) return matches[0];
+  const prefix = longestCommonPrefix(matches);
+  return prefix.length > input.length ? prefix : matches[0];
+}
+
+export function parseRemoteSshCommand(input: string) {
+  const trimmed = input.trim();
+  if (trimmed === "/remote-ssh") return { ok: true as const, target: "" };
+  if (!trimmed.startsWith("/remote-ssh ")) return null;
+  const rest = trimmed.slice("/remote-ssh ".length).trim();
+  if (!rest) return { ok: true as const, target: "" };
+  const parsed = parseSshDestination(rest);
+  if (!parsed?.host) return { ok: false as const, error: "用法: /remote-ssh 或 /remote-ssh user@host" };
+  return { ok: true as const, target: rest };
 }

@@ -37,15 +37,16 @@ export function resolveWorkarea(raw: string): { path: string } | { error: string
   return { path: real };
 }
 
-export function displayWorkarea(path: string) {
-  const home = homedir();
+export function displayWorkarea(path: string, home = homedir()) {
   if (path === home) return "~";
   if (home && path.startsWith(`${home}/`)) return `~${path.slice(home.length)}`;
   return path;
 }
 
-export function workareaPlaceholder(path: string) {
-  return `on ${displayWorkarea(path)}`;
+export function workareaPlaceholder(path: string, opts?: { host?: string; home?: string }) {
+  const place = displayWorkarea(path, opts?.home);
+  if (opts?.host) return `on ssh@${opts.host} workspace ${place}`;
+  return `on ${place}`;
 }
 
 export function inputPlaceholder(buffer: string, placeholder?: string) {

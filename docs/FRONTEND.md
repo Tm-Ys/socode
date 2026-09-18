@@ -9,7 +9,7 @@ socode 没有 web 界面。所谓前端就是终端里的这一层 TUI：全是�
 `socode`（或仓库里 `npm start`）后先打一块欢迎框，每次随机抽一条指令说明：
 
 ```
-╭─ socode ──────────────────────────────────────╮
+╭─ socode @ 0.1.3 presented by Tm-Ys ───────────╮
 │                                               │
 │  你知道吗？输入 / 会按前缀列出命令，Tab 补全。 │
 │                                               │
@@ -139,6 +139,10 @@ Ask 模式下，写文件或跑命令前弹提问，等一个按键：
 
 `e` 或 `/provider edit [name]` 按字段改，回车保留方括号里的当前值，不会把空输入当成清空。`n` 或 `/provider new` 是空表。多个 Provider 存在 `~/.socode/providers.json`，和当前工作区无关。非 TTY 用 `/provider show` / `/provider list` / `/provider <name>`。
 
+## Remote-SSH
+
+`/remote-ssh` 清屏后上下对半：上半填对方 IP、用户名、密码或密钥路径，连上后浏览远端目录（↑↓ 移动，→ 进入，← 返回）。enter 第一次询问「确定选择该目录为工作目录？」，再按一次才进入。主机栏和主提示符里的 `/remote-ssh` 都可用 Tab 补全历史主机（`~/.socode/ssh-hosts.json`，不存密码）。`/remote-ssh user@host` 会预填用户和地址，密码仍要手输。下半是连接日志，成功绿色、失败红色。连上之后输入行占位变成 `on ssh@ip workspace ~/example`；会把本机 Provider 注入到远端会话文件，断开前删掉。没配模型时状态行显示 `未配置模型`。也可以继续用 CLI：`socode connect user@host:/abs/path`。实现：`src/remote-ssh-ui.ts`、`src/connect.ts`、`src/ssh-history.ts`。
+
 ## 子代理
 
 `subagent` 默认**不**把内部轨迹打出来：先打一行「N 个子代理在跑」，过程藏起来，右下角 HUD 显示 `子代理 n/m 在跑`（`src/subagent-ui.ts`）。`/seesubagent` 列出，`/seesubagent [序号]` 看某一个的过程，`/seesubagent off` 取消盯着。explorer 并行、worker 串行。结束后 HUD 消失，父代理只拿到摘要。
@@ -148,6 +152,7 @@ Ask 模式下，写文件或跑命令前弹提问，等一个按键：
 - 压缩上下文时打：`压缩上下文，大约省下 N tokens`
 - 错误统一走 `err> <message>` 到 stderr
 - `/context` 打色块占用（system / tools / 对话 / 预留输出 / 空闲）；recap 过的轮次按短 recap 计 token，报告里会标 `recap N 轮`
+- 每轮结束默认打一行暗色 `tokens  入 …  缓存 …  出 …`（有 `modelPricing` 才带 `$`，否则 `未标价`）；`/usage` 看本会话累计，不占用 `/context` 色带
 
 ## 一句话总结
 

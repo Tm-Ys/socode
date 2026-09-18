@@ -2,7 +2,7 @@
 
 本文是对 **socode 现状的产品盘点**，不是实现清单。对照实现以仓库当前代码为准（`src/`、`README.md`、`docs/LONG-MODE.md`、`docs/FRONTEND.md`、`docs/REMOTE.md`）。下文不夸大已有能力，也不把尚未落地的能力写成「已经有了」。
 
-版本锚点：本文按 **0.1.1** 重写能力盘点；**0.1.2**（2026-09-17）补上 Provider 退避重试、思考/工具流的 stable+tail 重绘，以及远程开发文档。此前文本仍写「没有 doctor / 没有 Ask diff / 启动依赖 Postgres」，那些已经落地，不再当缺口立项。
+版本锚点：本文按 **0.1.1** 重写能力盘点；**0.1.2**（2026-09-17）补上 Provider 退避重试、思考/工具流的 stable+tail 重绘；**0.1.3** 落地 Remote-SSH（本机显示器 + 远端 worker、会话注入 Provider、SSH 主机历史）。此前文本仍写「没有 doctor / 没有 Ask diff / 启动依赖 Postgres」，那些已经落地，不再当缺口立项。
 
 ---
 
@@ -63,7 +63,7 @@ Ask 对 `write` / `edit` / `delete` 在 `y/n/a` 之前打完整 unified diff（`
 
 ### 2.6 `/undo`、`/doctor`、安装
 
-- **`/undo`**：进程内、最近一轮 `write` / `edit` / `delete` 的写前字节副本。Esc 后已落地的仍可撤。详见 §4.4 还缺什么。
+- **`/undo`**：最近一轮 `write` / `edit` / `delete` 的写前字节副本，落在工作区 `.socode/undo/`，重启后仍可撤。Esc 后已落地的仍可撤。不管 bash，不是对话 rewind。详见 §4.3。
 - **`/doctor` 与 `--doctor`**：Node 版本、密钥有无、sandbox-exec/bwrap、`~/.socode` 与工作区会话目录可写。
 - **安装**：`bin/socode.mjs`；macOS 有 `.dmg` / `.pkg` / tar.gz。无 Postgres 硬依赖。Windows 不是支持平台，见 [`REMOTE.md`](./REMOTE.md)。
 
@@ -75,7 +75,7 @@ Long 的 `【task state】` 活在会话消息里。里程碑 `done` 时强制�
 
 ### 2.8 终端与 Provider
 
-手写 ANSI，无 React / Ink，见 [`FRONTEND.md`](./FRONTEND.md)。`/context` 用色块标占用，并可附带 **上一轮** API 的 prompt / completion。没有 `/usage`，没有分项账本。
+手写 ANSI，无 React / Ink，见 [`FRONTEND.md`](./FRONTEND.md)。每轮结束默认打 `tokens` 行（入 / 缓存 / 出，可选美元）。`/usage` 看本会话累计。`/context` 仍是色块占用，并可附带上一轮用量行。没有父/子分项账本，没有墙钟时间。
 
 `completeChat`（`src/chat.ts` + `src/retry.ts`）对 429 / 5xx / 网络抖动最多 3 次，指数退避，尊重 `Retry-After`。401 等 4xx 直接抛。已经吐出 token 的半截流式不再重试。Esc 取消进行中的请求和等待。`provider.ts` 只存密钥和模型，不负责重试。流式空内容仍抛错。
 
@@ -130,28 +130,24 @@ P0 对应还没做完的 1、2、4、5 和 6 的用量部分。P1 补交互面�
 
 **验收。** 黄金任务或脚本：在本仓库改 `src/agent.ts` 一处行为并配测试时，轨迹里出现测试命令，失败会阻止「声称已完成」。偏好关闭后不再强跑。
 
-### 4.3 `/undo` 不持久、不管 bash、不是对话 rewind
+### 4.3 `/undo`：持久最近一轮文件快照，不管 bash，不是对话 rewind
 
-**为什么重要。** 用户敢按 `a` 或把 Long 交给模型，前提是搞砸了能回到这一轮开始。现在的 `/undo` 只覆盖「这个进程里、最近一次写文件工具」——比完全没有强，但还不够当主力保险。
+**为什么重要。** 用户敢按 `a` 或把 Long 交给模型，前提是搞砸了能回到这一轮开始。
 
 **现状（必须写清，避免把它当成 Checkpoint）：**
 
 | 它是 | 它不是 |
 | --- | --- |
-| 进程内 `Map`，`write` / `edit` / `delete` 写前把字节读进内存 | 落盘快照；重启、崩溃、`/new`、换工作区后还在 |
-| 只撤 socode 文件工具碰过的路径 | 撤 `bash`（`sed`、`npm`、`git checkout`、测试写缓存） |
+| 工作区 `.socode/undo/` 里最近一轮 `write` / `edit` / `delete` 的写前字节 | 多轮历史；`/new` 或换工作区后仍指向**当前工作区**最后一次写入 |
+| 关进程、崩溃后再开 `socode` 仍可 `/undo` | 撤 `bash`（`sed`、`npm`、`git checkout`、测试写缓存） |
 | 最近一轮写入；下一轮再写才换快照 | 对话 rewind：不删消息、不把模型说辞收回去 |
 | 与 Long 的 `【checkpoint】` 无关 | 任务状态恢复、git stash、Claude Code 式 session rewind |
 
 `beginUndoTurn` 在每轮 `ask()` 开头置位；若下一轮只聊天不写文件，上一轮快照还在。这是有意的，不是 rewind。
 
-**目标形态。** 分三层，不要混成一个命令：
+**还缺。** 最近 N 轮（现在只留一轮）；bash 副作用仍声明做不到。对话 rewind 继续 **不是 P0**，若以后做应叫 `/rewind`。
 
-1. **文件 undo（加强现有 `/undo`）**：快照进会话或工作区 `.socode/`，跨重启可撤最近 N 轮 socode 写入的文件；仍不动用户没被本轮碰过的脏文件。
-2. **bash 副作用**：P0 只要求 **声明做不到** 并在 `/undo` 文案里写明；若做，限于能从写前 `stat` 到的常规文件，不宣称能反转 `rm -rf`、网络、git 历史。不要假装能 undo 一条任意 shell。
-3. **对话 rewind**：明确 **不是 P0**。若以后做，应是另一条命令（例如 `/rewind`），恢复消息与可选文件快照，而不是把 `/undo` 做成人称「后悔药」。
-
-**验收。** 固定夹具：一轮 `edit`/`write`/`delete` 后 `/undo`，工作区字节级回到该轮开始；重启进程后再 `/undo` 仍能撤（持久化落地后）。文档和欢迎语写明：不管 bash、不是 rewind。有 bash 改文件的轨迹里，`/undo` 必须提示那些路径没被跟踪，而不是静默宣称「已全部撤回」。
+**验收（已覆盖）。** 一轮 `edit`/`write`/`delete` 后 `/undo`，工作区字节级回到该轮开始；模拟重启后再 `/undo` 仍能撤。文档和欢迎语写明：不管 bash、不是 rewind。
 
 ### 4.4 中断与失败语义（Provider 重试已落地）
 
@@ -169,13 +165,13 @@ P1 不阻塞「能改自己的仓库」，但阻塞「愿意长时间开着、�
 
 ### 5.1 `/usage` 与默认用量行
 
-**为什么重要。** 子代理、Long 审批、skill 激活都是额外调用。用户只在 `/context` 里看到上一轮 prompt / completion，不知道这一轮多少步、子代理花了多少。没有 `/usage`。Long 有 token/步数硬停；Ask 没有「意外子代理爆发」的软阈值。
+**为什么重要。** 子代理、Long 审批、skill 激活都是额外调用。用户应能看见这一轮花了多少，而不是只在 `/context` 里猜窗口占用。
 
-**现状。** `runAgent` 累计 `TokenUsage`，存在 `lastUsage` 里给 `/context` 用。没有美元估价、没有分项（主循环 / 审批 / 子代理 / 压缩）、没有跨会话账本、不默认上报。
+**现状。** 对标 OpenCode：解析 API `usage` 的 input / output / cache read / cache write / reasoning；OpenAI 的 `prompt_tokens` 已含缓存，估价时要扣掉，避免重复计费。每轮结束默认打一行 `tokens  入 …  缓存 …  出 …`，没有 `modelPricing` 就写 `未标价`，**不编造金额**。`/usage` 看本会话累计。单价是 `~/.socode/config.json` 里按模型 id 的美元 / 百万 token（`input` / `output`，可选 `cacheRead` / `cacheWrite`）。
 
-**目标形态。** 每轮结束默认打一行：主模型 tokens、工具步数、子代理次数与 tokens、墙钟时间。`/usage` 看本会话累计。可选软/硬阈值。未配置单价时不编造金额。
+**还缺。** 父循环 / 审批 / 子代理 / 压缩分项；墙钟时间；软/硬花费阈值。
 
-**验收。** 一轮含一次子代理的对话，结束行能分开父 / 子 tokens。`/usage` 存在且与 `/context` 不抢同一块色带。
+**验收（已覆盖最小集）。** 有 `usage` 的一轮结束后出现 token 行；`/usage` 存在且不占用 `/context` 色带；没配单价时没有美元数字。
 
 ### 5.2 TUI 轨迹与 IDE 表面
 
@@ -225,10 +221,10 @@ stdio MCP 已落地。缺口是 HTTP / SSE（可选）和项目级 hooks（PreTo
 [apply_patch + 写后 diff 已有，补多 hunk / 锚点]
         │
         ▼
-[/undo 持久化；文案已写明只管本轮、不管 bash、不是 rewind]
+[/undo 持久化已落地；文案已写明只管本轮、不管 bash、不是 rewind]
         │
         ▼
-[短轮改完就测  +  /usage]
+[短轮改完就测]
         │
         ▼
 [小型回归 eval]
@@ -236,7 +232,7 @@ stdio MCP 已落地。缺口是 HTTP / SSE（可选）和项目级 hooks（PreTo
 
 Provider 429/5xx 退避已在 `src/retry.ts`。远程：文档已在 [`REMOTE.md`](./REMOTE.md)。实现最多穿插 **A：`socode ssh` 包装**。不要插入云沙箱，不要和 eval 抢。
 
-P1 其余（MCP HTTP、hooks、分层记忆、TUI 折叠）和全部 P2 **不进当前必达**。有余力优先 `/usage` 最小集。
+P1 其余（MCP HTTP、hooks、分层记忆、TUI 折叠、usage 分项）和全部 P2 **不进当前必达**。
 
 90 天口令更新为：在一台只有 Node 的 Linux 或 macOS 上，安装 socode，配密钥，用 Ask 对已有文件打 **patch（多 hunk）**，审批看见 diff，短轮跑测试，网络 429 能自己缓过来，`/undo` 重启后仍能回到改前，`/doctor` 为绿，`/usage` 能看见这一轮花了多少。Windows 走 SSH / WSL，见远程文档。
 
@@ -264,7 +260,7 @@ P1 其余（MCP HTTP、hooks、分层记忆、TUI 折叠）和全部 P2 **不进
 | Ask 审批只有短预览 | `write`/`edit`/`delete` 完整 unified diff |
 | 没有 glob | 有 `glob` |
 | `edit` 只能精确匹配、write 非原子 | CRLF/trim、`atomicWrite`、edit 结果带 diff |
-| 没有本轮文件 undo | 有进程内 `/undo`；剩余见 §4.3 |
+| 没有本轮文件 undo | 有 `/undo`，快照在 `.socode/undo/`；不管 bash，不是 rewind |
 | 会话在 `~/.socode/sessions/` | **不是**。会话在工作区 `.socode/sessions/`；用户级 `~/.socode/` 只放 Provider / config / MCP |
 
 ### 8.3 当前窗口明确不做
@@ -291,7 +287,7 @@ P1 其余（MCP HTTP、hooks、分层记忆、TUI 折叠）和全部 P2 **不进
 | `socode --doctor` / `/doctor` | 已有 |
 | 第一轮 Provider 向导 | 已有 |
 | `/undo` | 已有，能力见 §4.3 |
-| `/usage` | **没有** |
+| `/usage` | 已有最小集：每轮 token 行 + 会话累计；单价可选 |
 | `/rewind` | **没有**；若做，不要叫 undo |
 | `socode ssh` | **没有**；见 [`REMOTE.md`](./REMOTE.md) |
 | `/memory` | 没有 |
@@ -314,11 +310,11 @@ P1 其余（MCP HTTP、hooks、分层记忆、TUI 折叠）和全部 P2 **不进
 | --- | --- |
 | `src/patch.ts` | 现为 `edit` 的匹配与 diff；将来才是 apply_patch 解析器 |
 | `src/db.ts` | 工作区文件会话，不是 Postgres 适配器 |
-| `src/undo.ts` | 进程内写前快照 |
+| `src/undo.ts` | 写前快照，落在工作区 `.socode/undo/` |
 | `src/doctor.ts` | doctor |
 | `src/ask-diff.ts` | Ask 审批 diff |
 | `src/retry.ts` | Provider 429/5xx/网络抖动退避 |
-| `src/usage.ts` | **没有** |
+| `src/usage.ts` | API usage 解析、每轮 token 行、按标价估美元 |
 | `docs/REMOTE.md` | 远程开发决策 |
 
 ### 9.4 路径
@@ -326,7 +322,7 @@ P1 其余（MCP HTTP、hooks、分层记忆、TUI 折叠）和全部 P2 **不进
 - 用户级：`~/.socode/`（`providers.json`、`config.json`、`mcp.json`、可选 skills）。
 - 会话：工作区 `.socode/sessions/`。
 - 审计：工作区 `.socode-audit.jsonl`。
-- 持久 undo（尚未做）：应进工作区 `.socode/` 或会话 JSON，不要写到用户级以免串仓库。
+- 持久 undo：工作区 `.socode/undo/`（最近一轮）。
 
 ---
 

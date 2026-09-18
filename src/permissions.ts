@@ -38,6 +38,8 @@ import {
 } from "./sandbox.js";
 import { formatAskDiff } from "./ask-diff.js";
 
+export type AskPermission = (title: string, detail: string, diff?: string) => Promise<PermissionAnswer>;
+
 export type Policy = {
   mode: AgentMode;
   workspace: string;
@@ -47,6 +49,7 @@ export type Policy = {
   role?: SubagentKind;
   subagents?: SubagentStore;
   spawnSubagent?: (args: Record<string, unknown>, signal?: AbortSignal) => Promise<string>;
+  askPermission?: AskPermission;
   askQuestions?: (questions: QuestionInfo[], signal?: AbortSignal) => Promise<QuestionOutcome>;
   mcp?: McpHub;
   longApprove?: LongApprover;
@@ -61,6 +64,7 @@ export type PolicyHooks = {
   role?: SubagentKind;
   subagents?: SubagentStore;
   spawnSubagent?: (args: Record<string, unknown>, signal?: AbortSignal) => Promise<string>;
+  askPermission?: AskPermission;
   askQuestions?: (questions: QuestionInfo[], signal?: AbortSignal) => Promise<QuestionOutcome>;
   mcp?: McpHub;
   plans?: PlanStore;
@@ -90,6 +94,7 @@ export function createPolicy(
     role: hooks?.role,
     subagents: hooks?.subagents,
     spawnSubagent: hooks?.spawnSubagent,
+    askPermission: hooks?.askPermission,
     askQuestions: hooks?.askQuestions,
     mcp: hooks?.mcp,
     longApprove: hooks?.longApprove,
@@ -301,7 +306,8 @@ async function decide(
   if (grants.has(key)) return null;
 
   const zone = inside ? "工作区内" : "工作区外";
-  const answer: PermissionAnswer = await askPermission(
+  const ask = req.hooks?.askPermission ?? askPermission;
+  const answer: PermissionAnswer = await ask(
     req.title ?? `${opLabel(req.op)}  ${req.detail}`,
     `${zone}  ${req.path}`,
     req.diff,

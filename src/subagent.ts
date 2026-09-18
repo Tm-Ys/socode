@@ -204,6 +204,8 @@ export function childPolicy(parent: Policy, kind: SubagentKind): Policy {
     role: kind,
     mcp: parent.mcp,
     longApprove: parent.longApprove,
+    askPermission: parent.askPermission,
+    askQuestions: parent.askQuestions,
   });
 }
 

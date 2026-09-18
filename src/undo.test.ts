@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { deleteAbsoluteFile, editAbsoluteFile, writeAbsoluteFile } from "./fs-tools.js";
-import { beginUndoTurn, pendingUndo, resetUndoForTests, undoLastTurn } from "./undo.js";
+import { beginUndoTurn, bindUndoStore, pendingUndo, resetUndoForTests, undoLastTurn } from "./undo.js";
 
 describe("undo last turn", () => {
   it("restores edit/write/delete from the latest writing turn only", async () => {
@@ -55,6 +55,27 @@ describe("undo last turn", () => {
       await undoLastTurn();
       assert.equal(readFileSync(first, "utf8"), "ONE\n");
       assert.equal(readFileSync(second, "utf8"), "two\n");
+    } finally {
+      resetUndoForTests();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reloads the last writing turn from .socode/undo after a restart", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "socode-undo-"));
+    const edited = join(dir, "kept.ts");
+    resetUndoForTests();
+    try {
+      writeFileSync(edited, "const n = 1;\n");
+      await bindUndoStore(dir);
+      beginUndoTurn();
+      await editAbsoluteFile(edited, "const n = 1;", "const n = 2;");
+      assert.equal(readFileSync(edited, "utf8"), "const n = 2;\n");
+      resetUndoForTests();
+      await bindUndoStore(dir);
+      assert.equal(pendingUndo().length, 1);
+      await undoLastTurn();
+      assert.equal(readFileSync(edited, "utf8"), "const n = 1;\n");
     } finally {
       resetUndoForTests();
       rmSync(dir, { recursive: true, force: true });

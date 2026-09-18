@@ -35,6 +35,13 @@ describe("denyReason", () => {
     assert.match(denyReason(join(homedir(), ".ssh/id_rsa")) ?? "", /受保护/);
   });
 
+  it("allows a project under /root but still blocks root secrets", () => {
+    assert.equal(denyReason("/root/server/minecraft_server/server.properties"), null);
+    assert.equal(denyReason("/root/app/src/index.ts"), null);
+    assert.match(denyReason("/root/.ssh/id_rsa") ?? "", /受保护/);
+    assert.match(denyReason("/root/.socode/providers.json") ?? "", /受保护/);
+  });
+
   it("allows workspace files", () => {
     assert.equal(denyReason(`${ws}/src/index.ts`), null);
   });

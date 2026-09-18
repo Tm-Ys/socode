@@ -33,6 +33,7 @@ describe("loadConfig", () => {
       assert.equal(cfg.judgeModel, "");
       assert.equal(cfg.longBudgetPolicy, "dynamic");
       assert.equal(cfg.longBudgetDynamic, "50-75");
+      assert.deepEqual(cfg.modelPricing, {});
     });
   });
 
@@ -45,6 +46,23 @@ describe("loadConfig", () => {
       assert.equal(cfg.maxAgentSteps, 12);
       assert.equal(cfg.judgeModel, "lite");
       assert.match(readFileSync(join(home, "config.json"), "utf8"), /"plan"/);
+    });
+  });
+
+  it("keeps modelPricing as USD per 1M tokens", () => {
+    withHome((home) => {
+      saveConfig({
+        modelPricing: {
+          "deepseek-chat": { input: 0.27, output: 1.1, cacheRead: 0.07 },
+          skip: { input: 0, output: 1 },
+        },
+      });
+      resetConfigCache();
+      const cfg = loadConfig();
+      assert.deepEqual(cfg.modelPricing, {
+        "deepseek-chat": { input: 0.27, output: 1.1, cacheRead: 0.07 },
+      });
+      assert.match(readFileSync(join(home, "config.json"), "utf8"), /cacheRead/);
     });
   });
 });

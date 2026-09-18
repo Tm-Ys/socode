@@ -1,35 +1,14 @@
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { isTurnAborted, TurnAborted, TurnFailed } from "./abort.js";
-import { formatBanner, pickWelcome } from "./banner.js";
-import { closeIncompleteTrace, runAgent, type AgentEvent } from "./agent.js";
-import { loadConfig, longBudgetFromConfig, migrateLegacyDotenv } from "./config.js";
+import { loadConfig, migrateLegacyDotenv } from "./config.js";
+import { formatContextMeter } from "./context.js";
 import { formatDoctor, runDoctor } from "./doctor.js";
-import { beginUndoTurn, undoLastTurn } from "./undo.js";
-import type { TokenUsage } from "./chat.js";
-import { canCompress, compressHistory, shouldAutoCompress } from "./compress.js";
-import {
-  buildApiMessages,
-  formatContextMeter,
-  formatContextReport,
-  measureContext,
-  toolsTokensFromSpecs,
-} from "./context.js";
-import {
-  emptySession,
-  listConversations,
-  loadSession,
-  openConversation,
-  openSessionStore,
-  persistSession,
-  discardEmptySession,
-  replaceMessages,
-  saveMessages,
-  sessionHasChat,
-  updateConversationTitle,
-  type Message,
-  type Session,
-} from "./db.js";
+import { createStdioHost, printBanner, printErr } from "./display.js";
+import { runConnect } from "./connect.js";
+import { runRemoteSshCommand } from "./remote-ssh-ui.js";
+import { runWorkerStdio } from "./stdio-worker.js";
+import { loadMode, userPrefix } from "./mode.js";
+import { promptYou, promptStatusLine, restoreTerminal, confirmQuit, takeForcedQuit } from "./prompt.js";
 import {
   addProvider,
   applyProviderDraft,
@@ -53,84 +32,43 @@ import {
 } from "./provider.js";
 import { createModelPickState, defaultEffortIndex, fetchModelCatalog } from "./provider-api.js";
 import { pickEffort, pickProviderModel, pickSavedProvider } from "./select-ui.js";
-import { formatConversationList, generateTitle, isDefaultTitle, statusSessionLabel } from "./title.js";
-import { assistantPrefix, harnessModeMessage, lastHarnessMode, loadMode, modeHint, modeLabel, paintMode, parseMode, userPrefix, type AgentMode } from "./mode.js";
-import { createPolicy } from "./permissions.js";
-import { createLongApprover } from "./long-approve.js";
-import { createLongRubric } from "./long-rubric.js";
-import { openMcpHub } from "./mcp.js";
-import { formatSkillsCli, loadSkillBundle } from "./skills.js";
-import { activateBaseSkills, logSkillActivate } from "./skill-activate.js";
-import { createLoadUi } from "./load-ui.js";
-import { promptYou, promptStatusLine, restoreTerminal, confirmQuit, takeForcedQuit, watchTurnAbort, setPermissionGate } from "./prompt.js";
-import { buildSystemPrompt } from "./system-prompt.js";
-import { createSubagentRunner, createSubagentStore } from "./subagent.js";
-import { createSubagentUi, parseSeesubagent } from "./subagent-ui.js";
+import { formatConversationList } from "./title.js";
+import { parseSetworkarea, pickWorkareaFolder, resolveWorkarea, workareaPlaceholder } from "./workarea.js";
+import { parseRemoteSshCommand } from "./commands.js";
 import {
-  createTaskStore,
-  checkpointReply,
-  emptyTaskState,
-  formatTaskStateCli,
-  isEmptyTaskState,
-  lastTaskState,
-  seedGoalFromUser,
-  taskStateEqual,
-  taskStateMessage,
-  type TaskStore,
-} from "./task-state.js";
-import {
-  createPlanStore,
-  emptyPlan,
-  formatPlanCli,
-  isEmptyPlan,
-  lastPlan,
-  parseSeeplan,
-  parseSetplan,
-  planEqual,
-  planMessage,
-  setplanUserContent,
-  type PlanStore,
-} from "./plan.js";
-import { formatToolCallLine, formatToolResultLines } from "./tool-ui.js";
-import {
-  finishMarkdownLive,
-  newMarkdownLive,
-  paintMarkdownDelta,
-  paintThinkingDelta,
-  thinkingPrefix,
-  useColor,
-  type MarkdownLive,
-} from "./markdown.js";
-import { historyAfterTurn, recapLine } from "./recap.js";
-import { toolSpecs } from "./tools.js";
-import {
-  parseSetworkarea,
-  pickWorkareaFolder,
-  resolveWorkarea,
-  workareaPlaceholder,
-} from "./workarea.js";
+  handleSeesubagent,
+  openLocalWorker,
+  setplanUsageText,
+  type LocalWorker,
+} from "./worker.js";
 
-const BOOLEAN_FLAGS = new Set(["resume", "new", "no-stream", "no-agent", "doctor"]);
+const BOOLEAN_FLAGS = new Set(["resume", "new", "no-stream", "no-agent", "doctor", "stdio"]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function parseArgs(argv: string[]) {
+function parseCli(argv: string[]) {
+  const rest = argv.slice(2);
+  const cmd = rest[0] === "connect" || rest[0] === "worker" ? rest[0] : undefined;
+  const args = cmd ? rest.slice(1) : rest;
+  const positional: string[] = [];
   const flags: Record<string, string> = {};
 
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (!arg.startsWith("--")) continue;
-
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (!arg.startsWith("--")) {
+      positional.push(arg);
+      continue;
+    }
     const [rawKey, inlineValue] = arg.slice(2).split("=", 2);
     const key = rawKey === "api-key" || rawKey === "key" ? "api" : rawKey;
-    const next = argv[i + 1];
+    const next = args[i + 1];
     const asBoolean =
       BOOLEAN_FLAGS.has(key) &&
       inlineValue === undefined &&
       (!next || next.startsWith("--"));
-    flags[key] = asBoolean ? "true" : (inlineValue ?? argv[++i] ?? "");
+    flags[key] = asBoolean ? "true" : (inlineValue ?? args[++i] ?? "");
   }
 
-  return flags;
+  return { cmd, flags, positional };
 }
 
 function parsePositiveInt(label: string, raw: string | undefined) {
@@ -151,190 +89,14 @@ function usage() {
   socode [--input <文本>]          默认新会话，空对话不落盘
   socode --resume
   socode --id <conversation-uuid>
+  socode connect user@host:/abs/path   本机显示器 + 远端 worker（可用密码或公钥）
+  会话里 /remote-ssh [user@host]       分屏填写；Tab 补全历史主机，密码每次重输
+  socode worker --stdio --workspace /abs/path
   socode --url/--api/--model/--name/--context/--output/--effort/--steps/--max/--mode/--budget
   socode --doctor                     检查 Node、密钥、沙箱、目录是否可写
 
 OpenAI 兼容 Provider 存在 ~/.socode/providers.json；默认值在 ~/.socode/config.json
 权限模式：--mode full | ask | plan | long（也可用 /mode 切换，长程可用 长程）。Esc 中止当前轮，/quit 退出。`;
-}
-
-function printBanner(session: Session, extra: { mode: AgentMode; workspace: string; mcpCount?: number }) {
-  console.log(
-    formatBanner({
-      workspace: extra.workspace,
-      title: session.title,
-      mode: extra.mode,
-      mcpCount: extra.mcpCount,
-      welcome: pickWelcome(),
-      width: process.stdout.columns ?? 60,
-      color: useColor(),
-    }),
-  );
-  console.log("");
-}
-
-type PrintState = {
-  replied: boolean;
-  md?: MarkdownLive;
-  think?: MarkdownLive;
-  thinkingShown?: boolean;
-};
-
-function closeThinking(state: PrintState) {
-  if (state.think) {
-    finishMarkdownLive(state.think);
-    state.think = undefined;
-    process.stdout.write("\n");
-    state.thinkingShown = false;
-    return;
-  }
-  if (state.thinkingShown) {
-    state.thinkingShown = false;
-    process.stdout.write("\n");
-  }
-}
-
-function printAgentEvent(
-  event: AgentEvent,
-  state: PrintState,
-  mode: AgentMode,
-  tag?: string,
-  hud?: { guard: (fn: () => void) => void },
-) {
-  const nest = tag ? `  [${tag}] ` : "";
-  const paint = () => {
-    if (event.type === "thinking" && event.text) {
-      if (state.md) {
-        finishMarkdownLive(state.md);
-        state.md = undefined;
-        if (state.replied) process.stdout.write("\n");
-        state.replied = false;
-      }
-      if (!process.stdout.isTTY) {
-        if (!state.thinkingShown) {
-          process.stdout.write(`${thinkingPrefix(nest, false)}`);
-          state.thinkingShown = true;
-        }
-        process.stdout.write(event.text);
-        return;
-      }
-      if (!state.think) state.think = newMarkdownLive();
-      paintThinkingDelta({
-        live: state.think,
-        chunk: event.text,
-        prefix: thinkingPrefix(nest, useColor()),
-        write: (text) => process.stdout.write(text),
-        columns: process.stdout.columns ?? 80,
-        color: useColor(),
-      });
-      return;
-    }
-    if (event.type === "delta" && event.text) {
-      closeThinking(state);
-      if (!process.stdout.isTTY) {
-        if (!state.replied) {
-          process.stdout.write(nest || assistantPrefix(mode));
-          state.replied = true;
-        }
-        process.stdout.write(event.text);
-        return;
-      }
-      if (!state.md) state.md = newMarkdownLive();
-      state.replied = true;
-      paintMarkdownDelta({
-        live: state.md,
-        chunk: event.text,
-        prefix: nest || assistantPrefix(mode),
-        write: (text) => process.stdout.write(text),
-        columns: process.stdout.columns ?? 80,
-        color: useColor(),
-      });
-      return;
-    }
-    closeThinking(state);
-    if (state.md) {
-      finishMarkdownLive(state.md);
-      state.md = undefined;
-    }
-    if (event.type === "tool_call" && event.name) {
-      const prefix = state.replied ? "\n" : "";
-      state.replied = false;
-      process.stdout.write(`${prefix}${nest}${formatToolCallLine(event.name, event.arguments ?? "")}`);
-      return;
-    }
-    if (event.type === "tool_result") {
-      if (event.name === "subagent") {
-        process.stdout.write("\n");
-        return;
-      }
-      if (event.name === "plan") {
-        const body = (event.result ?? "").replace(/\s+$/u, "");
-        if (body) process.stdout.write(`\n${nest}${body.split("\n").join(`\n${nest}`)}\n`);
-        else process.stdout.write("\n");
-        return;
-      }
-      for (const line of formatToolResultLines(event.result ?? "")) {
-        process.stdout.write(`\n${nest}${line}`);
-      }
-      process.stdout.write("\n");
-      return;
-    }
-    if (event.type === "notice" && event.text) {
-      const prefix = state.replied ? "\n" : "";
-      state.replied = false;
-      const dim = useColor() ? "\x1b[2m" : "";
-      const reset = useColor() ? "\x1b[0m" : "";
-      process.stdout.write(`${prefix}${nest}${dim}${event.text}${reset}\n`);
-      return;
-    }
-    if (event.type === "compress" && event.saved) {
-      const prefix = state.replied ? "\n" : "";
-      state.replied = false;
-      process.stdout.write(`${prefix}${nest}压缩上下文，大约省下 ${event.saved.toLocaleString("en-US")} tokens\n`);
-    }
-  };
-  if (hud) hud.guard(paint);
-  else paint();
-}
-
-function printTurnRecap(trace: Message[]) {
-  const line = recapLine(trace, { color: useColor() });
-  if (!line) return;
-  process.stdout.write(`\n${line}\n`);
-}
-
-function printErr(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`\nerr> ${message}\n`);
-}
-
-function failedTurnTrace(error: unknown): Message[] {
-  if (error instanceof TurnAborted || error instanceof TurnFailed) {
-    return closeIncompleteTrace(error.trace);
-  }
-  return [];
-}
-
-async function saveFailedTurn(
-  store: Parameters<typeof saveMessages>[0],
-  session: Session,
-  user: Message,
-  error: unknown,
-  model: string,
-) {
-  const trace = failedTurnTrace(error);
-  const extra: Message[] = isTurnAborted(error)
-    ? []
-    : [
-        {
-          role: "assistant",
-          content: `本轮失败: ${error instanceof Error ? error.message : String(error)}`,
-        },
-      ];
-  const batch = historyAfterTurn(user, [...trace, ...extra]);
-  await persistSession(store, session, model);
-  await saveMessages(store, session.id, batch);
-  session.messages.push(...batch);
 }
 
 function parseSlash(prompt: string) {
@@ -644,14 +406,13 @@ function applyPickedModel(current: Provider, all: Provider[], providerName: stri
 
 async function pickSession(
   rl: readline.Interface,
-  store: Parameters<typeof listConversations>[0],
-  session: Session,
+  worker: LocalWorker,
   arg: string,
-): Promise<Session | null> {
-  const rows = await listConversations(store);
+): Promise<boolean> {
+  const rows = await worker.listSessions();
   if (rows.length === 0) {
     console.log("没有可恢复的会话。\n");
-    return null;
+    return false;
   }
 
   if (arg) {
@@ -659,199 +420,120 @@ async function pickSession(
       const picked = rows.find((row) => row.id === arg);
       if (!picked) {
         console.log("找不到这个会话编号。\n");
-        return null;
+        return false;
       }
-      return await loadSession(store, picked.id);
+      await worker.openSession(picked.id);
+      return true;
     }
     const index = Number(arg);
     if (!Number.isInteger(index) || index < 1 || index > rows.length) {
       console.log("序号无效。\n");
-      return null;
+      return false;
     }
-    return await loadSession(store, rows[index - 1].id);
+    await worker.openSession(rows[index - 1].id);
+    return true;
   }
 
   console.log("\n--- 会话 ---");
-  console.log(formatConversationList(rows, session.id));
+  console.log(formatConversationList(rows, worker.session.id));
   const answer = (await rl.question("输入序号恢复，回车取消: ")).trim();
   if (!answer || answer === "q" || answer === "/exit" || answer === "/quit") {
     console.log("");
-    return null;
+    return false;
   }
-  return await pickSession(rl, store, session, answer);
+  return await pickSession(rl, worker, answer);
 }
 
-function handleMode(mode: AgentMode, arg: string): { mode: AgentMode; changed: boolean } {
-  const rest = arg.trim();
-  if (!rest || rest === "show") {
-    console.log(`\n模式: ${paintMode(mode, modeLabel(mode))}`);
-    console.log(modeHint(mode));
-    console.log(`\n/mode full   ${paintMode("full", "Full Access")}，直接改文件和跑命令`);
-    console.log(`/mode ask    ${paintMode("ask", "Ask")}，创建/修改/删除先按 y/n/a 审批`);
-    console.log(`/mode plan   ${paintMode("plan", "Plan")}，只能看和写计划，不能动手`);
-    console.log(`/mode long   ${paintMode("long", "Long")} / 长程，记住目标、自动压缩；副作用走 LLM 审批，不是 Full\n`);
-    return { mode, changed: false };
-  }
-  const next = parseMode(rest);
-  if (!next) {
-    console.log("\n未知模式。用 /mode full、/mode ask、/mode plan 或 /mode long（长程）。\n");
-    return { mode, changed: false };
-  }
-  if (next === mode) {
-    console.log(`\n已经是 ${paintMode(mode, modeLabel(mode))}`);
-    console.log(`${modeHint(mode)}\n`);
-    return { mode, changed: false };
-  }
-  console.log(`\n已切换到 ${paintMode(next, modeLabel(next))}`);
-  console.log(`${modeHint(next)}\n`);
-  return { mode: next, changed: true };
+function extra(worker: LocalWorker) {
+  const snap = worker.snapshot();
+  return { mode: snap.mode, workspace: snap.workspace, mcpCount: snap.mcpCount };
 }
 
-async function rememberTaskState(
-  store: Parameters<typeof saveMessages>[0],
-  session: Session,
-  tasks: TaskStore,
-) {
-  const current = tasks.get();
-  const last = lastTaskState(session.messages);
-  if (last && taskStateEqual(last, current)) return;
-  if (!last && isEmptyTaskState(current)) return;
-  const notice = taskStateMessage(current);
-  session.messages.push(notice);
-  if (session.persisted && session.id) await saveMessages(store, session.id, [notice]);
+function printSessionChrome(worker: LocalWorker) {
+  printBanner(worker.session, extra(worker));
+  const task = worker.longTaskText();
+  if (task) console.log(task);
+  const plan = worker.planText();
+  if (plan) console.log(plan);
 }
 
-async function rememberPlan(
-  store: Parameters<typeof saveMessages>[0],
-  session: Session,
-  plans: PlanStore,
-) {
-  const current = plans.get();
-  const last = lastPlan(session.messages);
-  if (last && planEqual(last, current)) return;
-  if (!last && isEmptyPlan(current)) return;
-  const notice = planMessage(current);
-  session.messages.push(notice);
-  if (session.persisted && session.id) await saveMessages(store, session.id, [notice]);
+function printTurnResult(result: Awaited<ReturnType<LocalWorker["turn"]>>, opts?: { oneShot?: boolean }) {
+  if (result.usageHelp) {
+    console.log(setplanUsageText());
+    return;
+  }
+  if (result.reply !== undefined && !opts?.oneShot) {
+    process.stdout.write(result.endedNewline ? "\n" : "\n\n");
+  } else if (result.reply !== undefined && opts?.oneShot && !result.endedNewline) {
+    process.stdout.write("\n");
+  }
+  if (result.recap) process.stdout.write(`\n${result.recap}\n`);
+  if (result.usageLine) process.stdout.write(`${result.usageLine}\n`);
+  if (result.checkpoint) process.stdout.write(`\n${result.checkpoint}\n`);
+  if (result.error) printErr(result.error);
 }
 
-function handleTask(store: TaskStore, arg: string) {
-  const rest = arg.trim();
-  if (!rest || rest === "show") {
-    console.log(`\n${formatTaskStateCli(store.get())}\n`);
+async function handleWorkarea(worker: LocalWorker, input: string) {
+  const parsed = parseSetworkarea(input);
+  if (!parsed) return false;
+  if (!worker.canSetWorkarea()) {
+    console.log("\n已有对话内容时不能换工作区。先 /new 再 /setworkarea。\n");
     return true;
   }
-  if (rest === "clear") {
-    store.replace(emptyTaskState());
-    console.log("\n已清空任务状态。\n");
+  let target: string;
+  if (parsed.path) {
+    const resolved = resolveWorkarea(parsed.path);
+    if ("error" in resolved) {
+      console.log(`\n${resolved.error}\n`);
+      return true;
+    }
+    target = resolved.path;
+  } else {
+    if (!process.stdin.isTTY) {
+      console.log("\n非 TTY 下请用 /setworkarea /绝对路径\n");
+      return true;
+    }
+    console.log("\n选择工作区文件夹…");
+    const picked = await pickWorkareaFolder();
+    if ("cancelled" in picked) {
+      console.log("已取消。\n");
+      return true;
+    }
+    if ("error" in picked) {
+      console.log(`\n${picked.error}\n`);
+      return true;
+    }
+    target = picked.path;
+  }
+  const failed = await worker.applyWorkarea(target);
+  if (failed) {
+    console.log(`\n${failed}\n`);
     return true;
   }
-  const match = rest.match(/^(goal|目标|note|notes|备注|milestone|里程碑)\s*[：: ]\s*([\s\S]+)/i);
-  if (match) {
-    const kind = match[1].toLowerCase();
-    const text = match[2].trim();
-    if (kind === "goal" || kind === "目标") store.patch({ goal: text });
-    else if (kind === "milestone" || kind === "里程碑") store.patch({ addMilestone: text });
-    else store.patch({ notes: text });
-    console.log(`\n${formatTaskStateCli(store.get())}\n`);
-    return true;
-  }
-  console.log("\n用法: /task    /task goal <目标>    /task milestone <项>    /task note <备注>    /task clear\n");
-  return false;
-}
-
-function handleSeesubagent(ui: ReturnType<typeof createSubagentUi>, input: string) {
-  const cmd = parseSeesubagent(input);
-  if (!cmd) return false;
-  if (cmd.kind === "help") {
-    console.log("\n用法: /seesubagent [序号]    /seesubagent off\n");
-    ui.refresh();
-    return true;
-  }
-  if (cmd.kind === "off") {
-    ui.watch(null);
-    console.log("\n已隐藏子代理过程\n");
-    ui.refresh();
-    return true;
-  }
-  if (cmd.kind === "list") {
-    console.log(`\n${ui.listText()}\n`);
-    ui.refresh();
-    return true;
-  }
-  const job = ui.watch(cmd.index);
-  if (!job) {
-    console.log(`\n没有序号 ${cmd.index} 的子代理。\n${ui.listText()}\n`);
-    ui.refresh();
-    return true;
-  }
-  const follow = job.phase === "running" || job.phase === "pending" ? "\n（仍在跑，后续过程会显示在上面）" : "";
-  console.log(`\n${ui.logText(job.id)}${follow}\n`);
-  ui.refresh();
+  console.log(`\n工作区已设为 ${worker.workspace}\n`);
+  printBanner(worker.session, extra(worker));
   return true;
-}
-
-function handleSeeplan(store: PlanStore, input: string) {
-  if (!parseSeeplan(input)) return false;
-  console.log(`\n${formatPlanCli(store.get())}\n`);
-  return true;
-}
-
-function setplanUsage() {
-  console.log("\n用法: /setplan <任务说明>");
-  console.log("本轮强制调用 plan 按说明拆目标，并激活 grill-me 追问决策。未达成共识前不改代码。\n");
-}
-
-function prepareUserTurn(raw: string) {
-  const setplan = parseSetplan(raw);
-  if (setplan && !setplan.prompt) return { usage: true as const };
-  if (setplan) {
-    return {
-      user: { role: "user" as const, content: setplanUserContent(setplan.prompt) },
-      skillPrompt: setplan.prompt,
-      requirePlan: true,
-      forceSkills: ["grill-me"],
-      titleText: setplan.prompt,
-    };
-  }
-  return {
-    user: { role: "user" as const, content: raw },
-    skillPrompt: raw,
-    titleText: raw,
-  };
-}
-
-async function rememberMode(
-  store: Parameters<typeof saveMessages>[0],
-  session: Session,
-  mode: AgentMode,
-) {
-  if (lastHarnessMode(session.messages) === mode) return;
-  const notice = harnessModeMessage(mode);
-  session.messages.push(notice);
-  if (session.persisted && session.id) await saveMessages(store, session.id, [notice]);
-}
-
-async function maybeNameSession(params: {
-  store: Parameters<typeof updateConversationTitle>[0];
-  session: Session;
-  provider: Provider;
-  userText: string;
-  assistantText: string;
-}) {
-  if (!isDefaultTitle(params.session.title) || !params.session.id) return;
-  const title = await generateTitle({
-    provider: params.provider,
-    userText: params.userText,
-    assistantText: params.assistantText,
-  });
-  await updateConversationTitle(params.store, params.session.id, title);
-  params.session.title = title;
 }
 
 async function main() {
   migrateLegacyDotenv();
-  const flags = parseArgs(process.argv.slice(2));
+  const { cmd, flags, positional } = parseCli(process.argv);
+  if (cmd === "connect") {
+    await runConnect(positional[0] ?? "");
+    return;
+  }
+  if (cmd === "worker") {
+    if (!flagOn(flags.stdio)) {
+      console.error("用法: socode worker --stdio --workspace /abs/path");
+      process.exit(2);
+    }
+    await runWorkerStdio({
+      workspace: flags.workspace || positional[0] || process.cwd(),
+      flags,
+    });
+    return;
+  }
+
   const cfg = loadConfig();
   let provider = loadProvider();
   if (flags.url) provider = { ...provider, url: flags.url };
@@ -878,7 +560,7 @@ async function main() {
   const fresh = flagOn(flags.new);
   const stream = !flagOn(flags["no-stream"]);
   const conversationFlag = flags.id;
-  let mode = loadMode(flags.mode, cfg.mode);
+  const mode = loadMode(flags.mode, cfg.mode);
 
   if (flagOn(flags.doctor)) {
     const report = await runDoctor({ workspace: process.cwd(), mode, provider });
@@ -894,296 +576,23 @@ async function main() {
     }
   }
 
-  let workspace = process.cwd();
-  let store = await openSessionStore(workspace);
-  let session = await openConversation(store, {
-    model: provider.model,
-    id: conversationFlag,
+  let worker: LocalWorker;
+  const host = createStdioHost(() => worker.mode);
+  worker = await openLocalWorker({
+    host,
+    workspace: process.cwd(),
+    provider,
+    mode,
+    userSystem,
+    agentEnabled,
+    maxMessages,
+    maxSteps,
+    maxTokens,
+    stream,
+    conversationId: conversationFlag,
     resume,
     fresh,
   });
-  await rememberMode(store, session, mode);
-
-  const tasks = createTaskStore(lastTaskState(session.messages));
-  const plans = createPlanStore(lastPlan(session.messages));
-  const subagents = createSubagentStore();
-  let mcp = await openMcpHub(workspace);
-  const longApprove = createLongApprover(() => provider);
-  const longRubric = createLongRubric(() => provider);
-  const longBudget = longBudgetFromConfig(maxSteps);
-  const policy = createPolicy(() => workspace, () => mode, tasks, {
-    longApprove,
-    longRubric,
-    longBudget,
-    subagents,
-    mcp,
-    plans,
-  });
-  const subagentUi = createSubagentUi();
-  const childPrint = new Map<number, PrintState>();
-  const printChild = (id: number) => {
-    let state = childPrint.get(id);
-    if (!state) {
-      state = { replied: false };
-      childPrint.set(id, state);
-    }
-    return state;
-  };
-  policy.spawnSubagent = createSubagentRunner({
-    getProvider: () => provider,
-    getPolicy: () => policy,
-    workspace,
-    maxSteps: cfg.subagentSteps,
-    stream,
-    shouldStream: (job) => stream && subagentUi.watching() === job.id,
-    onBatch: (jobs) => {
-      childPrint.clear();
-      subagentUi.startBatch(jobs);
-    },
-    onJobStart: (job) => subagentUi.jobStart(job.id),
-    onJobDone: (job) => subagentUi.jobDone(job),
-    onEvent: (meta, event) => {
-      const live = subagentUi.record(meta.job.id, event);
-      if (!live) {
-        subagentUi.refresh();
-        return;
-      }
-      const tag = `${meta.job.id} ${meta.job.kind}:${meta.job.label}`;
-      printAgentEvent(event, printChild(meta.job.id), mode, tag, subagentUi);
-    },
-  });
-  let lastUsage: TokenUsage | undefined;
-
-  const currentSystem = (activated: string[] = []) =>
-    agentEnabled
-      ? buildSystemPrompt(
-          workspace,
-          userSystem,
-          mode,
-          mode === "long" ? tasks.get() : undefined,
-          mcp.specs({ mode }).map((tool) => tool.name),
-          activated,
-          plans.get(),
-        )
-      : userSystem || undefined;
-  const currentToolsTokens = () =>
-    agentEnabled ? toolsTokensFromSpecs(toolSpecs(mode, { extra: mcp.specs({ mode }) })) : 0;
-  const contextBudget = () =>
-    Math.max(512, Math.floor((provider.contextWindow - provider.maxOutput - 256) * 0.9));
-
-  const reloadSessionState = () => {
-    tasks.replace(lastTaskState(session.messages) ?? emptyTaskState());
-    plans.replace(lastPlan(session.messages) ?? emptyPlan());
-  };
-
-  const ask = async (
-    history: Message[],
-    user: Message,
-    opts?: { requirePlan?: boolean; forceSkills?: string[]; skillPrompt?: string },
-  ) => {
-    const state = { replied: false };
-    const abort = watchTurnAbort({
-      onCommand: (line) => {
-        if (handleSeesubagent(subagentUi, line)) return;
-        handleSeeplan(plans, line);
-      },
-    });
-    setPermissionGate(abort);
-    const load = createLoadUi();
-    load.start();
-    beginUndoTurn();
-    try {
-      let activated: string[] = [];
-      if (agentEnabled) {
-        const decision = await activateBaseSkills({
-          prompt: opts?.skillPrompt ?? user.content,
-          mode,
-          skills: loadSkillBundle(workspace).skills,
-          provider,
-          signal: abort.signal,
-          force: opts?.forceSkills,
-        });
-        activated = decision.activate;
-        logSkillActivate(decision);
-      }
-      return await runAgent({
-        provider,
-        stream,
-        maxSteps,
-        maxTokens: mode === "long" ? maxTokens : undefined,
-        maxContextTokens: mode === "long" ? contextBudget() : undefined,
-        useTools: agentEnabled,
-        signal: abort.signal,
-        policy,
-        requirePlan: opts?.requirePlan,
-        messages: buildApiMessages({
-          history,
-          user,
-          systemPrompt: currentSystem(activated),
-          maxMessages,
-          contextWindow: provider.contextWindow,
-          maxOutput: provider.maxOutput,
-          toolsTokens: currentToolsTokens(),
-          mode,
-        }),
-        onEvent: (event) => {
-          load.stop();
-          printAgentEvent(event, state, mode, undefined, subagentUi);
-          if (event.type === "tool_result" || event.type === "notice" || event.type === "compress") {
-            load.start();
-          }
-        },
-      });
-    } finally {
-      load.stop();
-      setPermissionGate(undefined);
-      abort.dispose();
-    }
-  };
-
-  const extra = () => ({
-    provider,
-    stream,
-    agent: agentEnabled,
-    steps: maxSteps,
-    mode,
-    mcpCount: mcp.toolNames().length,
-    workspace,
-  });
-
-  const applyWorkarea = async (path: string) => {
-    try {
-      process.chdir(path);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return `无法进入目录: ${message}`;
-    }
-    workspace = path;
-    store = await openSessionStore(workspace);
-    await mcp.close().catch(() => undefined);
-    mcp = await openMcpHub(workspace);
-    policy.mcp = mcp;
-    return null;
-  };
-
-  const handleWorkarea = async (input: string) => {
-    const parsed = parseSetworkarea(input);
-    if (!parsed) return false;
-    if (sessionHasChat(session.messages)) {
-      console.log("\n已有对话内容时不能换工作区。先 /new 再 /setworkarea。\n");
-      return true;
-    }
-    let target: string;
-    if (parsed.path) {
-      const resolved = resolveWorkarea(parsed.path);
-      if ("error" in resolved) {
-        console.log(`\n${resolved.error}\n`);
-        return true;
-      }
-      target = resolved.path;
-    } else {
-      if (!process.stdin.isTTY) {
-        console.log("\n非 TTY 下请用 /setworkarea /绝对路径\n");
-        return true;
-      }
-      console.log("\n选择工作区文件夹…");
-      const picked = await pickWorkareaFolder();
-      if ("cancelled" in picked) {
-        console.log("已取消。\n");
-        return true;
-      }
-      if ("error" in picked) {
-        console.log(`\n${picked.error}\n`);
-        return true;
-      }
-      target = picked.path;
-    }
-    const failed = await applyWorkarea(target);
-    if (failed) {
-      console.log(`\n${failed}\n`);
-      return true;
-    }
-    console.log(`\n工作区已设为 ${workspace}\n`);
-    printBanner(session, extra());
-    return true;
-  };
-
-  const currentContextReport = (history: Message[] = session.messages) =>
-    measureContext({
-      history,
-      systemPrompt: currentSystem(),
-      toolsTokens: currentToolsTokens(),
-      maxMessages,
-      contextWindow: provider.contextWindow,
-      maxOutput: provider.maxOutput,
-      mode,
-    });
-
-  const printContextUsage = (history: Message[]) => {
-    const report = currentContextReport(history);
-    const cols = process.stdout.columns ?? 40;
-    const width = Math.max(16, Math.min(48, cols - 2));
-    console.log(`\n${formatContextReport(report, width, Boolean(process.stdout.isTTY))}`);
-    if (lastUsage) {
-      const prompt = lastUsage.promptTokens.toLocaleString("en-US");
-      const completion = lastUsage.completionTokens.toLocaleString("en-US");
-      console.log(`API 回报  prompt ${prompt}  completion ${completion}`);
-    }
-    console.log("");
-  };
-
-  const runCompress = async (history: Message[]) => {
-    if (!canCompress(history)) {
-      console.log("\n对话还不够长，无需压缩。\n");
-      return history;
-    }
-    console.log("\n正在压缩上下文…");
-    const abort = watchTurnAbort();
-    const state = { replied: false };
-    try {
-      const result = await compressHistory({
-        provider,
-        history,
-        signal: abort.signal,
-        onDelta: (text) => {
-          if (!state.replied) {
-            process.stdout.write(assistantPrefix(mode));
-            state.replied = true;
-          }
-          process.stdout.write(text);
-        },
-      });
-      await persistSession(store, session, provider.model);
-      await replaceMessages(store, session.id, result.messages);
-      process.stdout.write(
-        `\n\n已压缩，大约省下 ${result.saved.toLocaleString("en-US")} tokens\n`,
-      );
-      printContextUsage(result.messages);
-      return result.messages;
-    } finally {
-      abort.dispose();
-    }
-  };
-
-  const maybeAutoCompress = async (history: Message[]) => {
-    if (mode !== "long") return history;
-    const report = currentContextReport(history);
-    if (!shouldAutoCompress({ history, report })) return history;
-    console.log("\n长程模式：上下文接近上限，自动压缩…");
-    return await runCompress(history);
-  };
-
-  const showLongTask = () => {
-    if (mode !== "long") return;
-    console.log(formatTaskStateCli(tasks.get()));
-    console.log("");
-  };
-
-  const showPlan = () => {
-    if (isEmptyPlan(plans.get())) return;
-    console.log(formatPlanCli(plans.get()));
-    console.log("");
-  };
 
   let rl: readline.Interface | undefined;
   const closeHandles = async () => {
@@ -1193,8 +602,7 @@ async function main() {
     } catch {
       // ignore
     }
-    await discardEmptySession(store, session).catch(() => undefined);
-    await mcp.close().catch(() => undefined);
+    await worker.close();
   };
   const forceExit = (code: number) => {
     restoreTerminal();
@@ -1212,74 +620,32 @@ async function main() {
 
   try {
     if (oneShot !== undefined) {
-      const prepared = prepareUserTurn(oneShot);
-      if ("usage" in prepared) {
-        setplanUsage();
-        return;
-      }
-      const user = prepared.user;
-      const askOpts = prepared.requirePlan
-        ? { requirePlan: true, forceSkills: prepared.forceSkills, skillPrompt: prepared.skillPrompt }
-        : undefined;
-      try {
-        if (mode === "long") {
-          session.messages = await maybeAutoCompress(session.messages);
-          tasks.replace(seedGoalFromUser(tasks.get(), prepared.titleText));
-          await rememberTaskState(store, session, tasks);
-        }
-        const { reply, trace, usage } = await ask(session.messages, user, askOpts);
-        lastUsage = usage;
-        const stored = historyAfterTurn(user, trace);
-        await persistSession(store, session, provider.model);
-        await saveMessages(store, session.id, stored);
-        session.messages.push(...stored);
-        await rememberTaskState(store, session, tasks);
-        await rememberPlan(store, session, plans);
-        if (!reply.endsWith("\n")) process.stdout.write("\n");
-        printTurnRecap(trace);
-        await maybeNameSession({
-          store,
-          session,
-          provider,
-          userText: prepared.titleText,
-          assistantText: reply,
-        });
-      } catch (error) {
-        await saveFailedTurn(store, session, user, error, provider.model);
-        if (mode === "long") {
-          await rememberTaskState(store, session, tasks);
-        }
-        await rememberPlan(store, session, plans);
-        printTurnRecap(failedTurnTrace(error));
-        if (isTurnAborted(error)) {
-          if (takeForcedQuit()) forceExit(130);
-          process.stdout.write("\n已中止\n");
-          return;
-        }
-        throw error;
+      const result = await worker.turn(oneShot);
+      printTurnResult(result, { oneShot: true });
+      if (result.aborted) {
+        if (takeForcedQuit()) forceExit(130);
+        process.stdout.write("\n已中止\n");
       }
       return;
     }
 
     const sessionRl = readline.createInterface({ input, output });
     rl = sessionRl;
-    if (!providerReady(provider)) {
-      provider = await promptProviderForm(sessionRl, "setup", provider);
+    if (!providerReady(worker.provider)) {
+      worker.setProvider(await promptProviderForm(sessionRl, "setup", worker.provider));
       console.log("");
     }
-    printBanner(session, extra());
-    showLongTask();
-    showPlan();
+    printSessionChrome(worker);
 
     while (true) {
       sessionRl.pause();
-      const report = currentContextReport();
+      const snap = worker.snapshot();
       const prompt = (
-        await promptYou(userPrefix(mode), {
-          hint: workareaPlaceholder(workspace),
-          status: promptStatusLine(provider.model, provider.thinkingEffort, {
-            session: statusSessionLabel(session.title),
-            context: formatContextMeter(report.used, report.window),
+        await promptYou(userPrefix(snap.mode), {
+          hint: workareaPlaceholder(snap.workspace),
+          status: promptStatusLine(snap.model, snap.thinkingEffort, {
+            session: snap.sessionLabel,
+            context: formatContextMeter(snap.contextUsed, snap.contextWindow),
             columns: process.stdout.columns ?? 80,
           }),
         })
@@ -1291,157 +657,117 @@ async function main() {
       }
       try {
         if (prompt === "/doctor") {
-          const report = await runDoctor({ workspace, mode, provider });
-          console.log(`\n${formatDoctor(report)}\n`);
+          console.log(`\n${await worker.doctor()}\n`);
           continue;
         }
         if (prompt === "/undo") {
-          console.log(`\n${await undoLastTurn()}\n`);
+          console.log(`\n${await worker.undo()}\n`);
           continue;
         }
         if (prompt === "/context") {
-          printContextUsage(session.messages);
+          console.log(worker.contextText());
+          continue;
+        }
+        if (prompt === "/usage") {
+          console.log(worker.usageText());
           continue;
         }
         if (prompt === "/task" || prompt.startsWith("/task ")) {
-          handleTask(tasks, prompt.slice("/task".length).trim());
-          await rememberTaskState(store, session, tasks);
+          console.log(await worker.task(prompt.slice("/task".length).trim()));
           continue;
         }
         if (prompt === "/mcp") {
-          console.log(`\n${mcp.statusText()}`);
-          const names = mcp.toolNames();
-          if (names.length) console.log(`工具: ${names.join(", ")}`);
-          console.log("");
+          console.log(worker.mcpText());
           continue;
         }
         if (prompt === "/skills") {
-          console.log(`\n${formatSkillsCli(loadSkillBundle(workspace), workspace)}\n`);
+          console.log(worker.skillsText());
           continue;
         }
         if (prompt === "/seesubagent" || prompt.startsWith("/seesubagent ")) {
-          handleSeesubagent(subagentUi, prompt);
+          handleSeesubagent(host, prompt);
           continue;
         }
         if (prompt === "/seeplan" || prompt.startsWith("/seeplan ")) {
-          handleSeeplan(plans, prompt);
+          console.log(worker.seeplanText());
           continue;
         }
         if (parseSetworkarea(prompt)) {
-          await handleWorkarea(prompt);
+          await handleWorkarea(worker, prompt);
+          continue;
+        }
+        if (prompt === "/remote-ssh" || prompt.startsWith("/remote-ssh ")) {
+          const parsed = parseRemoteSshCommand(prompt);
+          if (parsed && parsed.ok === false) {
+            console.log(`\n${parsed.error}\n`);
+            continue;
+          }
+          restoreTerminal();
+          await runRemoteSshCommand(parsed && parsed.ok ? parsed.target : "");
+          printSessionChrome(worker);
           continue;
         }
         if (prompt === "/compress") {
-          try {
-            session.messages = await runCompress(session.messages);
-            await rememberMode(store, session, mode);
-            await rememberTaskState(store, session, tasks);
-            await rememberPlan(store, session, plans);
-          } catch (error) {
-            if (isTurnAborted(error)) {
-              if (takeForcedQuit()) forceExit(130);
-              process.stdout.write("\n已中止\n\n");
-              continue;
-            }
-            throw error;
+          const result = await worker.compress();
+          if (result.error) {
+            console.log(`\n${result.error}\n`);
+            continue;
           }
+          if (result.aborted) {
+            if (takeForcedQuit()) forceExit(130);
+            process.stdout.write("\n已中止\n\n");
+            continue;
+          }
+          if (result.reply) process.stdout.write(`${result.reply}\n`);
+          console.log(worker.contextText());
           continue;
         }
         if (prompt === "/mode" || prompt.startsWith("/mode ")) {
-          const result = handleMode(mode, prompt.slice("/mode".length).trim());
-          mode = result.mode;
+          const result = worker.modeText(prompt.slice("/mode".length).trim());
+          console.log(result.text);
           if (result.changed) {
-            await rememberMode(store, session, mode);
-            if (mode === "long") showLongTask();
+            await worker.setMode(result.mode);
+            const task = worker.longTaskText();
+            if (task) console.log(task);
           }
           continue;
         }
         if (prompt === "/new") {
-          await discardEmptySession(store, session);
-          session = emptySession();
-          reloadSessionState();
-          await rememberMode(store, session, mode);
+          await worker.newSession();
           console.log("");
-          printBanner(session, extra());
-          showLongTask();
-          showPlan();
+          printSessionChrome(worker);
           continue;
         }
         if (prompt === "/provider" || prompt.startsWith("/provider ")) {
           sessionRl.resume();
           const arg = prompt.slice("/provider".length).trim();
-          provider = await handleProvider(sessionRl, provider, arg);
+          worker.setProvider(await handleProvider(sessionRl, worker.provider, arg));
           continue;
         }
         if (prompt === "/effort" || prompt.startsWith("/effort ")) {
-          provider = await handleEffort(provider, prompt.slice("/effort".length).trim());
+          worker.setProvider(await handleEffort(worker.provider, prompt.slice("/effort".length).trim()));
           continue;
         }
         if (prompt === "/model" || prompt.startsWith("/model ")) {
-          provider = await handleModel(provider, prompt.slice("/model".length).trim());
+          worker.setProvider(await handleModel(worker.provider, prompt.slice("/model".length).trim()));
           continue;
         }
         const restore = parseSlash(prompt);
         if (restore) {
           sessionRl.resume();
-          const picked = await pickSession(sessionRl, store, session, restore.arg);
-          if (picked) {
-            await discardEmptySession(store, session);
-            session = picked;
-            reloadSessionState();
-            await rememberMode(store, session, mode);
+          const opened = await pickSession(sessionRl, worker, restore.arg);
+          if (opened) {
             console.log("");
-            printBanner(session, extra());
-            showLongTask();
-            showPlan();
+            printSessionChrome(worker);
           }
           continue;
         }
 
-        const prepared = prepareUserTurn(prompt);
-        if ("usage" in prepared) {
-          setplanUsage();
-          continue;
-        }
-        const user = prepared.user;
-        const askOpts = prepared.requirePlan
-          ? { requirePlan: true, forceSkills: prepared.forceSkills, skillPrompt: prepared.skillPrompt }
-          : undefined;
-        try {
-          if (mode === "long") {
-            session.messages = await maybeAutoCompress(session.messages);
-            tasks.replace(seedGoalFromUser(tasks.get(), prepared.titleText));
-            await rememberTaskState(store, session, tasks);
-          }
-          const { reply, trace, usage } = await ask(session.messages, user, askOpts);
-          lastUsage = usage;
-          const stored = historyAfterTurn(user, trace);
-          await persistSession(store, session, provider.model);
-          await saveMessages(store, session.id, stored);
-          session.messages.push(...stored);
-          await rememberTaskState(store, session, tasks);
-          await rememberPlan(store, session, plans);
-          process.stdout.write(reply.endsWith("\n") ? "\n" : "\n\n");
-          printTurnRecap(trace);
-          await maybeNameSession({
-            store,
-            session,
-            provider,
-            userText: prepared.titleText,
-            assistantText: reply,
-          });
-        } catch (error) {
-          await saveFailedTurn(store, session, user, error, provider.model);
-          if (mode === "long") await rememberTaskState(store, session, tasks);
-          await rememberPlan(store, session, plans);
-          printTurnRecap(failedTurnTrace(error));
-          if (isTurnAborted(error)) {
-            if (mode === "long") process.stdout.write(`\n${checkpointReply(tasks.get(), "abort")}\n`);
-            if (takeForcedQuit()) forceExit(130);
-            process.stdout.write("\n已中止\n\n");
-            continue;
-          }
-          printErr(error);
+        const result = await worker.turn(prompt);
+        printTurnResult(result);
+        if (result.aborted) {
+          if (takeForcedQuit()) forceExit(130);
+          process.stdout.write("\n已中止\n\n");
         }
       } catch (error) {
         printErr(error);

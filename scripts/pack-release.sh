@@ -15,7 +15,7 @@ npm pack --pack-destination release
 
 STAGE="$ROOT/release/stage"
 mkdir -p "$STAGE/lib/socode"
-cp -R dist skills bin package.json README.md "$STAGE/lib/socode/"
+cp -R dist skills bin package.json README.md LICENSE "$STAGE/lib/socode/"
 chmod +x "$STAGE/lib/socode/bin/socode.mjs"
 
 PORTABLE_NAME="${NAME}-${VERSION}-macos"

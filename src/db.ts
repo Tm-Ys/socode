@@ -69,7 +69,7 @@ export async function openSessionStore(workspace: string): Promise<SessionStore>
   const root = realpathSync(workspace);
   const dir = sessionsDir(root);
   await mkdir(dir, { recursive: true });
-  await writeIfMissing(join(socodeDir(root), ".gitignore"), "sessions/\n");
+  await writeIfMissing(join(socodeDir(root), ".gitignore"), "sessions/\nundo/\n");
   await writeIfMissing(join(dir, ".gitignore"), "*\n!.gitignore\n");
   return { workspace: root, dir };
 }

@@ -74,8 +74,9 @@ export function promptStatusLine(
   effort: string,
   opts?: { context?: string; columns?: number; session?: string },
 ) {
+  const shownModel = model.trim() || "未配置模型";
   const session = opts?.session?.trim();
-  const left = session ? `${model} · ${effort} · ${session}` : `${model} · ${effort}`;
+  const left = session ? `${shownModel} · ${effort} · ${session}` : `${shownModel} · ${effort}`;
   const right = opts?.context?.trim() ?? "";
   if (!right) return left;
   const cols = Math.max(20, opts?.columns ?? 80);

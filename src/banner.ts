@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { paintMode, modeLabel, type AgentMode } from "./mode.js";
 import { displayWorkarea } from "./workarea.js";
 
@@ -10,7 +13,8 @@ const CYAN = "\x1b[36m";
 export const WELCOME_LINES = [
   "你知道吗？输入 / 会按前缀列出命令，Tab 补全。",
   "你知道吗？Ask 审批 write/edit/delete 会打出完整 diff，y 允许、n 拒绝、a 本会话同类都允许。",
-  "你知道吗？/undo 只撤回最近一轮 write/edit/delete，进程关掉就没了；不管 bash，也不是把对话倒回去。",
+  "你知道吗？/undo 只撤回最近一轮 write/edit/delete，快照落在本工作区 .socode/undo，关进程后还能撤；不管 bash，也不是把对话倒回去。",
+  "你知道吗？每轮结束会打 tokens（含缓存）；单价写在 ~/.socode/config.json 的 modelPricing，没配就不估金额。",
   "你知道吗？/doctor 检查 Node、密钥、沙箱和目录能不能写；启动也可用 --doctor。",
   "你知道吗？/mode plan 只能看代码和写计划，不会改文件，也不会跑有副作用的命令。",
   "你知道吗？/mode full 会直接改仓库、跑命令；系统目录和密钥文件仍然碰不到。",
@@ -28,9 +32,32 @@ export const WELCOME_LINES = [
   "你知道吗？子代理过程默认藏着，/seesubagent 列出，/seesubagent 1 盯着某一个。",
   "你知道吗？/seeplan 看当前任务勾选板；/setplan 说明 会强制本轮先拆计划。",
   "你知道吗？空对话时 /setworkarea 可选文件夹，或写成 /setworkarea /绝对路径。",
+  "你知道吗？/remote-ssh 连过的主机可以 Tab 补全；密码每次都要重新输入。",
   "你知道吗？生成中按 Esc 中止当前轮；用户那句还在，半截回复不会入库。",
   "你知道吗？Ctrl+C 第一次只是提醒，再按一次才退出；平时用 /quit 更干净。",
 ];
+
+let cachedVersion = "";
+
+export function packageVersion() {
+  if (cachedVersion) return cachedVersion;
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8")) as { version?: unknown };
+    if (typeof pkg.version === "string" && pkg.version.trim()) {
+      cachedVersion = pkg.version.trim();
+      return cachedVersion;
+    }
+  } catch {
+    // fall through
+  }
+  cachedVersion = "0.0.0";
+  return cachedVersion;
+}
+
+export function bannerTitle(version = packageVersion()) {
+  return `socode @ ${version} presented by Tm-Ys`;
+}
 
 export function pickWelcome(rand: () => number = Math.random) {
   const n = WELCOME_LINES.length;
@@ -46,17 +73,25 @@ export function formatBanner(params: {
   welcome?: string;
   width?: number;
   color?: boolean;
+  remoteHost?: string;
+  remoteHome?: string;
 }) {
   const color = params.color ?? false;
-  const width = Math.max(44, Math.min(72, params.width ?? 60));
+  const version = packageVersion();
+  const titleText = bannerTitle(version);
+  const width = Math.max(lineWidth(titleText) + 8, 44, Math.min(72, params.width ?? 60));
   const inner = width - 4;
   const dim = color ? DIM : "";
   const reset = color ? RESET : "";
   const welcome = params.welcome ?? pickWelcome();
   const session = (params.title ?? "").trim() || "新会话";
-  const place = displayWorkarea(params.workspace);
+  const place = params.remoteHost
+    ? `ssh@${params.remoteHost}  ${displayWorkarea(params.workspace, params.remoteHome)}`
+    : displayWorkarea(params.workspace, params.remoteHome);
   const mode = `${paintMode(params.mode, modeLabel(params.mode), color)} · ${session}`;
-  const wordmark = color ? `${BOLD}${CYAN}socode${RESET}` : "socode";
+  const wordmark = color
+    ? `${BOLD}${CYAN}socode${RESET}${DIM} @ ${version} presented by Tm-Ys${RESET}`
+    : titleText;
 
   const rows: string[] = ["", ...wrapLine(welcome, inner).map((line) => paintWelcome(line, color)), "", place, mode];
   if ((params.mcpCount ?? 0) > 0) {

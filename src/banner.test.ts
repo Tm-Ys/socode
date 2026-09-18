@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { formatBanner, pickWelcome, WELCOME_LINES } from "./banner.js";
+import { bannerTitle, formatBanner, packageVersion, pickWelcome, WELCOME_LINES } from "./banner.js";
 
 describe("welcome lines", () => {
   it("explains a command and always picks one of them", () => {
@@ -26,7 +26,8 @@ describe("formatBanner", () => {
       width: 56,
       color: false,
     });
-    assert.match(text, /╭─ socode/);
+    assert.match(text, /╭─ socode @ /);
+    assert.match(text, /presented by Tm-Ys/);
     assert.match(text, /你知道吗？/);
     assert.match(text, /Ask · 新会话/);
     assert.match(text, /\/ 看命令/);
@@ -61,6 +62,25 @@ describe("formatBanner", () => {
     });
     assert.match(text, /MCP 3 个工具/);
     assert.match(text, /Plan · 新会话/);
+  });
+
+  it("puts version and presenter in the box title", () => {
+    assert.match(bannerTitle("0.1.2"), /^socode @ 0\.1\.2 presented by Tm-Ys$/);
+    assert.match(packageVersion(), /^\d+\.\d+\.\d+/);
+  });
+
+  it("shows ssh host in the workspace line", () => {
+    const text = formatBanner({
+      workspace: "/root/example",
+      mode: "ask",
+      welcome: "hi",
+      remoteHost: "106.53.55.161",
+      remoteHome: "/root",
+      width: 56,
+      color: false,
+    });
+    assert.match(text, /ssh@106\.53\.55\.161/);
+    assert.match(text, /~\/example/);
   });
 });
 

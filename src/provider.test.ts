@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
   applyProviderDraft,
+  dumpProviderStore,
   emptyProvider,
   findProvider,
   loadProvider,
@@ -188,6 +189,95 @@ describe("user-level provider store", () => {
     } finally {
       if (prevHome === undefined) delete process.env.SOCODE_HOME;
       else process.env.SOCODE_HOME = prevHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("lets SOCODE_PROVIDER_STORE override the file worker reads", () => {
+    const home = mkdtempSync(join(tmpdir(), "socode-prov-"));
+    const prevHome = process.env.SOCODE_HOME;
+    const prevStore = process.env.SOCODE_PROVIDER_STORE;
+    process.env.SOCODE_HOME = home;
+    delete process.env.SOCODE_PROVIDER_STORE;
+    try {
+      saveProvider({
+        name: "home",
+        url: "https://home.example.test/v1",
+        api: "sk-home",
+        model: "demo",
+        contextWindow: 128000,
+        maxOutput: 8192,
+        thinkingEffort: "medium",
+      });
+      assert.equal(providerStorePath(), join(home, "providers.json"));
+      const dumped = dumpProviderStore(home);
+      assert.equal(dumped?.active, "home");
+      assert.equal(dumped?.providers.length, 1);
+      assert.equal(dumped?.providers[0]?.api, "sk-home");
+      const sessionPath = join(home, "session-providers.json");
+      writeFileSync(
+        sessionPath,
+        `${JSON.stringify({
+          active: "sess",
+          providers: [
+            {
+              name: "sess",
+              url: "https://sess.example.test/v1",
+              api: "sk-session",
+              model: "sess-model",
+              contextWindow: 128000,
+              maxOutput: 8192,
+              thinkingEffort: "low",
+            },
+          ],
+        })}\n`,
+      );
+      process.env.SOCODE_PROVIDER_STORE = sessionPath;
+      assert.equal(providerStorePath(), sessionPath);
+      const loaded = loadProvider();
+      assert.equal(loaded.name, "sess");
+      assert.equal(loaded.api, "sk-session");
+      const stillHome = dumpProviderStore(home);
+      assert.equal(stillHome?.providers.length, 1);
+      assert.equal(stillHome?.providers[0]?.api, "sk-home");
+    } finally {
+      if (prevHome === undefined) delete process.env.SOCODE_HOME;
+      else process.env.SOCODE_HOME = prevHome;
+      if (prevStore === undefined) delete process.env.SOCODE_PROVIDER_STORE;
+      else process.env.SOCODE_PROVIDER_STORE = prevStore;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("does not import cwd providers.json into a redirected SOCODE_HOME", () => {
+    const home = mkdtempSync(join(tmpdir(), "socode-prov-"));
+    const prevHome = process.env.SOCODE_HOME;
+    const prevStore = process.env.SOCODE_PROVIDER_STORE;
+    process.env.SOCODE_HOME = home;
+    delete process.env.SOCODE_PROVIDER_STORE;
+    try {
+      saveProvider({
+        name: "isolated",
+        url: "https://isolated.example.test/v1",
+        api: "sk-isolated",
+        model: "demo",
+        contextWindow: 128000,
+        maxOutput: 8192,
+        thinkingEffort: "none",
+      });
+      const store = JSON.parse(readFileSync(join(home, "providers.json"), "utf8")) as {
+        active: string;
+        providers: { name: string; api: string }[];
+      };
+      assert.equal(store.active, "isolated");
+      assert.equal(store.providers.length, 1);
+      assert.equal(store.providers[0]?.api, "sk-isolated");
+      assert.equal(dumpProviderStore()?.providers.length, 1);
+    } finally {
+      if (prevHome === undefined) delete process.env.SOCODE_HOME;
+      else process.env.SOCODE_HOME = prevHome;
+      if (prevStore === undefined) delete process.env.SOCODE_PROVIDER_STORE;
+      else process.env.SOCODE_PROVIDER_STORE = prevStore;
       rmSync(home, { recursive: true, force: true });
     }
   });

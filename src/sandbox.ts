@@ -17,8 +17,9 @@ const DENY_WRITE_DIRS = [
   "/dev",
   "/proc",
   "/sys",
-  "/root",
 ];
+
+const EXTRA_SECRET_HOMES = ["/root"];
 
 const SECRET_DIR_NAMES = [".ssh", ".gnupg", ".aws", ".azure", ".kube", ".config/gcloud", ".socode"];
 const SECRET_FILE_NAMES = [".netrc", ".npmrc", ".pypirc", ".git-credentials"];
@@ -212,10 +213,7 @@ export function denyReason(path: string): string | null {
       return `拒绝访问受保护路径: ${dir}`;
     }
   }
-  for (const file of [
-    ...SECRET_FILE_NAMES.map((name) => joinHome(home, name)),
-    ...SECRET_REL_FILES.map((name) => joinHome(home, name)),
-  ]) {
+  for (const file of secretUserFiles(home)) {
     if (file && target === file) return `拒绝访问受保护文件: ${file}`;
   }
   return null;
@@ -762,10 +760,7 @@ function seatbeltProfile(sandbox?: BashSandbox) {
   const home = homedir();
   const secretDirs = secretUserDirs(home);
   const writeDirs = [...DENY_WRITE_DIRS, ...secretDirs].filter(Boolean);
-  const secretFiles = [
-    ...SECRET_FILE_NAMES.map((name) => joinHome(home, name)),
-    ...SECRET_REL_FILES.map((name) => joinHome(home, name)),
-  ].filter(Boolean);
+  const secretFiles = secretUserFiles(home);
   const denyWrite = writeDirs.map((dir) => `(subpath ${sb(dir)})`).join(" ");
   const denySecretDirs = secretDirs
     .filter(Boolean)
@@ -788,9 +783,20 @@ function joinHome(home: string, name: string) {
   return home ? `${home}${sep}${name}` : "";
 }
 
+function secretHomes(home: string) {
+  return [...new Set([home, ...EXTRA_SECRET_HOMES].filter(Boolean))];
+}
+
 function secretUserDirs(home: string) {
-  const dirs = SECRET_DIR_NAMES.map((name) => joinHome(home, name)).filter(Boolean);
+  const dirs = secretHomes(home).flatMap((root) => SECRET_DIR_NAMES.map((name) => joinHome(root, name))).filter(Boolean);
   const override = process.env.SOCODE_HOME?.trim();
   if (override) dirs.push(resolve(override));
   return dirs;
+}
+
+function secretUserFiles(home: string) {
+  return secretHomes(home).flatMap((root) => [
+    ...SECRET_FILE_NAMES.map((name) => joinHome(root, name)),
+    ...SECRET_REL_FILES.map((name) => joinHome(root, name)),
+  ]).filter(Boolean);
 }

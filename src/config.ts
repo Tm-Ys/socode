@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { parseLongBudgetPolicy, resolveLongBudget, type LongBudgetPolicyName } from "./long-budget.js";
 import { isAgentMode, parseMode, type AgentMode } from "./mode.js";
 import { importProviderFromValues, providerStorePath, userSocodeDir } from "./provider.js";
+import type { ModelPrice } from "./usage.js";
 
 export type SocodeConfig = {
   mode: AgentMode;
@@ -14,6 +15,8 @@ export type SocodeConfig = {
   judgeModel: string;
   longBudgetPolicy: LongBudgetPolicyName;
   longBudgetDynamic: string;
+  /** USD per 1M tokens, keyed by model id. Missing price → show tokens only. */
+  modelPricing: Record<string, ModelPrice>;
 };
 
 const DEFAULTS: SocodeConfig = {
@@ -25,6 +28,7 @@ const DEFAULTS: SocodeConfig = {
   judgeModel: "",
   longBudgetPolicy: "dynamic",
   longBudgetDynamic: "50-75",
+  modelPricing: {},
 };
 
 let cached: SocodeConfig | undefined;
@@ -131,7 +135,24 @@ function normalizeConfig(input: Partial<SocodeConfig>): SocodeConfig {
     judgeModel: typeof input.judgeModel === "string" ? input.judgeModel.trim() : "",
     longBudgetPolicy: parseLongBudgetPolicy(input.longBudgetPolicy),
     longBudgetDynamic: (input.longBudgetDynamic ?? DEFAULTS.longBudgetDynamic).trim() || DEFAULTS.longBudgetDynamic,
+    modelPricing: normalizePricing(input.modelPricing),
   };
+}
+
+function normalizePricing(input: Record<string, ModelPrice> | undefined): Record<string, ModelPrice> {
+  if (!input || typeof input !== "object") return {};
+  const out: Record<string, ModelPrice> = {};
+  for (const [model, price] of Object.entries(input)) {
+    if (!model.trim() || !price || typeof price !== "object") continue;
+    if (!(price.input > 0) || !(price.output > 0)) continue;
+    out[model] = {
+      input: price.input,
+      output: price.output,
+      ...(price.cacheRead !== undefined && price.cacheRead >= 0 ? { cacheRead: price.cacheRead } : {}),
+      ...(price.cacheWrite !== undefined && price.cacheWrite >= 0 ? { cacheWrite: price.cacheWrite } : {}),
+    };
+  }
+  return out;
 }
 
 function floorOr(value: number | undefined, fallback: number) {

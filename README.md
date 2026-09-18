@@ -33,7 +33,7 @@ Long 的审批器拿一份干净上下文、只输出 JSON；解析失败、超�
 
 **终端自己就是前端。** 没有 React / Ink：流式 Markdown 差量重绘（标题、代码块、列表、粗体），思考块暗色斜体和正文分开，工具行和失败红色，Ask 审批，问卷（`question`），子代理默认藏过程、右下角 HUD。说明见 [`docs/FRONTEND.md`](docs/FRONTEND.md)。
 
-**上下文看得见、会话回得去。** `/context` 用色块标 system / tools / 对话 / 预留输出 / 空闲。一轮工具超过 6 次、或模型输出超过约 2400 字时，结束后打一条灰色 `recap`；**这一轮入库和后续上下文只留 recap**，需要细节请自行 grep。进入工作区时自动创建 `.socode/sessions/`；对话 JSON 只落在本目录，`/session` 看不到别的仓库。`socode` 默认开新会话，空对话不落盘。生成中 Esc 中止当前轮：用户问题留下，半截回复不入库。连续三次同调用或同失败会停，避免空转。`/` 后有幽灵补全和 Tab。
+**上下文看得见、会话回得去。** `/context` 用色块标 system / tools / 对话 / 预留输出 / 空闲。一轮工具超过 6 次、或模型输出超过约 2400 字时，结束后打一条灰色 `recap`；**这一轮入库和后续上下文只留 recap**，需要细节请自行 grep。每轮结束再打一行 `tokens`：入 / 缓存 / 出；没配单价就写 `未标价`。`/usage` 看本会话累计。进入工作区时自动创建 `.socode/sessions/`；对话 JSON 只落在本目录，`/session` 看不到别的仓库。`socode` 默认开新会话，空对话不落盘。生成中 Esc 中止当前轮：用户问题留下，半截回复不入库。连续三次同调用或同失败会停，避免空转。`/` 后有幽灵补全和 Tab。
 
 **小到能审。** 大约 50 个 TypeScript 文件、运行时没有数据库依赖。权限、沙箱、Long 审批、预算、rubric、MCP、Skills、压缩、验证、子代理、计划、问卷、recap 都有测试（`npm test`）。策略写在代码里，不藏在框架配置后面。
 
@@ -64,11 +64,21 @@ npx socode
 # 开发时也可以 npm start
 ```
 
-把命令装到 PATH：`npm link`（先 `npm run build`）或 `npm install -g ./socode-0.1.2.tgz`。
+把命令装到 PATH：`npm link`（先 `npm run build`）或 `npm install -g ./socode-0.1.3.tgz`。
 
 没有保存过 Provider 时，交互式启动会进入向导，写入用户级 `~/.socode/providers.json`（所有工作区、所有对话共用）。也可以用 `--url` / `--api` / `--model` / `--name` 只覆盖本次进程。
 
-Harness 默认值在 `~/.socode/config.json`：`mode`、`systemPrompt`、`maxContextMessages`、`maxAgentSteps`、`maxAgentTokens`、`subagentSteps`、`judgeModel`、`longBudgetPolicy`（`dynamic` / `fixed` / `unlimited`）、`longBudgetDynamic`（`50-75` 或 `25-50`）。命令行 `--mode` / `--steps` / `--max` / `--budget` / `--system` 覆盖本次进程。`/mode` 只改当前会话，不写回 config。项目说明放 `AGENTS.md`。若目录里还有旧的 `.env`，第一次启动会一次性迁进 `~/.socode/`，之后不再读取。
+Harness 默认值在 `~/.socode/config.json`：`mode`、`systemPrompt`、`maxContextMessages`、`maxAgentSteps`、`maxAgentTokens`、`subagentSteps`、`judgeModel`、`longBudgetPolicy`（`dynamic` / `fixed` / `unlimited`）、`longBudgetDynamic`（`50-75` 或 `25-50`）、`modelPricing`（按模型 id，美元 / 百万 token：`input` / `output`，可选 `cacheRead` / `cacheWrite`）。没配单价时只显示 token，不编造金额。命令行 `--mode` / `--steps` / `--max` / `--budget` / `--system` 覆盖本次进程。`/mode` 只改当前会话，不写回 config。项目说明放 `AGENTS.md`。若目录里还有旧的 `.env`，第一次启动会一次性迁进 `~/.socode/`，之后不再读取。
+
+`modelPricing` 示例：
+
+```json
+{
+  "modelPricing": {
+    "deepseek-chat": { "input": 0.27, "output": 1.1, "cacheRead": 0.07 }
+  }
+}
+```
 
 `THINKING_EFFORT` 可选：`none` / `minimal` / `low` / `medium` / `high` / `xhigh`，默认 `medium`。运行中请用 `/effort` 调整，不要走 `/provider edit`。审批器也会选用 `providers.json` 里名为 `judge` / `fast` / `cheap` / `mini` 的项。
 
@@ -114,6 +124,7 @@ Long **不会**在沙箱起不来时 fallback 裸跑；密钥、sudo 仍本地�
 - `/new` 开新会话（空的不入库）
 - `/session` 或 `/chat` 恢复历史对话
 - `/context` 查看上下文占用
+- `/usage` 查看上一轮和本会话 token（含缓存）；配了 `modelPricing` 才估美元
 - `/compress` 用当前模型压缩较早对话，保留最近两轮（并钉住 harness mode / TaskState / plan）
 - `/mode` 查看或切换：`full` / `ask` / `plan` / `long`（`长程`）
 - `/task` 查看长程状态；`/task goal …`、`/task milestone …`、`/task note …`、`/task clear`
@@ -121,7 +132,7 @@ Long **不会**在沙箱起不来时 fallback 裸跑；密钥、sudo 仍本地�
 - `/skills` 查看已注入的 `AGENTS.md` / `CLAUDE.md` 和发现的 Skills
 - `/seesubagent` 列出子代理；`/seesubagent [序号]` 查看某个子代理的过程（默认隐藏，只在右下角显示在跑）
 - `/seeplan` 查看当前任务计划勾选进度
-- `/undo` 撤回最近一轮 socode 用 `write`/`edit`/`delete` 碰过的文件（进程内快照，不管 bash，不是对话 rewind；Esc 后已落地的仍可撤）
+- `/undo` 撤回最近一轮 socode 用 `write`/`edit`/`delete` 碰过的文件（快照在工作区 `.socode/undo/`，关进程后还能撤；不管 bash，不是对话 rewind；Esc 后已落地的仍可撤）
 - `/doctor` 检查 Node、密钥是否已配、sandbox-exec/bwrap、用户目录和工作区会话目录能不能写。启动也可用 `npm start -- --doctor`
 - `/setplan <说明>` 本轮强制按说明调用 `plan` 拆目标，并激活 grill-me 追问
 - `/setworkarea` 空对话时弹出系统文件夹选择器；也可 `/setworkarea /绝对路径`。输入行空着时灰色显示 `on 路径`
@@ -187,7 +198,8 @@ Skills 来自各目录下的 `<name>/SKILL.md`（YAML frontmatter 的 `name` / `
 | `src/agent.ts` | 工具循环、doom loop、Long 预算；上下文顶满时先压缩再继续 |
 | `src/permissions.ts` | 按模式授权 |
 | `src/ask-diff.ts` | Ask 审批前的 unified diff |
-| `src/undo.ts` | 本轮写前快照与 `/undo` |
+| `src/undo.ts` | 本轮写前快照与 `/undo`（落在 `.socode/undo/`） |
+| `src/usage.ts` | 解析 API usage、每轮 token 行、按标价估美元 |
 | `src/doctor.ts` | `/doctor` 与 `--doctor` |
 | `src/sandbox.ts` | 路径 denylist、bash 解析/分类、OS 沙箱 |
 | `src/long-approve.ts` | Long 副作用的独立 JSON 审批器 |
@@ -218,3 +230,8 @@ Skills 来自各目录下的 `<name>/SKILL.md`（YAML frontmatter 的 `name` / `
 - 子代理再开子代理；不给 worker 做 git worktree，共享工作区，靠串行避免同时改同一文件
 - 云端 bash / 把密钥上传到 socode 云。远程开发是 SSH 工作区，见 [`docs/REMOTE.md`](docs/REMOTE.md)
 - 把 `/undo` 做成对话 rewind
+- 没配 `modelPricing` 时编造美元价格
+
+## 许可
+
+[MIT](./LICENSE)。

@@ -59,5 +59,6 @@ describe("workarea display", () => {
     const home = expandWorkareaPath("~");
     assert.ok(home.length > 1);
     assert.equal(displayWorkarea(home), "~");
+    assert.equal(workareaPlaceholder("/root/example", { host: "1.2.3.4", home: "/root" }), "on ssh@1.2.3.4 workspace ~/example");
   });
 });
