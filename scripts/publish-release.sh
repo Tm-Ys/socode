@@ -45,8 +45,8 @@ NAME="$(node -p "require('./package.json').name")"
 TAG="v${VERSION}"
 REPO="Tm-Ys/socode"
 
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "工作区不干净，先提交再发布。" >&2
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "工作区有未提交的已跟踪改动，先提交再发布。" >&2
   git status
   exit 1
 fi
